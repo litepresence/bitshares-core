@@ -41,7 +41,12 @@ def main():
 
     sys.stderr.write("got {n} distinct keys\n".format(n=len(keys)))
 
-    keys = [(str(i) + ":" + k).encode("UTF-8") for k in sorted(keys) for i in range(opts.num)]
+    keys = [
+        f"{str(i)}:{k}".encode("UTF-8")
+        for k in sorted(keys)
+        for i in range(opts.num)
+    ]
+
 
     data = bytearray((opts.size + 7) >> 3)
 
@@ -52,13 +57,13 @@ def main():
 
     popcount = [bin(i).count("1") for i in range(256)]
     w = sum(popcount[x] for x in data)
-    sys.stderr.write("""w={w}   o={o:.3%}   p={p:.3%}
+        sys.stderr.write("""w={w}   o={o:.3%}   p={p:.3%}
 w: Hamming weight    o: Occupancy    p: False positive probability
 """.format(
-w=w,
-o=float(w) / float(opts.size),
-p=(float(w) / float(opts.size))**opts.num,
-))
+    w=w,
+    o=float(w) / float(opts.size),
+    p=(float(w) / float(opts.size))**opts.num,
+    ))
 
     if opts.output == "-":
         sys.stdout.write(data)

@@ -40,7 +40,7 @@ def main():
             taken_names.add(name)
 
     pass_num = 0
-    while len(unsettled_names) > 0:
+    while unsettled_names:
         num_resolved = 0
         pass_num += 1
         sys.stderr.write("attempting to resolve {n} names\n".format(n=len(unsettled_names)))
@@ -68,7 +68,7 @@ def main():
     for witness in genesis["initial_witness_candidates"]:
         owner_name = witness["owner_name"]
         witness["owner_name"] = name_map.get(owner_name, owner_name)
-    for committee in genesis["initial_committee_candidates"]:
+    for _ in genesis["initial_committee_candidates"]:
         owner_name = member["owner_name"]
         member["owner_name"] = name_map.get(owner_name, owner_name)
     for worker in genesis["initial_worker_candidates"]:

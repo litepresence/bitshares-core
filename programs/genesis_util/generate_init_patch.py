@@ -30,23 +30,50 @@ def main():
     committee = []
 
     for i in range(opts.num):
-        owner_str = subprocess.check_output(["programs/genesis_util/get_dev_key", opts.secret, "wit-owner-"+str(i)]).decode("utf-8")
-        active_str = subprocess.check_output(["programs/genesis_util/get_dev_key", opts.secret, "wit-active-"+str(i)]).decode("utf-8")
-        prod_str = subprocess.check_output(["programs/genesis_util/get_dev_key", opts.secret, "wit-block-signing-"+str(i)]).decode("utf-8")
+        owner_str = subprocess.check_output(
+            [
+                "programs/genesis_util/get_dev_key",
+                opts.secret,
+                f"wit-owner-{str(i)}",
+            ]
+        ).decode("utf-8")
+
+        active_str = subprocess.check_output(
+            [
+                "programs/genesis_util/get_dev_key",
+                opts.secret,
+                f"wit-active-{str(i)}",
+            ]
+        ).decode("utf-8")
+
+        prod_str = subprocess.check_output(
+            [
+                "programs/genesis_util/get_dev_key",
+                opts.secret,
+                f"wit-block-signing-{str(i)}",
+            ]
+        ).decode("utf-8")
+
         owner = json.loads(owner_str)
         active = json.loads(active_str)
         prod = json.loads(prod_str)
-        wit_accounts.append({
-            "name" : "init"+str(i),
-            "owner_key" : owner[0]["public_key"],
-            "active_key" : active[0]["public_key"],
-            "is_lifetime_member" : True,
-            })
-        wit_wits.append({
-            "owner_name" : "init"+str(i),
-            "block_signing_key" : prod[0]["public_key"],
-            })
-        committee.append({"owner_name" : "init"+str(i)})
+        wit_accounts.append(
+            {
+                "name": f"init{str(i)}",
+                "owner_key": owner[0]["public_key"],
+                "active_key": active[0]["public_key"],
+                "is_lifetime_member": True,
+            }
+        )
+
+        wit_wits.append(
+            {
+                "owner_name": f"init{str(i)}",
+                "block_signing_key": prod[0]["public_key"],
+            }
+        )
+
+        committee.append({"owner_name": f"init{str(i)}"})
     result = {
        "append" : {
        "initial_accounts" : wit_accounts },
@@ -64,7 +91,7 @@ def main():
     else:
         with open(opts.output, "w") as f:
             dump_json( result, f, opts.pretty )
-  
+
     return
 
 if __name__ == "__main__":

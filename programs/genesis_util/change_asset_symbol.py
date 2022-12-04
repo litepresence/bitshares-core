@@ -36,7 +36,7 @@ def main():
         if balance["asset_symbol"] == frum:
             balance["asset_symbol"] = opts.to
 
-    for vb in genesis["initial_vesting_balances"]:
+    for _ in genesis["initial_vesting_balances"]:
         if balance["asset_symbol"] == frum:
             balance["asset_symbol"] = opts.to
 

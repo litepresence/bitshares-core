@@ -41,7 +41,7 @@ for child in root:
     if (child.tag == "compound") and (child.attrib.get("kind") in ["struct", "class"]):
         process_class_node(child)
 
-s_static_names = set(["space_id", "type_id"])
+s_static_names = {"space_id", "type_id"}
 
 for k, v in name2members_doxygen.items():
     name2members_doxygen[k] = [x for x in v if x not in s_static_names]
@@ -88,7 +88,7 @@ for root, dirs, files in os.walk("."):
                     members = bubble_list(m.group(2))
                     name2members_re[cname] = members
                     if cname.endswith("_object"):
-                       print("FC_REFLECT on {} should be FC_REFLECT_DERIVED".format(cname))
+                        print(f"FC_REFLECT on {cname} should be FC_REFLECT_DERIVED")
                 for m in re_reflect_derived.finditer(content):
                     cname = m.group(1)
                     members = bubble_list(m.group(3))

@@ -32,8 +32,18 @@ def main():
     initial_balances = []
     for e in accounts:
         name = e["name"]
-        owner_str = subprocess.check_output(["programs/genesis_util/get_dev_key", opts.secret, "owner-"+name]).decode("utf-8")
-        active_str = subprocess.check_output(["programs/genesis_util/get_dev_key", opts.secret, "active-"+name]).decode("utf-8")
+        owner_str = subprocess.check_output(
+            ["programs/genesis_util/get_dev_key", opts.secret, f"owner-{name}"]
+        ).decode("utf-8")
+
+        active_str = subprocess.check_output(
+            [
+                "programs/genesis_util/get_dev_key",
+                opts.secret,
+                f"active-{name}",
+            ]
+        ).decode("utf-8")
+
         owner = json.loads(owner_str)
         active = json.loads(active_str)
         initial_accounts.append({
@@ -50,7 +60,7 @@ def main():
        "append" : {
        "initial_accounts" : initial_accounts },
     }
-    if len(initial_balances) > 0:
+    if initial_balances:
         result["append"]["initial_balances"] = initial_balances
 
     if opts.output == "-":

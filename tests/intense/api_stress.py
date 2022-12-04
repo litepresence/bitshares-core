@@ -29,7 +29,16 @@ def mainloop():
 
     gpo_get = {"id":1, "method":"call", "params":[0, "get_objects", ["2.0.0"]]}
     dgpo_sub = {"id":2, "method":"call", "params":[0, "subscribe_to_objects", [111, ["2.1.0"]]]}
-    acct_sub = {"id":3, "method":"call", "params":[0, "get_full_accounts", [222, ["1.2."+str(my_account_id)], True]]}
+    acct_sub = {
+        "id": 3,
+        "method": "call",
+        "params": [
+            0,
+            "get_full_accounts",
+            [222, [f"1.2.{str(my_account_id)}"], True],
+        ],
+    }
+
     yield from ws.send(json.dumps(gpo_get))
     yield from ws.send(json.dumps(dgpo_sub))
     yield from ws.send(json.dumps(acct_sub))
@@ -40,8 +49,16 @@ def mainloop():
         nonlocal next_call_id
         asyncio.get_event_loop().call_later(rand.uniform(0, 3), peek_random_account)
         peek_account_id = rand.randrange(0, 90000)
-        acct_peek = {"id" : next_call_id, "method" : "call", "params":
-           [0, "get_objects", [["1.2."+str(peek_account_id)], True]]}
+        acct_peek = {
+            "id": next_call_id,
+            "method": "call",
+            "params": [
+                0,
+                "get_objects",
+                [[f"1.2.{str(peek_account_id)}"], True],
+            ],
+        }
+
         next_call_id += 1
         yield from ws.send(json.dumps(acct_peek))
         return

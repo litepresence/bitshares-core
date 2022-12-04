@@ -24,9 +24,7 @@ def main():
         with open(opts.input, "r") as f:
             genesis = json.load(f)
 
-    asset_owners = set()
-    for asset in genesis["initial_assets"]:
-        asset_owners.add(asset["issuer_name"])
+    asset_owners = {asset["issuer_name"] for asset in genesis["initial_assets"]}
     for account in genesis["initial_accounts"]:
         if account["name"] in asset_owners:
             account["is_prefixed"] = False

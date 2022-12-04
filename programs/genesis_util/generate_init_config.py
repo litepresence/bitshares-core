@@ -32,9 +32,9 @@ def main():
 
     for i in range(opts.num):
         if opts.mname != "":
-           istr = "wit-block-signing-"+opts.mname+"-"+str(i)
+            istr = f"wit-block-signing-{opts.mname}-{str(i)}"
         else:
-           istr = "wit-block-signing-"+str(i)
+            istr = f"wit-block-signing-{str(i)}"
         prod_str = subprocess.check_output(["programs/genesis_util/get_dev_key", opts.secret, istr]).decode("utf-8")
         prod = json.loads(prod_str)
         out_wits.append('witness-id = "1.6.'+str(opts.witness+i)+'"\n')

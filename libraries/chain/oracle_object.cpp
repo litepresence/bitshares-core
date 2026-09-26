@@ -37,9 +37,9 @@ constexpr uint64_t PPM_DENOM = 1000000;
 /**
  * Exactly: does |candidate / reference - 1| exceed max_deviation_ppm?
  *
- * Both prices are ratios, so this is done by cross-multiplication in 128-bit integers rather
- * than by dividing. Nothing here may round: two nodes that rounded differently would compute
- * different aggregates from identical inputs and fork the chain.
+ * Both values are ratios, so this is done by cross-multiplication in 128-bit integers
+ * rather than by dividing. Nothing here may round: two nodes that rounded differently
+ * would compute different aggregates from identical inputs and fork the chain.
  *
  *   candidate/reference = (cand.base * ref.quote) / (cand.quote * ref.base)
  *
@@ -50,12 +50,13 @@ constexpr uint64_t PPM_DENOM = 1000000;
  * Amounts are bounded by GRAPHENE_MAX_SHARE_SUPPLY (1e15), so the widest product is
  * (1e15 * 1e15) * 2e6 = 2e36, comfortably inside uint128's ~3.4e38.
  */
-bool deviates_too_far( const price& candidate, const price& reference, uint32_t max_deviation_ppm )
+bool deviates_too_far( const oracle_value& candidate, const oracle_value& reference,
+                       uint32_t max_deviation_ppm )
 {
-   const fc::uint128_t cross_cand = fc::uint128_t( candidate.base.amount.value )
-                                  * reference.quote.amount.value;
-   const fc::uint128_t cross_ref  = fc::uint128_t( candidate.quote.amount.value )
-                                  * reference.base.amount.value;
+   const fc::uint128_t cross_cand = fc::uint128_t( candidate.base_amount.value )
+                                  * reference.quote_amount.value;
+   const fc::uint128_t cross_ref  = fc::uint128_t( candidate.quote_amount.value )
+                                  * reference.base_amount.value;
 
    const fc::uint128_t mid  = cross_cand * PPM_DENOM;
    const fc::uint128_t low  = cross_ref  * ( PPM_DENOM - max_deviation_ppm );
@@ -72,10 +73,10 @@ bool deviates_too_far( const price& candidate, const price& reference, uint32_t 
 /// asset switching from legacy feeds to an oracle with the same producers must not see its
 /// price jump because the two disagreed about which element of an even-sized set is "the"
 /// median.
-price weighted_median( vector<pair<price, uint32_t>>& entries )
+oracle_value weighted_median( vector<pair<oracle_value, uint32_t>>& entries )
 {
    std::sort( entries.begin(), entries.end(),
-              []( const pair<price, uint32_t>& a, const pair<price, uint32_t>& b )
+              []( const pair<oracle_value, uint32_t>& a, const pair<oracle_value, uint32_t>& b )
               { return a.first < b.first; } );
 
    uint64_t total = 0;
@@ -95,7 +96,7 @@ price weighted_median( vector<pair<price, uint32_t>>& entries )
 /// Upper median for even-sized sets, matching both the weighted median above and the legacy
 /// feed code. Deliberately not the mean of the two middle values: averaging means dividing,
 /// and a rounded result is not something every node is guaranteed to agree on.
-price upper_median( vector<price>& values )
+oracle_value upper_median( vector<oracle_value>& values )
 {
    std::sort( values.begin(), values.end() );
    return values[ values.size() / 2 ];
@@ -105,7 +106,12 @@ price upper_median( vector<price>& values )
 
 void oracle_object::update_current_value( time_point_sec now )
 {
-   vector<pair<price, uint32_t>> live;
+   struct live_submission
+   {
+      uint32_t weight;
+      vector<oracle_value> values;
+   };
+   vector<live_submission> live;
    live.reserve( submissions.size() );
    for( const auto& s : submissions )
    {
@@ -116,7 +122,12 @@ void oracle_object::update_current_value( time_point_sec now )
       const auto itr = options.producers.find( s.first );
       if( itr == options.producers.end() )
          continue;
-      live.emplace_back( s.second.second, uint32_t( itr->second ) );
+      // A submission published under an older series list cannot be read against the
+      // current one. Series are immutable after creation, so in practice every stored
+      // submission already has exactly series.size() values; read defensively anyway.
+      if( s.second.second.size() != series.size() )
+         continue;
+      live.push_back( live_submission{ uint32_t( itr->second.weight ), s.second.second } );
    }
 
    current_value_time = now;
@@ -144,20 +155,38 @@ void oracle_object::update_current_value( time_point_sec now )
       //
       // The round's own median is the robust anchor: it is the majority's number by
       // construction, so it is the outlier that gets trimmed rather than the consensus.
-      vector<pair<price, uint32_t>> for_reference = live;
-      const price reference = weighted_median( for_reference );
+      //
+      // With several series the exclusion is per PRODUCER, not per value. Excluding one
+      // series of a producer but not the others would take the bid median and the ask
+      // median over different producer sets, and the aggregated bid could then exceed the
+      // aggregated ask even though every producer's own bid was below its ask. So: a
+      // producer is an outlier when ANY of its values deviates from that series' median,
+      // and an outlier counts toward NO series.
+      vector<oracle_value> references;
+      references.reserve( series.size() );
+      for( size_t s = 0; s < series.size(); ++s )
+      {
+         vector<pair<oracle_value, uint32_t>> column;
+         column.reserve( live.size() );
+         for( const auto& e : live )
+            column.emplace_back( e.values[s], e.weight );
+         references.push_back( weighted_median( column ) );
+      }
 
-      vector<pair<price, uint32_t>> kept;
+      vector<live_submission> kept;
       kept.reserve( live.size() );
       uint64_t kept_weight = 0;
       uint64_t live_weight = 0;
       for( const auto& e : live )
       {
-         live_weight += e.second;
-         if( !deviates_too_far( e.first, reference, options.max_deviation_ppm ) )
+         live_weight += e.weight;
+         bool outlier = false;
+         for( size_t s = 0; s < series.size() && !outlier; ++s )
+            outlier = deviates_too_far( e.values[s], references[s], options.max_deviation_ppm );
+         if( !outlier )
          {
             kept.push_back( e );
-            kept_weight += e.second;
+            kept_weight += e.weight;
          }
       }
 
@@ -169,7 +198,20 @@ void oracle_object::update_current_value( time_point_sec now )
          live = std::move( kept );
    }
 
-   const price latest = weighted_median( live );
+   // Aggregation runs per series over the same producer set. This is what keeps bid <= ask
+   // true after aggregation: if every producer's bid <= ask, then the weighted median of
+   // the bids <= the weighted median of the asks (for any threshold v, every producer
+   // whose ask is <= v also has a bid <= v, so the bid median is reached first).
+   vector<oracle_value> latest;
+   latest.reserve( series.size() );
+   for( size_t s = 0; s < series.size(); ++s )
+   {
+      vector<pair<oracle_value, uint32_t>> column;
+      column.reserve( live.size() );
+      for( const auto& e : live )
+         column.emplace_back( e.values[s], e.weight );
+      latest.push_back( weighted_median( column ) );
+   }
    current_value_producer_count = uint16_t( live.size() );
 
    // Sample into time buckets rather than appending every publish.
@@ -203,15 +245,25 @@ void oracle_object::update_current_value( time_point_sec now )
       return;
    }
 
-   vector<price> in_window;
-   in_window.reserve( history.size() );
-   for( const auto& h : history )
+   vector<oracle_value> in_window;
+   in_window.reserve( history.size() * series.size() );
+   // median_over_window inherits the bid <= ask property, because every history entry
+   // satisfies it: each entry's per-series medians were taken over one producer set.
+   vector<oracle_value> windowed;
+   windowed.reserve( series.size() );
+   for( size_t s = 0; s < series.size(); ++s )
    {
-      if( ( now - h.first ).to_seconds() <= int64_t( options.window_sec ) )
-         in_window.push_back( h.second );
+      in_window.clear();
+      for( const auto& h : history )
+      {
+         if( ( now - h.first ).to_seconds() <= int64_t( options.window_sec )
+             && h.second.size() == series.size() )
+            in_window.push_back( h.second[s] );
+      }
+      // Never empty: the entry just appended carries timestamp `now`.
+      windowed.push_back( upper_median( in_window ) );
    }
-   // Never empty: the entry just appended carries timestamp `now`.
-   current_value = upper_median( in_window );
+   current_value = windowed;
 }
 
 } } // graphene::chain
@@ -220,8 +272,9 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (owner)
                     (name)
                     (description)
-                    (base_asset)
-                    (quote_asset)
+                    (base)
+                    (quote)
+                    (series)
                     (options)
                     (submissions)
                     (history)

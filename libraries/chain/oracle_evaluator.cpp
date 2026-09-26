@@ -23,8 +23,10 @@
  */
 #include <graphene/chain/oracle_evaluator.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 
 #include <graphene/chain/asset_object.hpp>
+#include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
 
@@ -40,6 +42,24 @@ void check_producers_exist( const database& d, const oracle_options& options )
    for( const auto& p : options.producers )
       FC_ASSERT( nullptr != d.find( p.first ),
                  "Producer account ${a} does not exist", ("a", p.first) );
+}
+
+/**
+ * Whether @p account may create a reference asset right now. Creation starts committee-only
+ * and opens to everyone when the committee sets the chain parameter -- opening it later
+ * then needs no hardfork. Committee-only means the committee account itself (acting
+ * through a committee proposal) or an account holding a committee membership.
+ */
+bool may_create_reference_asset( const database& d, account_id_type account )
+{
+   const auto& params = d.get_global_properties().parameters;
+   if( params.extensions.value.allow_public_reference_asset_creation.valid()
+       && *params.extensions.value.allow_public_reference_asset_creation )
+      return true;
+   if( account == GRAPHENE_COMMITTEE_ACCOUNT )
+      return true;
+   const auto& idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   return idx.find( account ) != idx.end();
 }
 
 /**
@@ -62,6 +82,43 @@ void refresh_subscribers( database& d, const oracle_object& o )
 
 } // namespace
 
+void_result reference_asset_create_evaluator::do_evaluate(
+      const reference_asset_create_operation& op ) const
+{ try {
+   const database& d = db();
+
+   FC_ASSERT( HARDFORK_ORACLE_PASSED( d.head_block_time() ),
+              "Not allowed until the oracle hardfork" );
+
+   FC_ASSERT( nullptr != d.find( op.creator ),
+              "Creator account ${a} does not exist", ("a", op.creator) );
+
+   FC_ASSERT( may_create_reference_asset( d, op.creator ),
+              "Reference asset creation is committee-only until the committee opens it" );
+
+   // Symbols live in the reference assets' own namespace, but within it a duplicate is the
+   // way to get a consumer to reference the wrong value.
+   const auto& idx = d.get_index_type<reference_asset_index>().indices().get<by_reference_symbol>();
+   FC_ASSERT( idx.find( op.symbol ) == idx.end(),
+              "A reference asset named '${s}' already exists", ("s", op.symbol) );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+object_id_type reference_asset_create_evaluator::do_apply(
+      const reference_asset_create_operation& op ) const
+{ try {
+   const auto& new_ref = db().create<reference_asset_object>( [&op]( reference_asset_object& o ) {
+      o.creator     = op.creator;
+      o.symbol      = op.symbol;
+      o.precision   = op.precision;
+      o.description = op.description;
+      // No update operation exists, so symbol and precision are immutable by construction:
+      // what is stored here is final.
+   } );
+   return new_ref.id;
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
 void_result oracle_create_evaluator::do_evaluate( const oracle_create_operation& op ) const
 { try {
    const database& d = db();
@@ -69,8 +126,8 @@ void_result oracle_create_evaluator::do_evaluate( const oracle_create_operation&
    FC_ASSERT( HARDFORK_ORACLE_PASSED( d.head_block_time() ),
               "Not allowed until the oracle hardfork" );
 
-   op.base_asset(d);    // throws if the asset does not exist
-   op.quote_asset(d);
+   op.base(d);    // throws if the reference asset does not exist
+   op.quote(d);
    check_producers_exist( d, op.options );
 
    // Names are how humans address an oracle, so a duplicate is not a harmless collision --
@@ -88,8 +145,9 @@ object_id_type oracle_create_evaluator::do_apply( const oracle_create_operation&
       o.owner       = op.owner;
       o.name        = op.name;
       o.description = op.description;
-      o.base_asset  = op.base_asset;
-      o.quote_asset = op.quote_asset;
+      o.base        = op.base;
+      o.quote       = op.quote;
+      o.series      = op.series;
       o.options     = op.options;
       // current_value stays absent: a new oracle reports nothing until its producers have
       // published enough values to meet quorum.
@@ -123,6 +181,8 @@ void_result oracle_update_evaluator::do_apply( const oracle_update_operation& op
          o.description = *op.new_description;
       if( op.new_options.valid() )
          o.options = *op.new_options;
+      // base, quote, series and name have no fields in the update operation: what an
+      // oracle measures cannot change underneath its consumers.
    } );
 
    // Policy changes take effect immediately rather than at the next publish. Removing a
@@ -151,7 +211,9 @@ void_result oracle_delete_evaluator::do_evaluate( const oracle_delete_operation&
    FC_ASSERT( _oracle->owner == op.owner, "Only the oracle's owner may delete it" );
 
    // Deleting an oracle a smartcoin depends on would leave that asset with no price source,
-   // unable to margin call or force-settle. The issuer must unbind first.
+   // unable to margin call or force-settle. The issuer must unbind first. (Deleting a
+   // reference asset something references is refused the same way; see the
+   // asset_update_bitasset evaluator's mapping checks.)
    FC_ASSERT( _oracle->subscribers.empty(),
               "Oracle '${n}' is still the price source for ${c} asset(s); clear their "
               "price_oracle_id first", ("n", _oracle->name)("c", _oracle->subscribers.size()) );
@@ -178,12 +240,32 @@ void_result oracle_publish_evaluator::do_evaluate( const oracle_publish_operatio
               "Account ${a} is not a producer of oracle '${n}'",
               ("a", op.producer)("n", _oracle->name) );
 
-   // The orientation is fixed by the oracle, not chosen per submission: a consumer must never
-   // have to work out whether a given number was inverted.
-   FC_ASSERT( op.value.base.asset_id == _oracle->base_asset
-              && op.value.quote.asset_id == _oracle->quote_asset,
-              "Published value must be quoted as ${b}/${q} to match oracle '${n}'",
-              ("b", _oracle->base_asset)("q", _oracle->quote_asset)("n", _oracle->name) );
+   // One value per declared series, in order. Padding or truncating here would let a
+   // producer shift every series' meaning for a round.
+   FC_ASSERT( op.values.size() == _oracle->series.size(),
+              "Oracle '${n}' declares ${s} series but the submission carries ${v} values",
+              ("n", _oracle->name)("s", _oracle->series.size())("v", op.values.size()) );
+
+   // The relations a single submission must satisfy. bid <= ask and down-rounded <=
+   // up-rounded hold per producer by enforcement here; aggregation over the same producer
+   // set then keeps them true for the aggregate (see ORACLE-DESIGN.md "Series").
+   using protocol::oracle_series_kind;
+   using protocol::oracle_series_rounding;
+   for( size_t i = 0; i < _oracle->series.size(); ++i )
+      for( size_t j = 0; j < _oracle->series.size(); ++j )
+      {
+         if( _oracle->series[i].get_kind() == oracle_series_kind::bid
+             && _oracle->series[j].get_kind() == oracle_series_kind::ask )
+            FC_ASSERT( !( op.values[j] < op.values[i] ),
+                       "Published bid exceeds ask in oracle '${n}'",
+                       ("n", _oracle->name) );
+         if( _oracle->series[i].get_kind() == _oracle->series[j].get_kind()
+             && _oracle->series[i].get_rounding() == oracle_series_rounding::down
+             && _oracle->series[j].get_rounding() == oracle_series_rounding::up )
+            FC_ASSERT( !( op.values[j] < op.values[i] ),
+                       "Published down-rounded value exceeds the up-rounded value of the "
+                       "same kind in oracle '${n}'", ("n", _oracle->name) );
+      }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -194,7 +276,7 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
    const auto now = d.head_block_time();
 
    d.modify( *_oracle, [&op, now]( oracle_object& o ) {
-      o.submissions[op.producer] = std::make_pair( now, op.value );
+      o.submissions[op.producer] = std::make_pair( now, op.values );
       o.update_current_value( now );
    } );
 

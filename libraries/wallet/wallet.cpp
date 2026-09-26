@@ -837,9 +837,10 @@ oracle_object wallet_api::get_oracle( const string& name_or_id )const
 signed_transaction wallet_api::create_oracle( const string& owner, const string& name,
                                               const string& description, const string& base_symbol,
                                               const string& quote_symbol,
+                                              const vector<oracle_series>& series,
                                               const oracle_options& options, bool broadcast )
 {
-   return my->create_oracle( owner, name, description, base_symbol, quote_symbol,
+   return my->create_oracle( owner, name, description, base_symbol, quote_symbol, series,
                              options, broadcast );
 }
 
@@ -859,9 +860,10 @@ signed_transaction wallet_api::delete_oracle( const string& owner, const string&
 
 signed_transaction wallet_api::publish_oracle_value( const string& producer,
                                                      const string& name_or_id,
-                                                     const price& value, bool broadcast )
+                                                     const vector<oracle_value>& values,
+                                                     bool broadcast )
 {
-   return my->publish_oracle_value( producer, name_or_id, value, broadcast );
+   return my->publish_oracle_value( producer, name_or_id, values, broadcast );
 }
 
 signed_transaction wallet_api::update_asset_feed_producers( const string& symbol,

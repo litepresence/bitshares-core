@@ -24,32 +24,98 @@
 #include <graphene/protocol/oracle.hpp>
 
 #include <fc/io/raw.hpp>
+#include <fc/uint128.hpp>
+
+#include <boost/multiprecision/cpp_int.hpp>
 
 namespace graphene { namespace protocol {
 
+namespace {
+   /// Charset shared by oracle names and reference asset symbols: humans tell series apart
+   /// by these strings, so lookalikes built from mixed case or unicode would be a way to
+   /// get a consumer to reference the wrong value.
+   bool is_valid_oracle_word( const string& name, size_t min_len, size_t max_len )
+   {
+      if( name.size() < min_len || name.size() > max_len )
+         return false;
+
+      char previous = 0;
+      for( size_t i = 0; i < name.size(); ++i )
+      {
+         const char c = name[i];
+         const bool is_alnum = ( c >= 'A' && c <= 'Z' ) || ( c >= '0' && c <= '9' );
+         const bool is_sep   = ( '.' == c || '-' == c );
+         if( !is_alnum && !is_sep )
+            return false;
+         // no leading, trailing or repeated separator
+         if( is_sep && ( 0 == i || i + 1 == name.size() || '.' == previous || '-' == previous ) )
+            return false;
+         previous = c;
+      }
+      return true;
+   }
+} // namespace
+
 bool is_valid_oracle_name( const string& name )
 {
-   if( name.size() < GRAPHENE_ORACLE_MIN_NAME_LENGTH
-       || name.size() > GRAPHENE_ORACLE_MAX_NAME_LENGTH )
-      return false;
+   return is_valid_oracle_word( name,
+      GRAPHENE_ORACLE_MIN_NAME_LENGTH, GRAPHENE_ORACLE_MAX_NAME_LENGTH );
+}
 
-   // Uppercase, digits, '.' and '-'. A restricted set on purpose: names are how humans tell
-   // one oracle from another, and lookalike names built from mixed case or unicode would be a
-   // way to get a consumer to reference the wrong series.
-   char previous = 0;
-   for( size_t i = 0; i < name.size(); ++i )
-   {
-      const char c = name[i];
-      const bool is_alnum = ( c >= 'A' && c <= 'Z' ) || ( c >= '0' && c <= '9' );
-      const bool is_sep   = ( '.' == c || '-' == c );
-      if( !is_alnum && !is_sep )
-         return false;
-      // no leading, trailing or repeated separator
-      if( is_sep && ( 0 == i || i + 1 == name.size() || '.' == previous || '-' == previous ) )
-         return false;
-      previous = c;
-   }
-   return true;
+bool is_valid_reference_asset_symbol( const string& symbol )
+{
+   return is_valid_oracle_word( symbol,
+      GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH, GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH );
+}
+
+void oracle_series::validate()const
+{
+   FC_ASSERT( kind <= static_cast<uint8_t>( oracle_series_kind::ask ),
+              "Unknown series kind ${k}", ("k", kind) );
+   FC_ASSERT( rounding <= static_cast<uint8_t>( oracle_series_rounding::up ),
+              "Unknown series rounding ${r}", ("r", rounding) );
+}
+
+void oracle_value::validate()const
+{
+   // A null or non-positive value would otherwise be carried into the aggregate, where a
+   // zero reads as "free" to every consumer downstream.
+   FC_ASSERT( base_amount > 0, "Published base amount should be positive" );
+   FC_ASSERT( quote_amount > 0, "Published quote amount should be positive" );
+   // Bounded so the consumer conversion's three-way products fit the exact integer
+   // arithmetic it is computed in (each factor below 2^50 keeps the product below 2^150).
+   FC_ASSERT( base_amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Published base amount exceeds maximum share supply" );
+   FC_ASSERT( quote_amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Published quote amount exceeds maximum share supply" );
+}
+
+bool operator < ( const oracle_value& a, const oracle_value& b )
+{
+   const fc::uint128_t left  = fc::uint128_t( a.base_amount.value )
+                             * b.quote_amount.value;
+   const fc::uint128_t right = fc::uint128_t( b.base_amount.value )
+                             * a.quote_amount.value;
+   return left < right;
+}
+
+bool operator == ( const oracle_value& a, const oracle_value& b )
+{
+   const fc::uint128_t left  = fc::uint128_t( a.base_amount.value )
+                             * b.quote_amount.value;
+   const fc::uint128_t right = fc::uint128_t( b.base_amount.value )
+                             * a.quote_amount.value;
+   return left == right;
+}
+
+void reference_mapping::validate()const
+{
+   FC_ASSERT( asset_amount > 0, "Mapping asset amount should be positive" );
+   FC_ASSERT( reference_amount > 0, "Mapping reference amount should be positive" );
+   FC_ASSERT( asset_amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Mapping asset amount exceeds maximum share supply" );
+   FC_ASSERT( reference_amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Mapping reference amount exceeds maximum share supply" );
 }
 
 void oracle_options::validate()const
@@ -60,12 +126,12 @@ void oracle_options::validate()const
    uint32_t total_weight = 0;
    for( const auto& p : producers )
    {
-      FC_ASSERT( p.second > 0,
+      FC_ASSERT( p.second.weight > 0,
                  "Producer ${a} has weight zero; remove the producer instead", ("a", p.first) );
-      FC_ASSERT( p.second <= GRAPHENE_ORACLE_MAX_PRODUCER_WEIGHT,
+      FC_ASSERT( p.second.weight <= GRAPHENE_ORACLE_MAX_PRODUCER_WEIGHT,
                  "Producer weight should not exceed ${m}",
                  ("m", GRAPHENE_ORACLE_MAX_PRODUCER_WEIGHT) );
-      total_weight += p.second;
+      total_weight += p.second.weight;
    }
    // Bounded above by MAX_PRODUCERS * MAX_PRODUCER_WEIGHT, so the weighted median's running
    // total cannot overflow the uint32 it is accumulated in.
@@ -101,6 +167,29 @@ void oracle_options::validate()const
               "max_deviation_ppm is out of range" );
 }
 
+void reference_asset_create_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( is_valid_reference_asset_symbol( symbol ),
+              "Reference asset symbol '${s}' is not valid: ${min}-${max} characters, uppercase "
+              "letters, digits, '.' and '-', with no leading, trailing or repeated separator",
+              ("s", symbol)("min", GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH)
+              ("max", GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH) );
+   FC_ASSERT( precision <= GRAPHENE_REFERENCE_ASSET_MAX_PRECISION,
+              "Reference asset precision should not exceed ${m}",
+              ("m", GRAPHENE_REFERENCE_ASSET_MAX_PRECISION) );
+   FC_ASSERT( description.size() <= GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH,
+              "Description should not exceed ${m} characters",
+              ("m", GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH) );
+}
+
+share_type reference_asset_create_operation::calculate_fee( const fee_params_t& schedule )const
+{
+   share_type core_fee_required = schedule.fee;
+   core_fee_required += calculate_data_fee( fc::raw::pack_size(*this), schedule.price_per_kbyte );
+   return core_fee_required;
+}
+
 void oracle_create_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
@@ -112,8 +201,13 @@ void oracle_create_operation::validate()const
    FC_ASSERT( description.size() <= GRAPHENE_ORACLE_MAX_DESCRIPTION_LENGTH,
               "Description should not exceed ${m} characters",
               ("m", GRAPHENE_ORACLE_MAX_DESCRIPTION_LENGTH) );
-   FC_ASSERT( base_asset != quote_asset,
-              "Base and quote asset should be different" );
+   FC_ASSERT( base != quote,
+              "Base and quote reference asset should be different" );
+   FC_ASSERT( !series.empty(), "An oracle should declare at least one series" );
+   FC_ASSERT( series.size() <= size_t( GRAPHENE_ORACLE_MAX_SERIES ),
+              "An oracle may declare at most ${m} series", ("m", GRAPHENE_ORACLE_MAX_SERIES) );
+   for( const auto& s : series )
+      s.validate();
    options.validate();
 }
 
@@ -152,19 +246,98 @@ void oracle_delete_operation::validate()const
 void oracle_publish_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
-   // A null or non-positive price would otherwise be carried into the aggregate, where a zero
-   // reads as "free" to every consumer downstream.
-   FC_ASSERT( !value.is_null(), "Published value should not be null" );
-   value.validate( true );
+   FC_ASSERT( !values.empty(), "Published values should not be empty" );
+   FC_ASSERT( values.size() <= size_t( GRAPHENE_ORACLE_MAX_SERIES ),
+              "Published values exceed the maximum series count" );
+   // Whether the count matches the oracle's declared series is chain state, so it is
+   // checked in the evaluator; here each carried value must stand on its own.
+   for( const auto& v : values )
+      v.validate();
+}
+
+price convert_oracle_value_to_price(
+   const oracle_value& v,
+   const reference_mapping& debt_mapping, asset_id_type debt_asset,
+   const reference_mapping& backing_mapping, asset_id_type backing_asset,
+   oracle_series_rounding rounding )
+{
+   // The common case (HONEST.USD -> USD, BTS -> BTS): the oracle value already IS the
+   // price, and no arithmetic runs at all. Rationals confine rounding to the places
+   // where two scales genuinely differ.
+   if( debt_mapping.asset_amount == debt_mapping.reference_amount
+       && backing_mapping.asset_amount == backing_mapping.reference_amount )
+      return price( asset( v.base_amount, debt_asset ), asset( v.quote_amount, backing_asset ) );
+
+   // Exact integer arithmetic throughout: boost::multiprecision::cpp_int is software
+   // integers with no rounding and no platform-dependent behaviour, so two nodes
+   // computing from identical inputs agree bit for bit. (Precedent: int256_t in
+   // market_object.cpp.) Each side is a product of three int64 values, each bounded by
+   // GRAPHENE_MAX_SHARE_SUPPLY, so well within any precision concern.
+   using boost::multiprecision::cpp_int;
+   const cpp_int N = cpp_int( debt_mapping.asset_amount.value )
+                   * v.base_amount.value
+                   * backing_mapping.reference_amount.value;
+   const cpp_int D = cpp_int( debt_mapping.reference_amount.value )
+                   * v.quote_amount.value
+                   * backing_mapping.asset_amount.value;
+
+   // Reduce by the greatest common divisor before anything else: most real mappings
+   // cancel here and never reach the scaling below.
+   cpp_int a = N > 0 ? N : -N;
+   cpp_int b = D > 0 ? D : -D;
+   while( b != 0 )
+   {
+      const cpp_int r = a % b;
+      a = b;
+      b = r;
+   }
+   const cpp_int num = N / a;
+   const cpp_int den = D / a;
+
+   // The one place rounding happens: a side past GRAPHENE_MAX_SHARE_SUPPLY cannot be a
+   // price amount, so both sides come down by one common factor, in the direction the
+   // chosen series declares. An unspecified series behaves as down.
+   const cpp_int cap = GRAPHENE_MAX_SHARE_SUPPLY;
+   const cpp_int mx = num > den ? num : den;
+   cpp_int out_num = num;
+   cpp_int out_den = den;
+   if( mx > cap )
+   {
+      const cpp_int scale = ( mx + cap - 1 ) / cap;
+      if( oracle_series_rounding::up == rounding )
+      {
+         out_num = ( num + scale - 1 ) / scale;
+         out_den = ( den + scale - 1 ) / scale;
+      }
+      else
+      {
+         out_num = num / scale;
+         out_den = den / scale;
+         // A floor that vanishes would be a null amount downstream; keep it at 1. Only
+         // reachable when one side is smaller than the scale, i.e. a ratio more extreme
+         // than the supply cap -- economically absurd, but consensus must still agree.
+         if( out_num <= 0 ) out_num = 1;
+         if( out_den <= 0 ) out_den = 1;
+      }
+   }
+
+   return price( asset( out_num.convert_to<int64_t>(), debt_asset ),
+                 asset( out_den.convert_to<int64_t>(), backing_asset ) );
 }
 
 } } // graphene::protocol
 
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::reference_mapping )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_options )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::reference_asset_create_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_create_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_update_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::reference_asset_create_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_create_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_update_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )

@@ -11,6 +11,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/asset_ops.hpp>
 
@@ -22,6 +23,125 @@
 
 using namespace graphene::chain;
 using namespace graphene::chain::test;
+
+// Shared Rev-2 test helpers (file scope: used by the suites below and by oracle_fixture).
+namespace {
+
+/// One Rev-2 published value: that many base smallest-units equal that many quote
+/// smallest-units.
+oracle_value rv( int64_t base_amount, int64_t quote_amount )
+{
+   return oracle_value( base_amount, quote_amount );
+}
+
+oracle_series rseries( oracle_series_kind kind, oracle_series_rounding rounding )
+{
+   return oracle_series( kind, rounding );
+}
+
+/// Makes @p account a committee member (lifetime upgrade first: committee membership
+/// requires it). Used to satisfy the reference-asset creation gate in tests.
+void rev2_make_committee_member( database_fixture& f, const account_object& account )
+{
+   f.upgrade_to_lifetime_member( account );
+   f.create_committee_member( account );
+}
+
+/// Creates a reference asset, returning its id. Caller must satisfy the creation gate
+/// (committee member while creation is committee-only).
+reference_asset_id_type rev2_create_reference(
+      database_fixture& f, account_id_type creator, const fc::ecc::private_key& key,
+      const string& symbol, uint8_t precision )
+{
+   reference_asset_create_operation op;
+   op.creator     = creator;
+   op.symbol      = symbol;
+   op.precision   = precision;
+   op.description = symbol + " reference asset";
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return reference_asset_id_type {
+      PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
+}
+
+/// Declares (or replaces) the reference mapping of a market-issued asset. Issuer-declared:
+/// nobody else may say what the issuer's token tracks.
+void rev2_declare_mapping( database_fixture& f, const asset_object& mia,
+                           account_id_type issuer, const fc::ecc::private_key& key,
+                           const reference_mapping& mapping )
+{
+   asset_update_bitasset_operation op;
+   op.issuer          = issuer;
+   op.asset_to_update = mia.get_id();
+   op.new_options     = mia.bitasset_data( f.db ).options;
+   op.new_options.extensions.value.reference_asset_mapping = mapping;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void rev2_declare_mapping_1to1( database_fixture& f, const asset_object& mia,
+                                account_id_type issuer, const fc::ecc::private_key& key,
+                                reference_asset_id_type ref )
+{
+   reference_mapping m;
+   m.reference        = ref;
+   m.asset_amount     = 1;
+   m.reference_amount = 1;
+   rev2_declare_mapping( f, mia, issuer, key, m );
+}
+
+oracle_id_type rev2_make_oracle( database_fixture& f,
+      account_id_type owner, const fc::ecc::private_key& key, const string& name,
+      reference_asset_id_type base, reference_asset_id_type quote,
+      const vector<oracle_series>& series, const oracle_options& opts )
+{
+   oracle_create_operation op;
+   op.owner  = owner;
+   op.name   = name;
+   op.base   = base;
+   op.quote  = quote;
+   op.series = series;
+   op.options = opts;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return oracle_id_type { PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
+}
+
+void rev2_publish( database_fixture& f, oracle_id_type oid,
+                   account_id_type who, const fc::ecc::private_key& key,
+                   const vector<oracle_value>& values )
+{
+   oracle_publish_operation op;
+   op.producer  = who;
+   op.oracle_id = oid;
+   op.values    = values;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+/// The single mid series every pre-existing (Rev-1-era) test oracle declares. Rev-1
+/// oracles carried exactly one price; under Rev-2 that is one mid series with no
+/// declared rounding.
+inline vector<oracle_series> rev2_single_mid_series()
+{
+   return { rseries( oracle_series_kind::mid, oracle_series_rounding::unspecified ) };
+}
+
+} // namespace
 
 BOOST_AUTO_TEST_SUITE( oracle_name_tests )
 
@@ -47,7 +167,7 @@ BOOST_AUTO_TEST_CASE( valid_and_invalid_oracle_names )
 BOOST_AUTO_TEST_CASE( an_unknown_aggregation_method_is_refused )
 {
    oracle_options opts;
-   opts.producers[ account_id_type( 1 ) ] = 1;
+   opts.producers[ account_id_type( 1 ) ] = oracle_producer_entry( 1 );
    opts.minimum_producers = 1;
 
    opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
@@ -71,17 +191,6 @@ BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_FIXTURE_TEST_SUITE( oracle_tests, database_fixture )
 
-namespace {
-
-/// Prices are compared by cross-multiplication, so two prices that reduce to the same ratio
-/// are equal even when written with different amounts. Tests state prices in whole units and
-/// rely on that rather than on a particular representation.
-price px( int64_t base_amount, asset_id_type base_id, int64_t quote_amount, asset_id_type quote_id )
-{
-   return price( asset( base_amount, base_id ), asset( quote_amount, quote_id ) );
-}
-
-} // namespace
 
 /// Every oracle operation must be refused before the hardfork, or a node running this code
 /// could produce a block that a node running the previous release cannot validate.
@@ -90,15 +199,15 @@ BOOST_AUTO_TEST_CASE( oracle_ops_are_refused_before_the_hardfork )
    ACTORS( (alice) );
    fund( alice );
 
+   // Rev-2 oracles quote reference assets; pre-fork none can exist, so the op names two
+   // ids that resolve to nothing -- the hardfork gate fires before any of that matters.
    oracle_create_operation op;
    op.owner       = alice_id;
    op.name        = "BTC.USD";
-   op.base_asset  = asset_id_type();
-   op.quote_asset = asset_id_type();      // replaced below
-   op.options.producers[alice_id] = 1;
-
-   const asset_object& usd = create_user_issued_asset( "USDTEST" );
-   op.quote_asset = usd.get_id();
+   op.base        = reference_asset_id_type( 0 );
+   op.quote       = reference_asset_id_type( 1 );
+   op.series      = rev2_single_mid_series();
+   op.options.producers[alice_id] = oracle_producer_entry( 1 );
 
    signed_transaction tx;
    tx.operations.push_back( op );
@@ -118,21 +227,24 @@ BOOST_AUTO_TEST_CASE( create_publish_and_aggregate )
    fund( bob );
    fund( carol );
    fund( dave );
+   rev2_make_committee_member( *this, alice );
 
-   const asset_object& usd = create_user_issued_asset( "USDTEST" );
-   const auto core = asset_id_type();
-   const auto usd_id = usd.get_id();
+   // Rev-2: the pair is two reference assets. BTS stands in for the core asset's role in
+   // these aggregation tests; what matters is the ratio arithmetic, which is unchanged.
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
 
    // three producers, quorum of two
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "CORE.USD";
    cop.description = "core against a test dollar";
-   cop.base_asset  = core;
-   cop.quote_asset = usd_id;
-   cop.options.producers[bob_id]   = 1;
-   cop.options.producers[carol_id] = 1;
-   cop.options.producers[dave_id]  = 1;
+   cop.base        = bts_ref;
+   cop.quote       = usd_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id]   = oracle_producer_entry( 1 );
+   cop.options.producers[carol_id] = oracle_producer_entry( 1 );
+   cop.options.producers[dave_id]  = oracle_producer_entry( 1 );
    cop.options.minimum_producers   = 2;
    cop.options.value_lifetime_sec  = 3600;
 
@@ -148,16 +260,7 @@ BOOST_AUTO_TEST_CASE( create_publish_and_aggregate )
    BOOST_CHECK( !oid(db).current_value.valid() );
 
    auto publish = [&]( account_id_type who, const fc::ecc::private_key& key, int64_t quote ) {
-      oracle_publish_operation pop;
-      pop.producer  = who;
-      pop.oracle_id = oid;
-      pop.value     = px( 1, core, quote, usd_id );
-      signed_transaction ptx2;
-      ptx2.operations.push_back( pop );
-      db.current_fee_schedule().set_fee( ptx2.operations.back() );
-      set_expiration( db, ptx2 );
-      ptx2.sign( key, db.get_chain_id() );
-      PUSH_TX( db, ptx2 );
+      rev2_publish( *this, oid, who, key, { rv( 1, quote ) } );
    };
 
    // one submission is below quorum, so still no value -- not a value derived from one source
@@ -168,13 +271,13 @@ BOOST_AUTO_TEST_CASE( create_publish_and_aggregate )
    // two submissions reach quorum; lower median of {100, 200} is 100
    publish( carol_id, carol_private_key, 200 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == px( 1, core, 100, usd_id ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 1, 100 ) );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 2u );
 
    // three submissions: median of {100, 200, 300} is 200
    publish( dave_id, dave_private_key, 300 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == px( 1, core, 200, usd_id ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 1, 200 ) );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 3u );
 } FC_LOG_AND_RETHROW() }
 
@@ -189,17 +292,18 @@ BOOST_AUTO_TEST_CASE( a_non_producer_cannot_publish )
    fund( alice );
    fund( bob );
    fund( mallory );
+   rev2_make_committee_member( *this, alice );
 
-   const asset_object& usd = create_user_issued_asset( "USDTEST" );
-   const auto core = asset_id_type();
-   const auto usd_id = usd.get_id();
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "CORE.USD";
-   cop.base_asset  = core;
-   cop.quote_asset = usd_id;
-   cop.options.producers[bob_id] = 1;
+   cop.base        = bts_ref;
+   cop.quote       = usd_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers = 1;
 
    signed_transaction tx;
@@ -212,7 +316,7 @@ BOOST_AUTO_TEST_CASE( a_non_producer_cannot_publish )
    oracle_publish_operation pop;
    pop.producer  = mallory_id;
    pop.oracle_id = oid;
-   pop.value     = px( 1, core, 1, usd_id );
+   pop.values    = { rv( 1, 1 ) };
    signed_transaction bad;
    bad.operations.push_back( pop );
    db.current_fee_schedule().set_fee( bad.operations.back() );
@@ -230,9 +334,11 @@ BOOST_AUTO_TEST_CASE( a_non_producer_cannot_publish )
    GRAPHENE_REQUIRE_THROW( PUSH_TX( db, owner_tx ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
-/// A value in the wrong orientation must be refused rather than silently inverted: a consumer
-/// must never have to work out which way round a number is.
-BOOST_AUTO_TEST_CASE( a_value_in_the_wrong_orientation_is_refused )
+/// Rev-2 values carry no asset ids -- a bare (base, quote) amount pair -- so there is
+/// nothing to invert: the orientation is fixed by the oracle's own (base, quote). What
+/// the submission must still satisfy is positivity: a null or non-positive value would
+/// otherwise be carried into the aggregate, where a zero reads as "free" downstream.
+BOOST_AUTO_TEST_CASE( a_non_positive_value_is_refused )
 { try {
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
@@ -241,17 +347,18 @@ BOOST_AUTO_TEST_CASE( a_value_in_the_wrong_orientation_is_refused )
    ACTORS( (alice)(bob) );
    fund( alice );
    fund( bob );
+   rev2_make_committee_member( *this, alice );
 
-   const asset_object& usd = create_user_issued_asset( "USDTEST" );
-   const auto core = asset_id_type();
-   const auto usd_id = usd.get_id();
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "CORE.USD";
-   cop.base_asset  = core;
-   cop.quote_asset = usd_id;
-   cop.options.producers[bob_id] = 1;
+   cop.base        = bts_ref;
+   cop.quote       = usd_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers = 1;
 
    signed_transaction tx;
@@ -261,16 +368,27 @@ BOOST_AUTO_TEST_CASE( a_value_in_the_wrong_orientation_is_refused )
    tx.sign( alice_private_key, db.get_chain_id() );
    const oracle_id_type oid { PUSH_TX( db, tx ).operation_results.front().get<object_id_type>() };
 
-   oracle_publish_operation pop;
-   pop.producer  = bob_id;
-   pop.oracle_id = oid;
-   pop.value     = px( 1, usd_id, 100, core );   // inverted
-   signed_transaction bad;
-   bad.operations.push_back( pop );
-   db.current_fee_schedule().set_fee( bad.operations.back() );
-   set_expiration( db, bad );
-   bad.sign( bob_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, bad ), fc::exception );
+   auto try_publish = [&]( int64_t base_amount, int64_t quote_amount ) {
+      oracle_publish_operation pop;
+      pop.producer  = bob_id;
+      pop.oracle_id = oid;
+      pop.values    = { rv( base_amount, quote_amount ) };
+      signed_transaction bad;
+      bad.operations.push_back( pop );
+      db.current_fee_schedule().set_fee( bad.operations.back() );
+      set_expiration( db, bad );
+      bad.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, bad );
+   };
+
+   GRAPHENE_REQUIRE_THROW( try_publish( 0, 100 ), fc::exception );
+   GRAPHENE_REQUIRE_THROW( try_publish( 100, 0 ), fc::exception );
+   GRAPHENE_REQUIRE_THROW( try_publish( -100, 100 ), fc::exception );
+   BOOST_CHECK( !oid(db).current_value.valid() );
+
+   try_publish( 1, 100 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 1, 100 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// Names identify oracles to humans, so a duplicate is how a consumer gets pointed at the
@@ -284,16 +402,19 @@ BOOST_AUTO_TEST_CASE( oracle_names_are_unique )
    ACTORS( (alice)(bob) );
    fund( alice );
    fund( bob );
+   rev2_make_committee_member( *this, alice );
 
-   const asset_object& usd = create_user_issued_asset( "USDTEST" );
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
 
    auto make = [&]( account_id_type owner, const fc::ecc::private_key& key ) {
       oracle_create_operation cop;
       cop.owner       = owner;
       cop.name        = "CORE.USD";
-      cop.base_asset  = asset_id_type();
-      cop.quote_asset = usd.get_id();
-      cop.options.producers[owner] = 1;
+      cop.base        = bts_ref;
+      cop.quote       = usd_ref;
+      cop.series      = rev2_single_mid_series();
+      cop.options.producers[owner] = oracle_producer_entry( 1 );
       cop.options.minimum_producers = 1;
       signed_transaction tx;
       tx.operations.push_back( cop );
@@ -312,55 +433,44 @@ BOOST_AUTO_TEST_SUITE_END()
 
 /// Builds and pushes an oracle_create, returning the new id. Factored out because most of the
 /// interesting tests differ only in the options they set.
+///
+/// Rev-2: oracles quote reference assets, so the fixture bootstraps a BTS reference (standing
+/// in for the core asset's role) and a USD reference. Values are (base, quote) amount pairs;
+/// val(n) reads "1 BTS is worth N USD" the way usd_per_core did as a price.
 struct oracle_fixture : database_fixture
 {
-   asset_id_type core_id;
-   asset_id_type usd_id;
+   reference_asset_id_type bts_ref;
+   reference_asset_id_type usd_ref;
+   bool references_ready = false;
 
-   void setup_assets()
+   void setup_references( account_id_type creator, const fc::ecc::private_key& key )
    {
-      core_id = asset_id_type();
-      usd_id  = create_user_issued_asset( "USDTEST" ).get_id();
+      rev2_make_committee_member( *this, creator(db) );
+      bts_ref = rev2_create_reference( *this, creator, key, "BTS", 5 );
+      usd_ref = rev2_create_reference( *this, creator, key, "USD", 4 );
+      references_ready = true;
    }
 
-   /// price = base/quote, so px(1, core, N, usd) reads "1 CORE is worth N USD". Note that a
-   /// *larger* N is a numerically *smaller* price in this orientation, since the ratio is 1/N.
+   /// value = base/quote, so val(n) reads "1 BTS is worth N USD". Note that a *larger* n
+   /// is a numerically *smaller* value in this orientation, since the ratio is 1/n.
    /// Ordering, and therefore the median, is by that ratio.
-   price usd_per_core( int64_t n ) const
+   oracle_value val( int64_t n ) const
    {
-      return price( asset( 1, core_id ), asset( n, usd_id ) );
+      return rv( 1, n );
    }
 
    oracle_id_type make_oracle( account_id_type owner, const fc::ecc::private_key& key,
                                const string& name, const oracle_options& opts )
    {
-      oracle_create_operation op;
-      op.owner       = owner;
-      op.name        = name;
-      op.base_asset  = core_id;
-      op.quote_asset = usd_id;
-      op.options     = opts;
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( key, db.get_chain_id() );
-      return oracle_id_type { PUSH_TX( db, tx ).operation_results.front().get<object_id_type>() };
+      BOOST_REQUIRE( references_ready );
+      return rev2_make_oracle( *this, owner, key, name,
+                               bts_ref, usd_ref, rev2_single_mid_series(), opts );
    }
 
    void publish( oracle_id_type oid, account_id_type who, const fc::ecc::private_key& key,
                  int64_t n )
    {
-      oracle_publish_operation op;
-      op.producer  = who;
-      op.oracle_id = oid;
-      op.value     = usd_per_core( n );
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( key, db.get_chain_id() );
-      PUSH_TX( db, tx );
+      rev2_publish( *this, oid, who, key, { val( n ) } );
    }
 
    void update_options( oracle_id_type oid, account_id_type owner,
@@ -388,14 +498,14 @@ BOOST_AUTO_TEST_CASE( a_stale_submission_stops_counting )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob)(carol) );
    fund( alice ); fund( bob ); fund( carol );
 
+   setup_references( alice_id, alice_private_key );
    oracle_options opts;
-   opts.producers[bob_id]   = 1;
-   opts.producers[carol_id] = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
    opts.minimum_producers   = 2;
    opts.value_lifetime_sec  = 600;
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
@@ -416,7 +526,7 @@ BOOST_AUTO_TEST_CASE( a_stale_submission_stops_counting )
    // carol republishing restores quorum
    publish( oid, carol_id, carol_private_key, 100 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// Weight is the difference between an oracle and a plain vote count.
@@ -425,16 +535,16 @@ BOOST_AUTO_TEST_CASE( weights_shift_the_median )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob)(carol)(dave) );
    fund( alice ); fund( bob ); fund( carol ); fund( dave );
 
+   setup_references( alice_id, alice_private_key );
    // bob outweighs the other two combined, so his value is the median whatever they say
    oracle_options opts;
-   opts.producers[bob_id]   = 10;
-   opts.producers[carol_id] = 1;
-   opts.producers[dave_id]  = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 10 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id] = oracle_producer_entry( 1 );
    opts.minimum_producers   = 2;
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
 
@@ -443,14 +553,14 @@ BOOST_AUTO_TEST_CASE( weights_shift_the_median )
    publish( oid, dave_id,  dave_private_key,  400 );
 
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 
    // with equal weights the same three submissions give the middle value instead
    oracle_options equal = opts;
-   equal.producers[bob_id] = 1;
+   equal.producers[bob_id] = oracle_producer_entry( 1 );
    update_options( oid, alice_id, alice_private_key, equal );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 300 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 300 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// A minority disagreeing with the rest is filtered out.
@@ -459,15 +569,15 @@ BOOST_AUTO_TEST_CASE( an_outlier_is_excluded_while_quorum_survives )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob)(carol)(dave) );
    fund( alice ); fund( bob ); fund( carol ); fund( dave );
 
+   setup_references( alice_id, alice_private_key );
    oracle_options opts;
-   opts.producers[bob_id]   = 1;
-   opts.producers[carol_id] = 1;
-   opts.producers[dave_id]  = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id] = oracle_producer_entry( 1 );
    opts.minimum_producers   = 2;
    opts.max_deviation_ppm   = 100000;   // 10%
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
@@ -476,12 +586,12 @@ BOOST_AUTO_TEST_CASE( an_outlier_is_excluded_while_quorum_survives )
    publish( oid, bob_id,   bob_private_key,   100 );
    publish( oid, carol_id, carol_private_key, 100 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 
    // dave publishes wildly off; two honest submissions still meet quorum, so he is dropped
    publish( oid, dave_id, dave_private_key, 100000 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 2u );
 } FC_LOG_AND_RETHROW() }
 
@@ -492,14 +602,14 @@ BOOST_AUTO_TEST_CASE( when_every_producer_moves_together_the_oracle_moves )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob)(carol) );
    fund( alice ); fund( bob ); fund( carol );
 
+   setup_references( alice_id, alice_private_key );
    oracle_options opts;
-   opts.producers[bob_id]   = 1;
-   opts.producers[carol_id] = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
    opts.minimum_producers   = 2;
    opts.max_deviation_ppm   = 100000;   // 10%
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
@@ -514,7 +624,7 @@ BOOST_AUTO_TEST_CASE( when_every_producer_moves_together_the_oracle_moves )
    publish( oid, carol_id, carol_private_key, 1000 );
 
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 1000 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 1000 ) );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 2u );
 } FC_LOG_AND_RETHROW() }
 
@@ -525,34 +635,34 @@ BOOST_AUTO_TEST_CASE( removing_a_producer_takes_effect_immediately )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob)(carol)(dave) );
    fund( alice ); fund( bob ); fund( carol ); fund( dave );
 
+   setup_references( alice_id, alice_private_key );
    oracle_options opts;
-   opts.producers[bob_id]   = 1;
-   opts.producers[carol_id] = 1;
-   opts.producers[dave_id]  = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id] = oracle_producer_entry( 1 );
    opts.minimum_producers   = 2;
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
 
    publish( oid, bob_id,   bob_private_key,   100 );
    publish( oid, carol_id, carol_private_key, 200 );
    publish( oid, dave_id,  dave_private_key,  300 );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 200 ) );
 
    // drop dave; his stored submission must stop counting at once
    oracle_options without_dave;
-   without_dave.producers[bob_id]   = 1;
-   without_dave.producers[carol_id] = 1;
+   without_dave.producers[bob_id] = oracle_producer_entry( 1 );
+   without_dave.producers[carol_id] = oracle_producer_entry( 1 );
    without_dave.minimum_producers   = 2;
    update_options( oid, alice_id, alice_private_key, without_dave );
 
    BOOST_REQUIRE( oid(db).current_value.valid() );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 2u );
    // median of {100, 200} with the upper-median convention
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 
    // and dave can no longer publish at all
    GRAPHENE_REQUIRE_THROW( publish( oid, dave_id, dave_private_key, 500 ), fc::exception );
@@ -564,13 +674,13 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_resists_a_single_spike )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    oracle_options opts;
-   opts.producers[bob_id]  = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
    opts.minimum_producers  = 1;
    opts.value_lifetime_sec = 86400;
    opts.aggregation        = static_cast<uint8_t>( oracle_aggregation_method::median_over_window );
@@ -590,14 +700,14 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_resists_a_single_spike )
       set_expiration( db, trx );
    }
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 
    // one spike does not move the windowed median, even though it is the latest value
    publish( oid, bob_id, bob_private_key, 100000 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
    // the spike is recorded though: the window holds it, it is simply outvoted
-   BOOST_CHECK( oid(db).history.back().second == usd_per_core( 100000 ) );
+   BOOST_CHECK( oid(db).history.back().second.at( 0 ) == val( 100000 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// Policy is the owner's alone. A producer that could edit the producer set could appoint
@@ -607,18 +717,18 @@ BOOST_AUTO_TEST_CASE( only_the_owner_may_update_or_delete )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    oracle_options opts;
-   opts.producers[bob_id] = 1;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
    opts.minimum_producers = 1;
    const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
 
    oracle_options grab = opts;
-   grab.producers[bob_id] = 1000;
+   grab.producers[bob_id] = oracle_producer_entry( 1000 );
    GRAPHENE_REQUIRE_THROW( update_options( oid, bob_id, bob_private_key, grab ), fc::exception );
 
    oracle_delete_operation dop;
@@ -661,30 +771,30 @@ BOOST_AUTO_TEST_CASE( the_deviation_filter_cannot_let_a_minority_capture_the_pri
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (owner)(p1)(p2)(p3)(p4)(mallory) );
 
+   setup_references( owner_id, owner_private_key );
    oracle_options opts;
-   opts.producers[ p1_id ]      = 1;
-   opts.producers[ p2_id ]      = 1;
-   opts.producers[ p3_id ]      = 1;
-   opts.producers[ p4_id ]      = 1;
-   opts.producers[ mallory_id ] = 1;
+   opts.producers[ p1_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p2_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p3_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p4_id ] = oracle_producer_entry( 1 );
+   opts.producers[ mallory_id ] = oracle_producer_entry( 1 );
    opts.minimum_producers = 1;      // the shipped default
    opts.max_deviation_ppm = 100000; // 10% band -- a plausible "manipulation resistance" setting
    opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
 
    const auto oid = make_oracle( owner_id, owner_private_key, "CORE.USD", opts );
 
-   // Everyone agrees the price is 100. (usd_per_core is 1/n, so a bigger n is a lower price.)
+   // Everyone agrees the price is 100. (val is 1/n, so a bigger n is a lower price.)
    publish( oid, p1_id, p1_private_key, 100 );
    publish( oid, p2_id, p2_private_key, 100 );
    publish( oid, p3_id, p3_private_key, 100 );
    publish( oid, p4_id, p4_private_key, 100 );
    publish( oid, mallory_id, mallory_private_key, 100 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 
    // The market moves hard. The four honest producers report it; mallory does not.
    // A block between rounds keeps mallory's repeated submission from being a byte-identical
@@ -699,7 +809,7 @@ BOOST_AUTO_TEST_CASE( the_deviation_filter_cannot_let_a_minority_capture_the_pri
 
    // The band is anchored on this round's median, so mallory is the outlier and is trimmed.
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 200 ),
+   BOOST_CHECK_MESSAGE( oid(db).current_value->at( 0 ) == val( 200 ),
                         "the honest majority must win" );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 4 );
 
@@ -715,7 +825,7 @@ BOOST_AUTO_TEST_CASE( the_deviation_filter_cannot_let_a_minority_capture_the_pri
       publish( oid, p4_id, p4_private_key, 200 );
       publish( oid, mallory_id, mallory_private_key, 100 );
    }
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 200 ) );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 4 );
 
 } FC_LOG_AND_RETHROW() }
@@ -729,16 +839,16 @@ BOOST_AUTO_TEST_CASE( without_the_deviation_filter_the_majority_wins )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (owner)(p1)(p2)(p3)(p4)(mallory) );
 
+   setup_references( owner_id, owner_private_key );
    oracle_options opts;
-   opts.producers[ p1_id ]      = 1;
-   opts.producers[ p2_id ]      = 1;
-   opts.producers[ p3_id ]      = 1;
-   opts.producers[ p4_id ]      = 1;
-   opts.producers[ mallory_id ] = 1;
+   opts.producers[ p1_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p2_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p3_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p4_id ] = oracle_producer_entry( 1 );
+   opts.producers[ mallory_id ] = oracle_producer_entry( 1 );
    opts.minimum_producers = 1;
    opts.max_deviation_ppm = 0;      // off
    opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
@@ -760,7 +870,7 @@ BOOST_AUTO_TEST_CASE( without_the_deviation_filter_the_majority_wins )
    publish( oid, mallory_id, mallory_private_key, 100 );
 
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 200 ) );
    BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 5 );
 } FC_LOG_AND_RETHROW() }
 
@@ -782,14 +892,14 @@ BOOST_AUTO_TEST_CASE( the_owner_can_flip_the_value_by_reweighting_alone )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (owner)(p1)(p2)(p3) );
 
+   setup_references( owner_id, owner_private_key );
    oracle_options opts;
-   opts.producers[ p1_id ] = 1;
-   opts.producers[ p2_id ] = 1;
-   opts.producers[ p3_id ] = 1;
+   opts.producers[ p1_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p2_id ] = oracle_producer_entry( 1 );
+   opts.producers[ p3_id ] = oracle_producer_entry( 1 );
    opts.minimum_producers = 1;
    opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
    const auto oid = make_oracle( owner_id, owner_private_key, "GOV.TEST", opts );
@@ -799,29 +909,29 @@ BOOST_AUTO_TEST_CASE( the_owner_can_flip_the_value_by_reweighting_alone )
    publish( oid, p3_id, p3_private_key, 300 );
    BOOST_REQUIRE( oid(db).current_value.valid() );
    BOOST_TEST_MESSAGE( "  drei Produzenten melden 100 / 200 / 300, gleiches Gewicht" );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 200 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 200 ) );
    BOOST_TEST_MESSAGE( "  Median: 200" );
 
    // Nur die Gewichte ändern. Keine neue Meldung.
    generate_block();
    set_expiration( db, trx );
    oracle_options heavy = opts;
-   heavy.producers[ p1_id ] = 10;   // p1 überstimmt die anderen beiden zusammen
+   heavy.producers[ p1_id ] = oracle_producer_entry( 10 );   // p1 überstimmt die anderen beiden zusammen
    update_options( oid, owner_id, owner_private_key, heavy );
 
    BOOST_REQUIRE( oid(db).current_value.valid() );
    BOOST_TEST_MESSAGE( "  Eigentümer setzt p1 auf Gewicht 10, ohne neue Meldung" );
    BOOST_TEST_MESSAGE( "  neuer Wert entspricht jetzt p1s Meldung" );
-   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 100 ),
+   BOOST_CHECK_MESSAGE( oid(db).current_value->at( 0 ) == val( 100 ),
                         "Umgewichten allein hat den Wert nicht gedreht" );
 
    // Und wieder zurück, ebenso sofort.
    generate_block();
    set_expiration( db, trx );
    oracle_options heavy3 = opts;
-   heavy3.producers[ p3_id ] = 10;
+   heavy3.producers[ p3_id ] = oracle_producer_entry( 10 );
    update_options( oid, owner_id, owner_private_key, heavy3 );
-   BOOST_CHECK( *oid(db).current_value == usd_per_core( 300 ) );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 300 ) );
    BOOST_TEST_MESSAGE( "  ==> der Eigentümer kann den Wert jederzeit auf jede vorliegende" );
    BOOST_TEST_MESSAGE( "      Meldung setzen, sofort und ohne Ankündigung" );
 } FC_LOG_AND_RETHROW() }
@@ -838,9 +948,9 @@ BOOST_AUTO_TEST_CASE( measure_the_collusion_threshold_of_the_median )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (owner)(a1)(a2)(a3)(a4)(a5)(a6)(a7) );
+   setup_references( owner_id, owner_private_key );
    const std::vector<account_id_type> ids {
       a1_id, a2_id, a3_id, a4_id, a5_id, a6_id, a7_id };
    const std::vector<fc::ecc::private_key> keys {
@@ -852,7 +962,7 @@ BOOST_AUTO_TEST_CASE( measure_the_collusion_threshold_of_the_median )
       generate_block();
       set_expiration( db, trx );
       oracle_options opts;
-      for( size_t i = 0; i < n; ++i ) opts.producers[ ids[i] ] = 1;
+      for( size_t i = 0; i < n; ++i ) opts.producers[ ids[i] ] = oracle_producer_entry( 1 );
       opts.minimum_producers = 1;
       opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
       const auto oid = make_oracle( owner_id, owner_private_key,
@@ -860,7 +970,7 @@ BOOST_AUTO_TEST_CASE( measure_the_collusion_threshold_of_the_median )
 
       // Ehrlich: alle melden 100.
       for( size_t i = 0; i < n; ++i ) publish( oid, ids[i], keys[i], 100 );
-      BOOST_CHECK( *oid(db).current_value == usd_per_core( 100 ) );
+      BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 
       size_t needed = 0;
       for( size_t k = 1; k <= n && 0 == needed; ++k )
@@ -870,7 +980,7 @@ BOOST_AUTO_TEST_CASE( measure_the_collusion_threshold_of_the_median )
          // k Kolludierende melden 999, der Rest bleibt bei 100.
          for( size_t i = 0; i < k; ++i ) publish( oid, ids[i], keys[i], 999 );
          for( size_t i = k; i < n; ++i ) publish( oid, ids[i], keys[i], 100 );
-         if( *oid(db).current_value == usd_per_core( 999 ) ) needed = k;
+         if( oid(db).current_value->at( 0 ) == val( 999 ) ) needed = k;
       }
       const size_t expected = n / 2 + 1;
       BOOST_TEST_MESSAGE( "  " << n << " Produzenten: " << needed
@@ -899,25 +1009,25 @@ BOOST_AUTO_TEST_CASE( measure_the_on_chain_cost_of_publishing_a_false_value )
    generate_blocks( HARDFORK_ORACLE_TIME );
    generate_block();
    set_expiration( db, trx );
-   setup_assets();
 
    ACTORS( (owner)(liar) );
    fund( liar, asset(10000000) );
 
+   setup_references( owner_id, owner_private_key );
    oracle_options opts;
-   opts.producers[ liar_id ] = 1;
+   opts.producers[ liar_id ] = oracle_producer_entry( 1 );
    opts.minimum_producers = 1;
    opts.aggregation = static_cast<uint8_t>( oracle_aggregation_method::median_of_latest );
    const auto oid = make_oracle( owner_id, owner_private_key, "COST.TEST", opts );
 
-   const int64_t before = get_balance( liar_id, core_id );
+   const int64_t before = get_balance( liar_id, asset_id_type() );
    for( int i = 0; i < 10; ++i )
    {
       generate_block();
       set_expiration( db, trx );
       publish( oid, liar_id, liar_private_key, 100 + i );   // jedes Mal ein anderer Unsinn
    }
-   const int64_t after = get_balance( liar_id, core_id );
+   const int64_t after = get_balance( liar_id, asset_id_type() );
 
    BOOST_TEST_MESSAGE( "  10 Falschmeldungen kosteten in der Testfixture "
                        << ( before - after ) << " (dort sind alle Gebuehren 0)" );
@@ -932,9 +1042,9 @@ BOOST_AUTO_TEST_CASE( measure_the_on_chain_cost_of_publishing_a_false_value )
    // Gebuehrentabelle -- sondern dass eine Falschmeldung NICHTS ausser der Gebuehr kostet:
    // sie wird angenommen, sie bleibt stehen, und nichts wird eingezogen.
    BOOST_REQUIRE( oid(db).current_value.valid() );
-   BOOST_CHECK_MESSAGE( *oid(db).current_value == usd_per_core( 109 ),
+   BOOST_CHECK_MESSAGE( oid(db).current_value->at( 0 ) == val( 109 ),
                         "die letzte Falschmeldung wurde nicht uebernommen" );
-   BOOST_CHECK_MESSAGE( get_balance( liar_id, core_id ) >= after,
+   BOOST_CHECK_MESSAGE( get_balance( liar_id, asset_id_type() ) >= after,
                         "nach der Veroeffentlichung wurde nachtraeglich etwas eingezogen" );
 } FC_LOG_AND_RETHROW() }
 
@@ -977,20 +1087,23 @@ BOOST_AUTO_TEST_CASE( a_smartcoin_takes_its_settlement_price_from_a_bound_oracle
    ACTORS( (alice)(bob)(carol) );
    fund( alice ); fund( bob ); fund( carol );
 
-   // a smartcoin backed by CORE, issued by alice
+   setup_references( alice_id, alice_private_key );
+   // a smartcoin backed by CORE, issued by alice, mapped 1:1 to its own reference.
+   // (The core side needs no declaration: it maps 1:1 to "BTS" by protocol rule.)
    const asset_object& mia = create_bitasset( "MIATEST", alice_id );
    const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
 
-   // an oracle quoting MIA/CORE, which is the orientation a settlement price uses
-   core_id = asset_id_type();
-   usd_id  = asset_id_type();
+   // an oracle quoting MIA-ref/BTS-ref, which is the orientation a settlement price uses
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "MIA.CORE";
-   cop.base_asset  = mia_id;
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id]   = 1;
-   cop.options.producers[carol_id] = 1;
+   cop.base        = mia_ref;
+   cop.quote       = bts_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
+   cop.options.producers[carol_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers   = 2;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
@@ -1000,16 +1113,7 @@ BOOST_AUTO_TEST_CASE( a_smartcoin_takes_its_settlement_price_from_a_bound_oracle
    const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
 
    auto pub = [&]( account_id_type who, const fc::ecc::private_key& key, int64_t core_amount ) {
-      oracle_publish_operation op;
-      op.producer  = who;
-      op.oracle_id = oid;
-      op.value     = price( asset( 1, mia_id ), asset( core_amount, asset_id_type() ) );
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( key, db.get_chain_id() );
-      PUSH_TX( db, tx );
+      rev2_publish( *this, oid, who, key, { rv( 1, core_amount ) } );
    };
 
    pub( bob_id,   bob_private_key,   10 );
@@ -1033,13 +1137,18 @@ BOOST_AUTO_TEST_CASE( a_smartcoin_takes_its_settlement_price_from_a_bound_oracle
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
                 == price( asset( 1, mia_id ), asset( 20, asset_id_type() ) ) );
 
-   // unbinding returns the asset to the legacy feed path, which has no feeds here
+   // unbinding returns the asset to the legacy feed path, which has no feeds here.
+   // (A block first: with no other option changed, the unbind would otherwise be a
+   // byte-identical repeat of the mapping-declare transaction above, which the chain
+   // rejects as a duplicate.)
+   generate_block();
+   set_expiration( db, trx );
    set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, {} );
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
    BOOST_CHECK( oid(db).subscribers.empty() );
 } FC_LOG_AND_RETHROW() }
 
-/// An inverted oracle would margin-call every position on the asset, so the orientation is
+/// A mismatched oracle would margin-call every position on the asset, so the binding is
 /// checked once at bind time rather than trusted on every read.
 BOOST_AUTO_TEST_CASE( an_oracle_quoting_the_wrong_pair_cannot_be_bound )
 { try {
@@ -1050,17 +1159,22 @@ BOOST_AUTO_TEST_CASE( an_oracle_quoting_the_wrong_pair_cannot_be_bound )
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIATEST", alice_id );
    const auto mia_id = mia.get_id();
-   const asset_object& other = create_user_issued_asset( "OTHERTEST" );
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
+   // a reference no mapping points at, for the wrong-quote case
+   const auto other_ref = rev2_create_reference( *this, alice_id, alice_private_key, "XAU", 4 );
 
-   // quoted the wrong way round: CORE/MIA instead of MIA/CORE
+   // quoted the wrong way round: BTS-ref/MIA-ref instead of MIA-ref/BTS-ref
    oracle_create_operation inverted;
    inverted.owner       = alice_id;
    inverted.name        = "CORE.MIA";
-   inverted.base_asset  = asset_id_type();
-   inverted.quote_asset = mia_id;
-   inverted.options.producers[bob_id] = 1;
+   inverted.base        = bts_ref;
+   inverted.quote       = mia_ref;
+   inverted.series      = rev2_single_mid_series();
+   inverted.options.producers[bob_id] = oracle_producer_entry( 1 );
    inverted.options.minimum_producers = 1;
    signed_transaction t1;
    t1.operations.push_back( inverted );
@@ -1072,13 +1186,14 @@ BOOST_AUTO_TEST_CASE( an_oracle_quoting_the_wrong_pair_cannot_be_bound )
    GRAPHENE_REQUIRE_THROW(
       set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, bad_id ), fc::exception );
 
-   // right base, wrong quote: MIA/OTHER when the asset is backed by CORE
+   // right base, wrong quote: MIA-ref/XAU-ref when the asset is backed by CORE (BTS-ref)
    oracle_create_operation wrong_quote;
    wrong_quote.owner       = alice_id;
    wrong_quote.name        = "MIA.OTHER";
-   wrong_quote.base_asset  = mia_id;
-   wrong_quote.quote_asset = other.get_id();
-   wrong_quote.options.producers[bob_id] = 1;
+   wrong_quote.base        = mia_ref;
+   wrong_quote.quote       = other_ref;
+   wrong_quote.series      = rev2_single_mid_series();
+   wrong_quote.options.producers[bob_id] = oracle_producer_entry( 1 );
    wrong_quote.options.minimum_producers = 1;
    signed_transaction t2;
    t2.operations.push_back( wrong_quote );
@@ -1101,15 +1216,19 @@ BOOST_AUTO_TEST_CASE( a_bound_oracle_cannot_be_deleted )
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIATEST", alice_id );
    const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "MIA.CORE";
-   cop.base_asset  = mia_id;
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id] = 1;
+   cop.base        = mia_ref;
+   cop.quote       = bts_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers = 1;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
@@ -1134,7 +1253,10 @@ BOOST_AUTO_TEST_CASE( a_bound_oracle_cannot_be_deleted )
 
    GRAPHENE_REQUIRE_THROW( del(), fc::exception );
 
-   // once the asset lets go, the oracle can be removed
+   // once the asset lets go, the oracle can be removed. (A block first, as above: the
+   // unbind would otherwise repeat the mapping-declare transaction byte for byte.)
+   generate_block();
+   set_expiration( db, trx );
    set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, {} );
    del();
    BOOST_CHECK( nullptr == db.find( oid ) );
@@ -1150,16 +1272,20 @@ BOOST_AUTO_TEST_CASE( losing_quorum_clears_the_bound_assets_feed )
    ACTORS( (alice)(bob)(carol) );
    fund( alice ); fund( bob ); fund( carol );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIATEST", alice_id );
    const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "MIA.CORE";
-   cop.base_asset  = mia_id;
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id]   = 1;
-   cop.options.producers[carol_id] = 1;
+   cop.base        = mia_ref;
+   cop.quote       = bts_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
+   cop.options.producers[carol_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers   = 2;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
@@ -1169,16 +1295,7 @@ BOOST_AUTO_TEST_CASE( losing_quorum_clears_the_bound_assets_feed )
    const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
 
    auto pub = [&]( account_id_type who, const fc::ecc::private_key& key, int64_t n ) {
-      oracle_publish_operation op;
-      op.producer  = who;
-      op.oracle_id = oid;
-      op.value     = price( asset( 1, mia_id ), asset( n, asset_id_type() ) );
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( key, db.get_chain_id() );
-      PUSH_TX( db, tx );
+      rev2_publish( *this, oid, who, key, { rv( 1, n ) } );
    };
 
    pub( bob_id,   bob_private_key,   10 );
@@ -1193,8 +1310,8 @@ BOOST_AUTO_TEST_CASE( losing_quorum_clears_the_bound_assets_feed )
 
    // shorten the lifetime so nothing published so far still counts
    oracle_options tighter;
-   tighter.producers[bob_id]   = 1;
-   tighter.producers[carol_id] = 1;
+   tighter.producers[bob_id] = oracle_producer_entry( 1 );
+   tighter.producers[carol_id] = oracle_producer_entry( 1 );
    tighter.minimum_producers   = 2;
    tighter.value_lifetime_sec  = 1;    // everything published so far is now stale
    {
@@ -1215,8 +1332,9 @@ BOOST_AUTO_TEST_CASE( losing_quorum_clears_the_bound_assets_feed )
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
 } FC_LOG_AND_RETHROW() }
 
-/// Binding is not allowed at creation: the oracle's base asset has to be the smartcoin, which
-/// has no id yet, so there would be nothing to validate the orientation against.
+/// Binding is not allowed at creation: the oracle's base reference has to be the smartcoin's
+/// mapping, which cannot be checked before the smartcoin exists. Bind with
+/// asset_update_bitasset once the asset has an id.
 BOOST_AUTO_TEST_CASE( a_price_oracle_cannot_be_set_when_creating_an_asset )
 { try {
    generate_blocks( HARDFORK_ORACLE_TIME );
@@ -1227,13 +1345,16 @@ BOOST_AUTO_TEST_CASE( a_price_oracle_cannot_be_set_when_creating_an_asset )
    fund( alice );
    fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 2 );
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "MIA.CORE";
-   cop.base_asset  = mia.get_id();
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id] = 1;
+   cop.base        = mia_ref;
+   cop.quote       = bts_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers = 1;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
@@ -1288,17 +1409,21 @@ BOOST_AUTO_TEST_CASE( a_smartcoin_stops_quoting_an_oracle_whose_producers_went_s
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIASILENT", alice_id );
    const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAS", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
 
    const uint32_t lifetime = 60;   // short, so the test does not need hours of blocks
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "SILENT.CORE";
-   cop.base_asset  = mia_id;
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id]  = 1;
+   cop.base        = mia_ref;
+   cop.quote       = bts_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers  = 1;
    cop.options.value_lifetime_sec = lifetime;
    signed_transaction ctx;
@@ -1309,18 +1434,7 @@ BOOST_AUTO_TEST_CASE( a_smartcoin_stops_quoting_an_oracle_whose_producers_went_s
    const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
 
    // One publish, then silence.
-   {
-      oracle_publish_operation op;
-      op.producer  = bob_id;
-      op.oracle_id = oid;
-      op.value     = price( asset( 1, mia_id ), asset( 10, asset_id_type() ) );
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( bob_private_key, db.get_chain_id() );
-      PUSH_TX( db, tx );
-   }
+   rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 1, 10 ) } );
 
    // Bind, and shorten the asset's own feed lifetime so the expiry path is reachable in a
    // handful of blocks rather than a day.
@@ -1383,15 +1497,19 @@ BOOST_AUTO_TEST_CASE( a_bound_feed_is_stamped_with_the_oracle_value_time )
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIASTAMP", alice_id );
    const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAF", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "STAMP.CORE";
-   cop.base_asset  = mia_id;
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id] = 1;
+   cop.base        = mia_ref;
+   cop.quote       = bts_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers = 1;
    signed_transaction ctx;
    ctx.operations.push_back( cop );
@@ -1400,18 +1518,7 @@ BOOST_AUTO_TEST_CASE( a_bound_feed_is_stamped_with_the_oracle_value_time )
    ctx.sign( alice_private_key, db.get_chain_id() );
    const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
 
-   {
-      oracle_publish_operation op;
-      op.producer  = bob_id;
-      op.oracle_id = oid;
-      op.value     = price( asset( 1, mia_id ), asset( 10, asset_id_type() ) );
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( bob_private_key, db.get_chain_id() );
-      PUSH_TX( db, tx );
-   }
+   rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 1, 10 ) } );
    set_price_oracle( *this, mia_id(db), alice_id, alice_private_key, oid );
 
    const auto value_time = oid(db).current_value_time;
@@ -1447,17 +1554,20 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_covers_its_configured_window_however_oft
    ACTORS( (alice)(bob) );
    fund( alice ); fund( bob );
 
+   setup_references( alice_id, alice_private_key );
    const asset_object& mia = create_bitasset( "MIAWINDOW", alice_id );
    const auto mia_id = mia.get_id();
+   (void)mia_id;
 
    const uint32_t window = 3600;
 
    oracle_create_operation cop;
    cop.owner       = alice_id;
    cop.name        = "WINDOW.CORE";
-   cop.base_asset  = mia_id;
-   cop.quote_asset = asset_id_type();
-   cop.options.producers[bob_id] = 1;
+   cop.base        = bts_ref;
+   cop.quote       = usd_ref;
+   cop.series      = rev2_single_mid_series();
+   cop.options.producers[bob_id] = oracle_producer_entry( 1 );
    cop.options.minimum_producers = 1;
    cop.options.aggregation       = static_cast<uint8_t>( oracle_aggregation_method::median_over_window );
    cop.options.window_sec        = window;
@@ -1469,16 +1579,7 @@ BOOST_AUTO_TEST_CASE( a_windowed_median_covers_its_configured_window_however_oft
    const oracle_id_type oid { PUSH_TX( db, ctx ).operation_results.front().get<object_id_type>() };
 
    auto pub = [&]( int64_t n ) {
-      oracle_publish_operation op;
-      op.producer  = bob_id;
-      op.oracle_id = oid;
-      op.value     = price( asset( 1, mia_id ), asset( n, asset_id_type() ) );
-      signed_transaction tx;
-      tx.operations.push_back( op );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      tx.sign( bob_private_key, db.get_chain_id() );
-      PUSH_TX( db, tx );
+      rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 1, n ) } );
    };
 
    // Publish every block for comfortably more blocks than the ring can hold.
@@ -1578,5 +1679,419 @@ BOOST_AUTO_TEST_CASE( appending_price_oracle_id_did_not_shift_existing_extension
    BOOST_CHECK( !back.extensions.value.initial_collateral_ratio.valid() );
 }
 
+/**
+ * reference_asset_mapping was appended LAST to bitasset_options::ext. Same rule as above:
+ * its tag (7, after price_oracle_id at 6) must never shift.
+ */
+BOOST_AUTO_TEST_CASE( appending_reference_asset_mapping_did_not_shift_existing_extension_tags )
+{
+   bitasset_options o;
+   reference_mapping m;
+   m.reference = reference_asset_id_type( 2 );
+   m.asset_amount = 100;
+   m.reference_amount = 1;
+   o.extensions.value.reference_asset_mapping = m;
+
+   auto bytes = fc::raw::pack( o.extensions );
+   BOOST_REQUIRE( bytes.size() >= 2 );
+   BOOST_CHECK_EQUAL( int( bytes[0] ), 1 );
+   BOOST_CHECK_EQUAL( int( bytes[1] ), 7 );
+
+   auto back = fc::raw::unpack<bitasset_options>( fc::raw::pack( o ) );
+   BOOST_REQUIRE( back.extensions.value.reference_asset_mapping.valid() );
+   BOOST_CHECK( back.extensions.value.reference_asset_mapping->reference
+                == reference_asset_id_type( 2 ) );
+   BOOST_CHECK_EQUAL( back.extensions.value.reference_asset_mapping->asset_amount.value, 100 );
+   BOOST_CHECK_EQUAL( back.extensions.value.reference_asset_mapping->reference_amount.value, 1 );
+}
+
+
+BOOST_AUTO_TEST_SUITE_END()
+
+/**
+ * Rev-2 oracle tests (Track B Task 6): reference assets, mappings, multi-series oracles,
+ * per-producer outlier exclusion, and the consumer conversion formula.
+ *
+ * Revision 2 prices oracles in reference assets instead of on-chain asset ids; on-chain
+ * assets declare which reference asset they track. See ORACLE-DESIGN.md (Reference assets,
+ * Mapping, Oracles, Series, Consumers, Aggregation, Outlier handling, Consensus safety).
+ */
+BOOST_FIXTURE_TEST_SUITE( oracle_rev2_tests, database_fixture )
+
+namespace {
+
+/// One published value per series: that many base smallest-units equal that many quote
+/// smallest-units. Both positive int64; comparison stays exact by 128-bit cross-multiplication.
+/// (rv/rseries/rev2_* helpers live in the anonymous namespace above, shared with the
+/// migrated Rev-1 suites.)
+
+} // namespace
+
+/// T6a: reference assets are created behind the committee gate, symbols are unique within
+/// their own namespace, precision is immutable, and an issuer declares a 1:1 mapping.
+BOOST_AUTO_TEST_CASE( t6a_reference_asset_create_and_mapping_declare )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice );
+   fund( bob );
+
+   // While creation is committee-only, an ordinary account cannot create one.
+   {
+      reference_asset_create_operation op;
+      op.creator   = alice_id;
+      op.symbol    = "USD";
+      op.precision = 4;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+
+   // A committee member can.
+   rev2_make_committee_member( *this, alice );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   {
+      const auto& ref = usd_ref(db);
+      BOOST_CHECK_EQUAL( ref.symbol, "USD" );
+      BOOST_CHECK_EQUAL( int( ref.precision ), 4 );
+      BOOST_CHECK( ref.creator == alice_id );
+   }
+
+   // The namespace is the reference assets' own: reusing the symbol fails even for a
+   // committee member with a different precision -- and that also shows precision cannot
+   // be changed by recreating (there is no update operation at all, so what is stored
+   // at creation is final).
+   rev2_make_committee_member( *this, bob );
+   GRAPHENE_REQUIRE_THROW(
+      rev2_create_reference( *this, bob_id, bob_private_key, "USD", 2 ), fc::exception );
+   BOOST_CHECK_EQUAL( usd_ref(db).precision, 4 );
+
+   // Opening creation via the chain parameter lets anyone create.
+   {
+      auto& gpo = db.get_global_properties();
+      db.modify( gpo, []( global_property_object& p ) {
+         p.parameters.extensions.value.allow_public_reference_asset_creation = true;
+      } );
+   }
+   const auto bts_ref = rev2_create_reference( *this, bob_id, bob_private_key, "BTS", 5 );
+   BOOST_CHECK_EQUAL( bts_ref(db).precision, 5 );
+
+   // An issuer declares a 1:1 mapping of its own smartcoin to the reference asset.
+   const asset_object& mia = create_bitasset( "HONESTUSD", alice_id );
+   reference_mapping m;
+   m.reference         = usd_ref;
+   m.asset_amount      = 1;
+   m.reference_amount  = 1;
+   rev2_declare_mapping( *this, mia, alice_id, alice_private_key, m );
+   const auto& stored = mia.get_id()(db).bitasset_data(db).options
+                           .extensions.value.reference_asset_mapping;
+   BOOST_REQUIRE( stored.valid() );
+   BOOST_CHECK( stored->reference == usd_ref );
+   BOOST_CHECK_EQUAL( stored->asset_amount.value, 1 );
+   BOOST_CHECK_EQUAL( stored->reference_amount.value, 1 );
+} FC_LOG_AND_RETHROW() }
+
+/// New Rev-2 state must be refused before the hardfork, like every oracle field before it.
+BOOST_AUTO_TEST_CASE( t6a_rev2_state_is_refused_before_the_hardfork )
+{ try {
+   ACTORS( (alice) );
+   fund( alice );
+
+   // reference_asset_create before the fork
+   {
+      reference_asset_create_operation op;
+      op.creator   = alice_id;
+      op.symbol    = "USD";
+      op.precision = 4;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+
+   // a reference mapping on a bitasset before the fork
+   {
+      const asset_object& mia = create_bitasset( "PREFORKT", alice_id );
+      asset_update_bitasset_operation op;
+      op.issuer          = alice_id;
+      op.asset_to_update = mia.get_id();
+      op.new_options     = mia.bitasset_data( db ).options;
+      reference_mapping m;
+      m.reference        = reference_asset_id_type( 0 );
+      m.asset_amount     = 1;
+      m.reference_amount = 1;
+      op.new_options.extensions.value.reference_asset_mapping = m;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+} FC_LOG_AND_RETHROW() }
+
+/// T6b: an oracle over a reference pair (USD/BTS) with two producers publishing per-series
+/// values aggregates each series independently.
+BOOST_AUTO_TEST_CASE( t6b_oracle_over_reference_pair_with_two_producers )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+   rev2_make_committee_member( *this, alice );
+
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 2;
+
+   // Two series: both mid, one rounded down and one rounded up.
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::mid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::mid, oracle_series_rounding::up ),
+   };
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "USD.BTS",
+                                     usd_ref, bts_ref, series, opts );
+   BOOST_CHECK( !oid(db).current_value.valid() );
+
+   // One submission is below quorum.
+   rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 100, 2000 ), rv( 100, 1900 ) } );
+   BOOST_CHECK( !oid(db).current_value.valid() );
+
+   // Two submissions reach quorum; each series takes the upper median of {2000-quote,
+   // 2100-quote} and {1900-quote, 2000-quote} respectively, i.e. the SMALLER ratio in
+   // each (base/quote with fixed base: a larger quote is a smaller price, and the upper
+   // median picks index size/2 of the ascending sort).
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 100, 2100 ), rv( 100, 2000 ) } );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_REQUIRE_EQUAL( oid(db).current_value->size(), 2u );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 100, 2000 ) );
+   BOOST_CHECK( oid(db).current_value->at( 1 ) == rv( 100, 1900 ) );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 2u );
+
+   // History records one entry holding a value per series.
+   BOOST_REQUIRE( !oid(db).history.empty() );
+   BOOST_CHECK_EQUAL( oid(db).history.back().second.size(), 2u );
+} FC_LOG_AND_RETHROW() }
+
+/// T6c: a single submission must satisfy bid <= ask and down-rounded <= up-rounded;
+/// violating either rejects the whole submission.
+BOOST_AUTO_TEST_CASE( t6c_publish_enforces_series_relations )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+   rev2_make_committee_member( *this, alice );
+
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::bid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::ask, oracle_series_rounding::up ),
+      rseries( oracle_series_kind::mid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::mid, oracle_series_rounding::up ),
+   };
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "USD.BTS",
+                                     usd_ref, bts_ref, series, opts );
+
+   // bid 100/200 = 0.5 <= ask 100/190 ~= 0.526, down-mid 0.5 <= up-mid 0.526: accepted.
+   rev2_publish( *this, oid, bob_id, bob_private_key,
+                 { rv( 100, 200 ), rv( 100, 190 ), rv( 100, 200 ), rv( 100, 190 ) } );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+
+   // bid 100/100 = 1.0 > ask 100/190: the whole submission is rejected, nothing changes.
+   GRAPHENE_REQUIRE_THROW(
+      rev2_publish( *this, oid, bob_id, bob_private_key,
+                    { rv( 100, 100 ), rv( 100, 190 ), rv( 100, 200 ), rv( 100, 190 ) } ),
+      fc::exception );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 100, 200 ) );
+
+   // down-mid 100/200 = 0.5 > up-mid 100/210 ~= 0.476: rejected as well.
+   GRAPHENE_REQUIRE_THROW(
+      rev2_publish( *this, oid, bob_id, bob_private_key,
+                    { rv( 100, 200 ), rv( 100, 190 ), rv( 100, 200 ), rv( 100, 210 ) } ),
+      fc::exception );
+   BOOST_CHECK( oid(db).current_value->at( 2 ) == rv( 100, 200 ) );
+
+   // wrong arity (fewer values than series) is rejected, not padded.
+   GRAPHENE_REQUIRE_THROW(
+      rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 100, 200 ) } ),
+      fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// T6d: the spec's Series proof as a test -- aggregation runs per series over the SAME
+/// producer set, so bid <= ask survives the median.
+BOOST_AUTO_TEST_CASE( t6d_aggregation_preserves_bid_leq_ask_after_median )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+   rev2_make_committee_member( *this, alice );
+
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id]  = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 2;
+
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::bid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::ask, oracle_series_rounding::up ),
+   };
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "USD.BTS",
+                                     usd_ref, bts_ref, series, opts );
+
+   // Every producer's bid <= its ask (base fixed at 1000; a larger quote is a smaller price):
+   //   bids 400/1000=0.4, 500/1000=0.5, 600/1000=0.6
+   //   asks 450/1000=0.45, 550/1000=0.55, 650/1000=0.65
+   rev2_publish( *this, oid, bob_id, bob_private_key,     { rv( 400, 1000 ), rv( 450, 1000 ) } );
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 500, 1000 ), rv( 550, 1000 ) } );
+   rev2_publish( *this, oid, dave_id, dave_private_key,   { rv( 600, 1000 ), rv( 650, 1000 ) } );
+
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_REQUIRE_EQUAL( oid(db).current_value->size(), 2u );
+   // middle of three in each series
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 500, 1000 ) );
+   BOOST_CHECK( oid(db).current_value->at( 1 ) == rv( 550, 1000 ) );
+   // and the relation holds after aggregation
+   BOOST_CHECK( !( oid(db).current_value->at( 1 ) < oid(db).current_value->at( 0 ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T6e: the outlier filter excludes a PRODUCER from all series or from none -- otherwise
+/// the bid median and the ask median would be taken over different sets and the
+/// aggregated bid could exceed the aggregated ask.
+BOOST_AUTO_TEST_CASE( t6e_outlier_exclusion_covers_all_series_of_a_producer )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+   rev2_make_committee_member( *this, alice );
+
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id]  = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 2;
+   opts.max_deviation_ppm   = 500000; // 50%: mids 20% apart are fine, a 100x bid is not
+
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::bid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::mid, oracle_series_rounding::unspecified ),
+   };
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "USD.BTS",
+                                     usd_ref, bts_ref, series, opts );
+
+   // bids: bob and carol agree at 0.5, dave reports 0.001 -- deviant in this series.
+   // mids: 0.4 / 0.6 / 0.5, each within 50% of the round median 0.5 -- dave is NOT
+   // deviant in this series, but must still be excluded from it.
+   rev2_publish( *this, oid, bob_id, bob_private_key,     { rv( 500, 1000 ), rv( 400, 1000 ) } );
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 500, 1000 ), rv( 600, 1000 ) } );
+   rev2_publish( *this, oid, dave_id, dave_private_key,   { rv( 1, 1000 ),   rv( 500, 1000 ) } );
+
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   // quorum intact over the two honest producers
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 2u );
+   // bid: median of {0.5, 0.5}
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == rv( 500, 1000 ) );
+   // mid: median of {0.4, 0.6} with the upper-median convention is 0.6 -- dave's 0.5
+   // is NOT counted. Per-series exclusion would have kept it and reported 0.5.
+   BOOST_CHECK( oid(db).current_value->at( 1 ) == rv( 600, 1000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T6f: the consumer conversion formula (s_a.b.c_r) vs (s_r.q.c_a). With 1:1 mappings
+/// the oracle value passes through with no arithmetic; across precisions the product is
+/// exact in 256 bits, GCD-reduced, scaled down past GRAPHENE_MAX_SHARE_SUPPLY only when
+/// needed, rounding the way the chosen series declares.
+BOOST_AUTO_TEST_CASE( t6f_consumer_conversion_exactness_and_rounding )
+{
+   const asset_id_type debt_id( 1 );
+   const asset_id_type backing_id( 0 );
+
+   // 1:1 mappings in smallest units on both sides: the oracle value itself, no arithmetic.
+   {
+      reference_mapping debt_map, backing_map;
+      debt_map.reference = reference_asset_id_type( 0 );
+      debt_map.asset_amount = 1; debt_map.reference_amount = 1;
+      backing_map.reference = reference_asset_id_type( 1 );
+      backing_map.asset_amount = 1; backing_map.reference_amount = 1;
+
+      const price p = convert_oracle_value_to_price(
+            rv( 12345, 67890 ), debt_map, debt_id, backing_map, backing_id,
+            oracle_series_rounding::down );
+      BOOST_CHECK( p == price( asset( 12345, debt_id ), asset( 67890, backing_id ) ) );
+   }
+
+   // Cross-precision: debt maps 100:1 (like a 6-precision USDT against a 4-precision USD
+   // reference), backing is 1:1. (100.b.1) vs (1.q.1) with (b,q) = (3,4): 300 vs 4,
+   // GCD 4 -> 75 vs 1, both far below the supply cap so no scaling.
+   {
+      reference_mapping debt_map, backing_map;
+      debt_map.reference = reference_asset_id_type( 0 );
+      debt_map.asset_amount = 100; debt_map.reference_amount = 1;
+      backing_map.reference = reference_asset_id_type( 1 );
+      backing_map.asset_amount = 1; backing_map.reference_amount = 1;
+
+      const price p = convert_oracle_value_to_price(
+            rv( 3, 4 ), debt_map, debt_id, backing_map, backing_id,
+            oracle_series_rounding::down );
+      BOOST_CHECK( p == price( asset( 75, debt_id ), asset( 1, backing_id ) ) );
+   }
+
+   // Scale-down with declared rounding: debt maps 2:1, backing 1:1, oracle value at the
+   // supply cap (1e15, 1e15-1). N = 2e15, D = 1e15-1, coprime, N past the cap so both
+   // sides halve (scale 2). Down floors the odd side, up ceils it; the even side is
+   // exact either way.
+   {
+      reference_mapping debt_map, backing_map;
+      debt_map.reference = reference_asset_id_type( 0 );
+      debt_map.asset_amount = 2; debt_map.reference_amount = 1;
+      backing_map.reference = reference_asset_id_type( 1 );
+      backing_map.asset_amount = 1; backing_map.reference_amount = 1;
+
+      const int64_t cap = GRAPHENE_MAX_SHARE_SUPPLY;
+      const price down_p = convert_oracle_value_to_price(
+            rv( cap, cap - 1 ), debt_map, debt_id, backing_map, backing_id,
+            oracle_series_rounding::down );
+      BOOST_CHECK( down_p == price( asset( cap, debt_id ), asset( 499999999999999, backing_id ) ) );
+
+      const price up_p = convert_oracle_value_to_price(
+            rv( cap, cap - 1 ), debt_map, debt_id, backing_map, backing_id,
+            oracle_series_rounding::up );
+      BOOST_CHECK( up_p == price( asset( cap, debt_id ), asset( 500000000000000, backing_id ) ) );
+      BOOST_CHECK( down_p != up_p );
+   }
+}
 
 BOOST_AUTO_TEST_SUITE_END()

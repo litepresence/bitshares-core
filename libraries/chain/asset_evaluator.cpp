@@ -29,6 +29,7 @@
 #include <graphene/chain/exceptions.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 
 #include <functional>
@@ -134,6 +135,22 @@ namespace detail {
       FC_ASSERT( !options.extensions.value.price_oracle_id.valid()
                  || HARDFORK_ORACLE_PASSED( block_time ),
                  "A BitAsset's price oracle cannot be set before the oracle hardfork" );
+      FC_ASSERT( !options.extensions.value.reference_asset_mapping.valid()
+                 || HARDFORK_ORACLE_PASSED( block_time ),
+                 "A BitAsset's reference mapping cannot be set before the oracle hardfork" );
+   }
+
+   /// A declared mapping must be internally consistent and point at a reference asset that
+   /// exists. Checked here rather than left to first use: an asset mapped to nothing would
+   /// look consumable while no oracle value could ever convert into its price.
+   void check_reference_mapping( const database& d, const bitasset_options& options )
+   {
+      const auto& m = options.extensions.value.reference_asset_mapping;
+      if( !m.valid() )
+         return;
+      m->validate();
+      FC_ASSERT( nullptr != d.find( m->reference ),
+                 "Reference asset ${r} does not exist", ("r", m->reference) );
    }
 
    void check_bitasset_options_hf_bsip87(const fc::time_point_sec& block_time, const bitasset_options& options)
@@ -215,6 +232,9 @@ void_result asset_create_evaluator::do_evaluate( const asset_create_operation& o
       FC_ASSERT( !op.bitasset_opts->extensions.value.price_oracle_id.valid(),
                  "A price oracle cannot be bound when creating an asset; use "
                  "asset_update_bitasset once the asset exists" );
+      // A mapping, unlike a binding, names no asset of its own: the issuer may declare it
+      // at creation, provided the reference exists.
+      detail::check_reference_mapping( d, *op.bitasset_opts );
       detail::check_bitasset_options_hf_bsip87( now, *op.bitasset_opts ); // HF_REMOVABLE
       detail::check_bitasset_opts_hf_core2467( next_maint_time, *op.bitasset_opts ); // HF_REMOVABLE
    }
@@ -750,6 +770,7 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
    detail::check_bitasset_options_hf_bsip87( now, op.new_options ); // HF_REMOVABLE
    detail::check_bitasset_options_hf_oracle( now, op.new_options );
    detail::check_bitasset_opts_hf_core2467( next_maint_time, op.new_options ); // HF_REMOVABLE
+   detail::check_reference_mapping( d, op.new_options );
 
    const asset_object& asset_obj = op.asset_to_update(d);
 
@@ -795,8 +816,12 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
                            || ( old_mssr.valid() && *old_mssr != *new_mssr ) );
       FC_ASSERT( !mssr_changed, "No permission to update MSSR" );
    }
-   // Validate a newly bound oracle. Orientation is checked here, once, rather than every time
-   // the feed is read: a smartcoin fed by an inverted price would margin-call everyone.
+   // Validate a newly bound oracle. The binding is valid when the oracle's base is the
+   // reference asset of the smartcoin's own mapping and the oracle's quote is the
+   // reference asset of the backing asset's mapping (the core asset maps 1:1 to "BTS" by
+   // protocol rule). Checked here at bind time AND again on every read -- a mapping can
+   // change after binding, and a binding that no longer matches yields no price rather
+   // than a wrong one. A smartcoin fed by a mismatched oracle would margin-call everyone.
    const auto& new_oracle = op.new_options.extensions.value.price_oracle_id;
    const auto& old_oracle = current_bitasset_data.options.extensions.value.price_oracle_id;
    const bool oracle_changed = ( ( old_oracle.valid() != new_oracle.valid() )
@@ -804,13 +829,22 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
    if( new_oracle.valid() && oracle_changed )
    {
       const oracle_object& o = (*new_oracle)(d);
-      FC_ASSERT( o.base_asset == op.asset_to_update,
-                 "Oracle '${n}' is quoted with base asset ${b}, but must be quoted against "
-                 "this asset (${a})", ("n", o.name)("b", o.base_asset)("a", op.asset_to_update) );
-      FC_ASSERT( o.quote_asset == op.new_options.short_backing_asset,
-                 "Oracle '${n}' is quoted with quote asset ${q}, but must be quoted against "
-                 "the backing asset (${s})",
-                 ("n", o.name)("q", o.quote_asset)("s", op.new_options.short_backing_asset) );
+      const auto debt_mapping = get_effective_reference_mapping( d, op.asset_to_update );
+      FC_ASSERT( debt_mapping.valid(),
+                 "Cannot bind oracle '${n}': asset ${a} declares no reference mapping",
+                 ("n", o.name)("a", op.asset_to_update) );
+      FC_ASSERT( o.base == debt_mapping->reference,
+                 "Oracle '${n}' is quoted with base reference ${b}, but must be quoted against "
+                 "this asset's reference (${a})", ("n", o.name)("b", o.base)("a", debt_mapping->reference) );
+      const auto backing_mapping = get_effective_reference_mapping(
+            d, op.new_options.short_backing_asset );
+      FC_ASSERT( backing_mapping.valid(),
+                 "Cannot bind oracle '${n}': backing asset ${s} declares no reference mapping",
+                 ("n", o.name)("s", op.new_options.short_backing_asset) );
+      FC_ASSERT( o.quote == backing_mapping->reference,
+                 "Oracle '${n}' is quoted with quote reference ${q}, but must be quoted against "
+                 "the backing asset's reference (${s})",
+                 ("n", o.name)("q", o.quote)("s", backing_mapping->reference) );
       FC_ASSERT( o.subscribers.size() < size_t( GRAPHENE_ORACLE_MAX_SUBSCRIBERS ),
                  "Oracle '${n}' already has the maximum of ${m} subscribed assets",
                  ("n", o.name)("m", GRAPHENE_ORACLE_MAX_SUBSCRIBERS) );

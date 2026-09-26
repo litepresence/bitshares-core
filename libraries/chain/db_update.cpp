@@ -30,6 +30,7 @@
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -321,10 +322,31 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
       // is only recomputed when a producer publishes. An oracle whose producers all stopped
       // keeps its last aggregate for ever, so asking is_value_live is the only thing that
       // distinguishes a current price from one that expired months ago.
-      if( nullptr != o && o->is_value_live( head_time ) )
+      //
+      // The binding match is re-checked HERE as well, because a mapping can change after
+      // binding. A binding that no longer matches yields no price -- the smartcoin behaves
+      // as it does when its feeds expire -- never a misquoted one. It fails closed.
+      //
+      // INTERIM (Task 7 owns bindings): the legacy price_oracle_id binding names no series,
+      // so the first declared series feeds it. Task 7 introduces the {oracle, series}
+      // binding and replaces this with the consumer's chosen series.
+      if( nullptr != o && o->is_value_live( head_time )
+          && o->current_value.valid() && !o->series.empty()
+          && o->current_value->size() == o->series.size() )
       {
-         oracle_value = o->current_value;
-         oracle_value_time = o->current_value_time;
+         const auto debt_mapping = get_effective_reference_mapping( *this, bitasset.asset_id );
+         const auto backing_mapping = get_effective_reference_mapping(
+               *this, bitasset.options.short_backing_asset );
+         if( debt_mapping.valid() && backing_mapping.valid()
+             && o->base == debt_mapping->reference
+             && o->quote == backing_mapping->reference )
+         {
+            oracle_value = convert_oracle_value_to_price(
+                  o->current_value->front(), *debt_mapping, bitasset.asset_id,
+                  *backing_mapping, bitasset.options.short_backing_asset,
+                  o->series.front().get_rounding() );
+            oracle_value_time = o->current_value_time;
+         }
       }
    }
 

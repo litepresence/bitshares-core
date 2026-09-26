@@ -135,8 +135,9 @@ namespace graphene { namespace protocol {
             /* 78 */ oracle_create_operation,
             /* 79 */ oracle_update_operation,
             /* 80 */ oracle_delete_operation,
-            /* 81 */ oracle_publish_operation
-         >;
+            /* 81 */ oracle_publish_operation,
+            /* 82 */ reference_asset_create_operation
+          >;
 
    /**
     *  Appends required authorites to the result vector.  The authorities appended are not the

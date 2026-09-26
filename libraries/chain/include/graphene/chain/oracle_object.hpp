@@ -33,15 +33,20 @@ namespace graphene { namespace chain {
 
 using graphene::protocol::oracle_options;
 using graphene::protocol::oracle_aggregation_method;
+using graphene::protocol::oracle_series;
+using graphene::protocol::oracle_value;
 
 /**
- *  @brief A named price series, published to by a set of producers and referenced by id.
+ *  @brief A named price series between two reference assets, published to by a set of
+ *  producers and referenced by id.
  *  @ingroup object
  *  @ingroup protocol
  *
  *  Unlike a legacy price feed, an oracle is not an attribute of an asset. It exists in its
  *  own right so that several consumers can reference the same series, and so that a price
  *  that is not the settlement price of any particular smartcoin has somewhere to live.
+ *  Pricing in reference assets rather than on-chain asset ids is what makes sharing
+ *  possible: HONEST.USD and COMMITTEE.USD can both read one USD/BTS oracle.
  *
  *  See ORACLE-DESIGN.md for the reasoning behind the aggregation and outlier rules.
  */
@@ -52,28 +57,37 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       string          name;           ///< Unique, e.g. "BTC.USD"
       string          description;
 
-      /// What a published price means. Immutable once created: consumers reference an oracle
-      /// by id and would have no way to notice that what it measures had changed.
-      asset_id_type   base_asset;
-      asset_id_type   quote_asset;
+      /// What a published price means, as reference assets. Immutable once created:
+      /// consumers reference an oracle by id and would have no way to notice that what it
+      /// measures had changed.
+      reference_asset_id_type base;
+      reference_asset_id_type quote;
+
+      /// The ordered series list, fixed at creation. Every publish carries exactly one
+      /// value per entry, in order; aggregation runs per series over the same producers.
+      vector<oracle_series> series;
 
       oracle_options  options;
 
-      /// Latest submission per producer. Bounded by options.producers.
-      flat_map<account_id_type, pair<time_point_sec, price>> submissions;
+      /// Latest submission per producer: one value per declared series, in order.
+      /// Bounded by options.producers.
+      flat_map<account_id_type, pair<time_point_sec, vector<oracle_value>>> submissions;
 
-      /// Recent aggregates, oldest first, capped at GRAPHENE_ORACLE_MAX_HISTORY. Recorded from
-      /// the moment the oracle exists, because history cannot be reconstructed later.
-      vector<pair<time_point_sec, price>> history;
+      /// Recent aggregates, oldest first, capped at GRAPHENE_ORACLE_MAX_HISTORY entries
+      /// each holding one value per series. Recorded from the moment the oracle exists,
+      /// because history cannot be reconstructed later.
+      vector<pair<time_point_sec, vector<oracle_value>>> history;
 
       /**
-       * The current aggregate, or absent when there is no usable value.
+       * The current aggregate, or absent when there is no usable value. One value per
+       * declared series, in order.
        *
-       * Absent rather than a null price on purpose. A null price reads as zero in several
-       * existing code paths, and a consumer that mistakes "no data" for "price is zero" fails
-       * in the most expensive possible direction. An absent optional cannot be misread.
+       * Absent rather than an empty vector on purpose. An empty vector reads as "no
+       * series" in several code paths, and a consumer that mistakes "no data" for a
+       * usable aggregate fails in the most expensive possible direction. An absent
+       * optional cannot be misread.
        */
-      optional<price>  current_value;
+      optional<vector<oracle_value>>  current_value;
       time_point_sec   current_value_time;
 
       /// Number of live submissions behind @ref current_value, for API visibility into why an
@@ -119,16 +133,18 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        * Recomputes @ref current_value from @ref submissions and, for median_over_window, from
        * @ref history, and appends to the history ring.
        *
-       * Deterministic by construction: it only ever selects one of the observed prices, never
+       * Deterministic by construction: it only ever selects one of the observed values, never
        * computes a new one, so there is no rounding or overflow that could differ between
-       * nodes. @p now must be the head block time.
+       * nodes. Aggregation runs per series over the SAME producer set, which is what keeps
+       * bid <= ask true after aggregation (see ORACLE-DESIGN.md "Series"). @p now must be
+       * the head block time.
        */
       void update_current_value( time_point_sec now );
 };
 
 struct by_oracle_name;   ///< unique, and how humans address an oracle
 struct by_owner;         ///< for API
-struct by_asset_pair;    ///< for API
+struct by_reference_pair;///< for API
 
 /**
 * @ingroup object_index
@@ -146,10 +162,10 @@ using oracle_multi_index_type = multi_index_container<
             member< object, object_id_type, &object::id >
          >
       >,
-      ordered_unique< tag<by_asset_pair>,
+      ordered_unique< tag<by_reference_pair>,
          composite_key< oracle_object,
-            member< oracle_object, asset_id_type, &oracle_object::base_asset >,
-            member< oracle_object, asset_id_type, &oracle_object::quote_asset >,
+            member< oracle_object, reference_asset_id_type, &oracle_object::base >,
+            member< oracle_object, reference_asset_id_type, &oracle_object::quote >,
             member< object, object_id_type, &object::id >
          >
       >

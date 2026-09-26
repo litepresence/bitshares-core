@@ -25,6 +25,7 @@
 #include <graphene/protocol/base.hpp>
 #include <graphene/protocol/asset.hpp>
 #include <graphene/protocol/memo.hpp>
+#include <graphene/protocol/oracle.hpp>
 
 namespace graphene { namespace protocol {
 
@@ -150,12 +151,17 @@ namespace graphene { namespace protocol {
          fc::optional<uint16_t> force_settle_fee_percent;  // BSIP-87
          // https://github.com/bitshares/bitshares-core/issues/2467
          fc::optional<uint8_t> black_swan_response_method;
-         /// When set, the settlement price comes from this oracle instead of from the
-         /// legacy price feeds. The oracle must be quoted as <this asset>/<backing asset>.
-         /// Only settable via asset_update_bitasset, never at asset creation: the oracle's
-         /// base asset has to be the smartcoin itself, which does not exist yet at creation.
-         fc::optional<oracle_id_type> price_oracle_id;
-      };
+          /// When set, the settlement price comes from this oracle instead of from the
+          /// legacy price feeds. The oracle must be quoted as <this asset>/<backing asset>.
+          /// Only settable via asset_update_bitasset, never at asset creation: the oracle's
+          /// base asset has to be the smartcoin itself, which does not exist yet at creation.
+          fc::optional<oracle_id_type> price_oracle_id;
+          /// When set, the asset declares that it tracks this reference asset at the given
+          /// ratio (both in smallest units, both positive). Declared by the issuer; nobody
+          /// else may say what the issuer's token tracks. Appended last: extension tags are
+          /// append-only, and inserting here would renumber every field on chain.
+          fc::optional<reference_mapping> reference_asset_mapping;
+       };
 
       /// Time before a price feed expires
       uint32_t feed_lifetime_sec = GRAPHENE_DEFAULT_PRICE_FEED_LIFETIME;
@@ -651,6 +657,7 @@ FC_REFLECT( graphene::protocol::bitasset_options::ext,
             (force_settle_fee_percent)
             (black_swan_response_method)
             (price_oracle_id)
+            (reference_asset_mapping)
           )
 
 FC_REFLECT( graphene::protocol::bitasset_options,

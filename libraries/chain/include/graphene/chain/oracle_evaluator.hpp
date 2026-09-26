@@ -29,6 +29,16 @@
 namespace graphene { namespace chain {
 
    class oracle_object;
+   class reference_asset_object;
+
+   class reference_asset_create_evaluator : public evaluator<reference_asset_create_evaluator>
+   {
+      public:
+         using operation_type = reference_asset_create_operation;
+
+         void_result    do_evaluate( const reference_asset_create_operation& op ) const;
+         object_id_type do_apply( const reference_asset_create_operation& op ) const;
+   };
 
    class oracle_create_evaluator : public evaluator<oracle_create_evaluator>
    {

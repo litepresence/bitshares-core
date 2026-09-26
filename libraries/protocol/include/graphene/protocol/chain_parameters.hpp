@@ -85,6 +85,10 @@ namespace graphene { namespace protocol {
          optional< custom_authority_options_type > custom_authority_options;
          optional< uint16_t > market_fee_network_percent;
          optional< uint16_t > maker_fee_discount_percent;
+         /// When set, anyone may create reference assets. While absent (the starting
+         /// regime) creation is committee-only, so opening it later needs no hardfork.
+         /// Appended last: extension tags are append-only.
+         optional< bool > allow_public_reference_asset_creation;
       };
 
       extension<ext> extensions;
@@ -128,6 +132,7 @@ FC_REFLECT( graphene::protocol::chain_parameters::ext,
       (custom_authority_options)
       (market_fee_network_percent)
       (maker_fee_discount_percent)
+      (allow_public_reference_asset_creation)
 )
 
 FC_REFLECT( graphene::protocol::chain_parameters,

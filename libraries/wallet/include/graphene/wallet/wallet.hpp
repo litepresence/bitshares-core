@@ -1185,8 +1185,10 @@ class wallet_api
        * @param owner the account that will administer the oracle and pay the fee
        * @param name unique, e.g. "BTC.USD"; uppercase letters, digits, '.' and '-'
        * @param description free text
-       * @param base_symbol symbol of the base asset of the quoted price
-       * @param quote_symbol symbol of the quote asset of the quoted price
+       * @param base_symbol symbol of the base reference asset of the quoted price
+       * @param quote_symbol symbol of the quote reference asset of the quoted price
+       * @param series the ordered series list, fixed at creation; every publish carries
+       *               one value per entry, in order
        * @param options producers and their weights, quorum, staleness, aggregation method
        * @param broadcast true to broadcast the transaction on the network
        * @returns the signed transaction
@@ -1194,6 +1196,7 @@ class wallet_api
       signed_transaction create_oracle( const string& owner, const string& name,
                                         const string& description, const string& base_symbol,
                                         const string& quote_symbol,
+                                        const vector<oracle_series>& series,
                                         const oracle_options& options, bool broadcast );
 
       /** Changes an oracle's description or policy.
@@ -1231,19 +1234,19 @@ class wallet_api
       signed_transaction delete_oracle( const string& owner, const string& name_or_id,
                                         bool broadcast );
 
-      /** Submits one value to an oracle, as one of its producers.
+      /** Submits one value per declared series to an oracle, as one of its producers.
        *
-       *  The price must be quoted as the oracle's base/quote pair; an inverted price is
-       *  rejected rather than silently flipped.
+       *  The values must arrive one per series the oracle declared, in order, and satisfy
+       *  the submission relations (bid <= ask, down-rounded <= up-rounded of the same kind).
        *
        * @param producer the publishing account, which must be a producer of this oracle
        * @param name_or_id the oracle's name or id
-       * @param value the price
+       * @param values one value per declared series, in order
        * @param broadcast true to broadcast the transaction on the network
        * @returns the signed transaction
        */
       signed_transaction publish_oracle_value( const string& producer, const string& name_or_id,
-                                               const price& value, bool broadcast );
+                                               const vector<oracle_value>& values, bool broadcast );
 
       signed_transaction update_bitasset( const string& symbol_or_id,
                                           const bitasset_options& new_options,

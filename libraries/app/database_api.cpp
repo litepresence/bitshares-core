@@ -2133,6 +2133,32 @@ vector<oracle_object> database_api::get_oracles_by_owner(
                                   idx, limit, start_id, owner );
 }
 
+vector<optional<reference_asset_object>> database_api::get_reference_assets(
+            const vector<reference_asset_id_type>& reference_ids )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_id>();
+   vector<optional<reference_asset_object>> result;
+   result.reserve( reference_ids.size() );
+   std::transform( reference_ids.begin(), reference_ids.end(), std::back_inserter(result),
+                   [&idx]( reference_asset_id_type id ) -> optional<reference_asset_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<reference_asset_object> database_api::get_reference_asset_by_symbol(
+            const string& symbol )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_reference_symbol>();
+   auto itr = idx.find( symbol );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
 vector<credit_offer_object> database_api::get_credit_offers_by_asset(
             const std::string& asset_symbol_or_id,
             const optional<uint32_t>& limit,

@@ -244,6 +244,10 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for oracle operations prior to the oracle hardfork");
          FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_publish_operation>(),
                    "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reference_asset_create_operation>(),
+                   "Unable to define fees for reference asset operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.extensions.value.allow_public_reference_asset_creation.valid(),
+                   "Unable to set reference asset creation policy before the oracle hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
@@ -346,6 +350,9 @@ struct proposal_operation_hardfork_visitor
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
    }
    void operator()(const graphene::chain::oracle_publish_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::reference_asset_create_operation&) const {
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
    }
 

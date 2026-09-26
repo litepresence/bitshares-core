@@ -234,19 +234,23 @@ namespace graphene { namespace wallet { namespace detail {
    } FC_CAPTURE_AND_RETHROW( (name_or_id) ) }
 
    signed_transaction wallet_api_impl::create_oracle( string owner, string name, string description,
-         string base_symbol, string quote_symbol, oracle_options options, bool broadcast )
+         string base_symbol, string quote_symbol, vector<oracle_series> series,
+         oracle_options options, bool broadcast )
    { try {
-      optional<asset_object> base  = find_asset( base_symbol );
-      optional<asset_object> quote = find_asset( quote_symbol );
-      FC_ASSERT( base.valid(),  "No asset with symbol '${s}' exists", ("s", base_symbol) );
-      FC_ASSERT( quote.valid(), "No asset with symbol '${s}' exists", ("s", quote_symbol) );
+      // Reference assets live in their own namespace: these are reference symbols, not
+      // on-chain asset symbols, so they resolve through the reference registry.
+      auto base  = _remote_db->get_reference_asset_by_symbol( base_symbol );
+      auto quote = _remote_db->get_reference_asset_by_symbol( quote_symbol );
+      FC_ASSERT( base.valid(),  "No reference asset with symbol '${s}' exists", ("s", base_symbol) );
+      FC_ASSERT( quote.valid(), "No reference asset with symbol '${s}' exists", ("s", quote_symbol) );
 
       oracle_create_operation op;
       op.owner       = get_account_id( owner );
       op.name        = name;
       op.description = description;
-      op.base_asset  = base->get_id();
-      op.quote_asset = quote->get_id();
+      op.base        = base->get_id();
+      op.quote       = quote->get_id();
+      op.series      = series;
       op.options     = options;
 
       signed_transaction tx;
@@ -289,20 +293,20 @@ namespace graphene { namespace wallet { namespace detail {
    } FC_CAPTURE_AND_RETHROW( (owner)(name_or_id)(broadcast) ) }
 
    signed_transaction wallet_api_impl::publish_oracle_value( string producer, string name_or_id,
-         price value, bool broadcast )
+         vector<oracle_value> values, bool broadcast )
    { try {
       const oracle_object o = get_oracle( name_or_id );
 
-      // Checked here as well as on chain so a mis-oriented price fails locally, with a message
-      // naming the oracle, instead of coming back as a rejected transaction.
-      FC_ASSERT( value.base.asset_id == o.base_asset && value.quote.asset_id == o.quote_asset,
-                 "Oracle '${n}' expects a price quoted as ${b}/${q}",
-                 ("n", o.name)("b", o.base_asset)("q", o.quote_asset) );
+      // Checked here as well as on chain so a wrong-arity submission fails locally, with a
+      // message naming the oracle, instead of coming back as a rejected transaction.
+      FC_ASSERT( values.size() == o.series.size(),
+                 "Oracle '${n}' declares ${s} series but the submission carries ${v} values",
+                 ("n", o.name)("s", o.series.size())("v", values.size()) );
 
       oracle_publish_operation op;
       op.producer  = get_account_id( producer );
       op.oracle_id = o.get_id();
-      op.value     = value;
+      op.values    = values;
 
       signed_transaction tx;
       tx.operations.push_back( op );
@@ -310,7 +314,7 @@ namespace graphene { namespace wallet { namespace detail {
       tx.validate();
 
       return sign_transaction( tx, broadcast );
-   } FC_CAPTURE_AND_RETHROW( (producer)(name_or_id)(value)(broadcast) ) }
+   } FC_CAPTURE_AND_RETHROW( (producer)(name_or_id)(values)(broadcast) ) }
 
    signed_transaction wallet_api_impl::fund_asset_fee_pool(string from, string symbol, string amount,
          bool broadcast /* = false */)

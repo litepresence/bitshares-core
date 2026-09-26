@@ -22,6 +22,7 @@
 #include <graphene/chain/samet_fund_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/impacted.hpp>
 #include <graphene/chain/hardfork.hpp>
 
@@ -403,6 +404,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // producer
    }
+   void operator()( const reference_asset_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // creator
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );
@@ -534,6 +539,10 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
            // was reconfigured or removed from under it.
            for( const auto& p : aobj->options.producers )
               accounts.insert( p.first );
+           break;
+        } case reference_asset_object_type:{
+           const auto* aobj = dynamic_cast<const reference_asset_object*>( obj );
+           accounts.insert( aobj->creator );
            break;
         }
         // Do not have a default fallback so that there will be a compiler warning when a new type is added

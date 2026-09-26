@@ -264,12 +264,13 @@ public:
    oracle_object get_oracle( const string& name_or_id )const;
 
    signed_transaction create_oracle( string owner, string name, string description,
-         string base_symbol, string quote_symbol, oracle_options options, bool broadcast );
+         string base_symbol, string quote_symbol, vector<oracle_series> series,
+         oracle_options options, bool broadcast );
    signed_transaction update_oracle( string owner, string name_or_id,
          optional<string> new_description, optional<oracle_options> new_options, bool broadcast );
    signed_transaction delete_oracle( string owner, string name_or_id, bool broadcast );
-   signed_transaction publish_oracle_value( string producer, string name_or_id, price value,
-         bool broadcast );
+   signed_transaction publish_oracle_value( string producer, string name_or_id,
+         vector<oracle_value> values, bool broadcast );
 
    signed_transaction publish_asset_feed(string publishing_account, string symbol, price_feed feed,
          bool broadcast );

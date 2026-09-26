@@ -35,6 +35,7 @@
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
 #include <graphene/chain/ticket_object.hpp>
@@ -997,6 +998,22 @@ class database_api
             const optional<oracle_id_type>& start_id = optional<oracle_id_type>() )const;
 
       /**
+       * @brief Get the reference assets with the given ids
+       * @param reference_ids IDs of the reference assets to retrieve
+       * @return The reference assets, with an empty slot for each unknown id
+       */
+      vector<optional<reference_asset_object>> get_reference_assets(
+            const vector<reference_asset_id_type>& reference_ids )const;
+
+      /**
+       * @brief Get the reference asset with the given symbol
+       * @param symbol Symbol of the reference asset, e.g. "USD"
+       * @return The reference asset, or nothing if there is no such symbol
+       */
+      optional<reference_asset_object> get_reference_asset_by_symbol(
+            const string& symbol )const;
+
+      /**
        * @brief Get a list of credit offers by the name or ID of the owner account
        * @param account_name_or_id name or ID of the owner account
        * @param limit The limitation of items each query can fetch, not greater than the configured value of
@@ -1610,6 +1627,8 @@ FC_API(graphene::app::database_api,
    (get_oracle_by_name)
    (list_oracles)
    (get_oracles_by_owner)
+   (get_reference_assets)
+   (get_reference_asset_by_symbol)
    (get_credit_offers_by_asset)
    (list_credit_deals)
    (get_credit_deals_by_offer_id)

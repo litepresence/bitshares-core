@@ -52,12 +52,21 @@ namespace graphene { namespace protocol {
    /// A producer's weight. Weight is set by the owner, never earned; see ORACLE-DESIGN.md.
    constexpr uint16_t GRAPHENE_ORACLE_MAX_PRODUCER_WEIGHT = 1000;
 
-   constexpr size_t GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH = 2;
-   constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH = 16;
-   constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH = 1000;
-   /// Kept identical to an asset's precision bound: a reference asset has a smallest unit
-   /// exactly like an asset does, so the same range applies.
-   constexpr uint8_t GRAPHENE_REFERENCE_ASSET_MAX_PRECISION = 12;
+    constexpr size_t GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH = 2;
+    constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH = 16;
+    constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH = 1000;
+    /// Kept identical to an asset's precision bound: a reference asset has a smallest unit
+    /// exactly like an asset does, so the same range applies.
+    constexpr uint8_t GRAPHENE_REFERENCE_ASSET_MAX_PRECISION = 12;
+
+    /**
+     * The precision a reference asset named "BTS" must be created with. The core asset
+     * (1.3.0) maps 1:1 to the BTS reference by protocol rule, and the core asset's own
+     * precision is 5 (GRAPHENE_BLOCKCHAIN_PRECISION = 10^5): any other precision on the
+     * reference side would silently mis-scale every core-quoted conversion. Enforced at
+     * creation, in the operation's validate() and again in its evaluator.
+     */
+    constexpr uint8_t GRAPHENE_REFERENCE_ASSET_BTS_PRECISION = 5;
 
    /**
     * How an oracle turns its producers' submissions into one value.
@@ -215,15 +224,43 @@ namespace graphene { namespace protocol {
     */
    struct reference_mapping
    {
-      reference_asset_id_type reference;
-      share_type asset_amount;
-      share_type reference_amount;
+       reference_asset_id_type reference;
+       share_type asset_amount;
+       share_type reference_amount;
 
-      void validate()const;
-   };
+       void validate()const;
+    };
 
-   /**
-    * @brief Creates a unit a price can be quoted in: a symbol and a precision nobody holds.
+    bool operator==( const reference_mapping& a, const reference_mapping& b );
+    inline bool operator!=( const reference_mapping& a, const reference_mapping& b )
+    { return !( a == b ); }
+
+    /**
+     * @brief A smartcoin's binding to an oracle: WHICH oracle and WHICH of its series.
+     *
+     * The legacy price_oracle_id binding names an oracle but no series (it reads series 0
+     * and is refused against multi-series oracles). This struct names both, so several
+     * consumers can read different series of one oracle and no consumer silently reads a
+     * series it did not choose. Appended as bitasset_options::ext::price_oracle_binding; the two
+     * fields are mutually exclusive on one asset.
+     */
+    struct price_oracle
+    {
+       oracle_id_type oracle_id;
+       /// Index into the oracle's declared series list. Range-checked against the oracle
+       /// at bind time; the read path re-checks (fail closed on drift).
+       uint16_t series = 0;
+
+       void validate()const;
+    };
+
+    inline bool operator==( const price_oracle& a, const price_oracle& b )
+    { return a.oracle_id == b.oracle_id && a.series == b.series; }
+    inline bool operator!=( const price_oracle& a, const price_oracle& b )
+    { return !( a == b ); }
+
+    /**
+     * @brief Creates a unit a price can be quoted in: a symbol and a precision nobody holds.
     * @ingroup operations
     *
     * Reference assets live in their own namespace: a reference asset "USD" and the smartcoin
@@ -412,7 +449,10 @@ FC_REFLECT( graphene::protocol::oracle_value,
             (base_amount)(quote_amount) )
 
 FC_REFLECT( graphene::protocol::oracle_producer_entry,
-            (weight)(extensions) )
+             (weight)(extensions) )
+
+FC_REFLECT( graphene::protocol::price_oracle,
+             (oracle_id)(series) )
 
 FC_REFLECT( graphene::protocol::reference_mapping,
             (reference)(asset_amount)(reference_amount) )
@@ -441,6 +481,7 @@ FC_REFLECT( graphene::protocol::oracle_publish_operation,
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::price_oracle )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::reference_mapping )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_options )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::reference_asset_create_operation::fee_params_t )

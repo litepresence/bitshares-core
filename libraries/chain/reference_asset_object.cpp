@@ -25,6 +25,7 @@
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/oracle_object.hpp>
 
 namespace graphene { namespace chain {
 
@@ -48,9 +49,33 @@ optional<reference_mapping> get_effective_reference_mapping( const database& d, 
       return m;
    }
    const asset_object* a = d.find( asset );
-   if( nullptr == a || !a->is_market_issued() )
+   if( nullptr == a )
       return {};
-   return a->bitasset_data( d ).options.extensions.value.reference_asset_mapping;
+   if( a->is_market_issued() )
+      return a->bitasset_data( d ).options.extensions.value.reference_asset_mapping;
+   // The UIA mapping home (F4): a non-market-issued asset declares what it tracks in its
+   // common options. This is what lets an MIA backed by a UIA, or a futures market
+   // collateralized in one, bind an oracle. A market-issued asset must NOT set this (its
+   // mapping lives in bitasset options); the asset evaluators refuse it there.
+   return a->options.extensions.value.reference_asset_mapping;
+}
+
+bool is_smartcoin_binding_valid( const oracle_object& o, uint16_t series_idx,
+                                 const reference_mapping& debt_mapping,
+                                 const reference_mapping& backing_mapping )
+{
+   return series_idx < o.series.size()
+          && o.base == debt_mapping.reference
+          && o.quote == backing_mapping.reference;
+}
+
+bool is_futures_binding_valid( const oracle_object& o, uint16_t series_idx,
+                               reference_asset_id_type underlying,
+                               const reference_mapping& collateral_mapping )
+{
+   return series_idx < o.series.size()
+          && o.base == underlying
+          && o.quote == collateral_mapping.reference;
 }
 
 } } // graphene::chain

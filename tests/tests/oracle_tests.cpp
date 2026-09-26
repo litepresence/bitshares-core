@@ -2095,3 +2095,661 @@ BOOST_AUTO_TEST_CASE( t6f_consumer_conversion_exactness_and_rounding )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+/**
+ * Rev-2 consumer bindings, Task 7: explicit {oracle, series} smartcoin bindings with
+ * bind-time AND read-time validity, UIA mapping home, BTS precision rule, futures-style
+ * validity, and the F5 stale-subscriber prune rule.
+ *
+ * T7a smartcoin binds {oracle, series} explicitly; drift fails closed + prune rule.
+ * T7b multi-series bind without a series choice is REFUSED (F3).
+ * T7c UIA-collateral mapping home: MIA backed by a mapped UIA binds and converts (F4).
+ * T7d BTS reference creation with precision != 5 is REFUSED (F2).
+ * T7e futures-style binding validity: underlying reference + collateral mapping +
+ *     oracle/series check, validity only (no matching engine changes).
+ * T7f two smartcoins of different issuers share one USD/BTS oracle and settle identically.
+ */
+BOOST_FIXTURE_TEST_SUITE( oracle_task7_tests, oracle_fixture )
+
+namespace {
+
+/// Binds (or, with an empty optional, unbinds) an explicit {oracle, series} as a
+/// smartcoin's price source. The Task 7 replacement for the series-naming legacy bind.
+void rev2_bind_series( database_fixture& f, const asset_object& mia,
+                       account_id_type issuer, const fc::ecc::private_key& key,
+                       const optional<price_oracle>& binding )
+{
+   asset_update_bitasset_operation op;
+   op.issuer          = issuer;
+   op.asset_to_update = mia.get_id();
+   op.new_options     = mia.bitasset_data( f.db ).options;
+   op.new_options.extensions.value.price_oracle_binding = binding;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void rev2_bind_explicit( database_fixture& f, const asset_object& mia,
+                         account_id_type issuer, const fc::ecc::private_key& key,
+                         oracle_id_type oid, uint16_t series )
+{
+   price_oracle b;
+   b.oracle_id = oid;
+   b.series    = series;
+   rev2_bind_series( f, mia, issuer, key, b );
+}
+
+/// Legacy bind without a series choice (Task 6 path). Multi-series oracles must refuse it.
+void rev2_bind_legacy( database_fixture& f, const asset_object& mia,
+                       account_id_type issuer, const fc::ecc::private_key& key,
+                       oracle_id_type oid )
+{
+   asset_update_bitasset_operation op;
+   op.issuer          = issuer;
+   op.asset_to_update = mia.get_id();
+   op.new_options     = mia.bitasset_data( f.db ).options;
+   op.new_options.extensions.value.price_oracle_id = oid;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void rev2_unbind_all( database_fixture& f, const asset_object& mia,
+                      account_id_type issuer, const fc::ecc::private_key& key )
+{
+   asset_update_bitasset_operation op;
+   op.issuer          = issuer;
+   op.asset_to_update = mia.get_id();
+   op.new_options     = mia.bitasset_data( f.db ).options;
+   op.new_options.extensions.value.price_oracle_binding   = {};
+   op.new_options.extensions.value.price_oracle_id = {};
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+/// Sets (or, with an empty optional, clears) the UIA mapping home: the reference mapping
+/// in the asset's common options (F4). Only meaningful on non-market-issued assets.
+void rev2_set_uia_mapping( database_fixture& f, const asset_object& uia,
+                           account_id_type issuer, const fc::ecc::private_key& key,
+                           const optional<reference_mapping>& m )
+{
+   asset_update_operation op;
+   op.issuer          = issuer;
+   op.asset_to_update = uia.get_id();
+   op.new_options     = uia.options;
+   op.new_options.extensions.value.reference_asset_mapping = m;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void rev2_delete_oracle( database_fixture& f, oracle_id_type oid,
+                         account_id_type owner, const fc::ecc::private_key& key )
+{
+   oracle_delete_operation op;
+   op.owner     = owner;
+   op.oracle_id = oid;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+} // namespace
+
+/// T7a-1: an explicit {oracle, series} bind feeds the smartcoin from the CHOSEN series,
+/// mapping drift fails closed at read time, and restoring the mapping resumes the feed
+/// without rebinding (drift never auto-unbinds).
+BOOST_AUTO_TEST_CASE( t7a_explicit_series_binding_with_drift_and_resume )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+   const asset_object& mia = create_bitasset( "MIATEST", alice_id );
+   const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
+
+   // Two mid series so the two published values can be told apart: series 0 quotes 20,
+   // series 1 quotes 10. Reading series[0] by mistake would show 20, not 10. (The
+   // down-rounded series 0 value must not exceed the up-rounded series 1 value of the
+   // same kind -- the publish evaluator enforces down <= up.)
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::mid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::mid, oracle_series_rounding::up ),
+   };
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "MIA.CORE",
+                                      mia_ref, bts_ref, series, opts );
+   rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 1, 20 ), rv( 1, 10 ) } );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+
+   // Bind series 1 explicitly: the feed must carry 10, proving the choice, not series[0].
+   rev2_bind_explicit( *this, mia_id(db), alice_id, alice_private_key, oid, 1 );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 10, asset_id_type() ) ) );
+
+   // Drift the mapping: the binding no longer matches, so the read yields no price.
+   reference_mapping drifted;
+   drifted.reference = usd_ref;
+   drifted.asset_amount = 1;
+   drifted.reference_amount = 1;
+   rev2_declare_mapping( *this, mia_id(db), alice_id, alice_private_key, drifted );
+   BOOST_CHECK_MESSAGE( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null(),
+                        "a mapping-drifted binding must fail closed, not keep quoting" );
+
+   // The drifted binding is NOT auto-removed: restoring the mapping resumes the same feed
+   // with no rebind. (In a fresh block: the restore tx is byte-identical to the initial
+   // declare, which the chain rejects as a duplicate within one block.)
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 1u );
+   generate_block();
+   set_expiration( db, trx );
+   rev2_declare_mapping_1to1( *this, mia_id(db), alice_id, alice_private_key, mia_ref );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 10, asset_id_type() ) ) );
+
+   // A live binding still blocks deletion.
+   GRAPHENE_REQUIRE_THROW( rev2_delete_oracle( *this, oid, alice_id, alice_private_key ),
+                           fc::exception );
+
+   // Unbind, then deletion succeeds.
+   generate_block();
+   set_expiration( db, trx );
+   rev2_unbind_all( *this, mia_id(db), alice_id, alice_private_key );
+   BOOST_CHECK( oid(db).subscribers.empty() );
+   rev2_delete_oracle( *this, oid, alice_id, alice_private_key );
+   BOOST_CHECK( nullptr == db.find( oid ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T7a-2 (F5): a mapping-drifted subscriber is STALE. It yields no price, and -- the prune
+/// rule -- it must not block oracle_delete forever: deletion prunes it (clearing the dead
+/// binding on the asset) and proceeds.
+BOOST_AUTO_TEST_CASE( t7a_mapping_drift_prunes_stale_subscriber_on_delete )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   setup_references( alice_id, alice_private_key );
+   const asset_object& mia = create_bitasset( "MIADRIFT", alice_id );
+   const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAD", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "DRIFT.CORE",
+                                      mia_ref, bts_ref, rev2_single_mid_series(), opts );
+   rev2_publish( *this, oid, bob_id, bob_private_key, { rv( 1, 10 ) } );
+
+   rev2_bind_explicit( *this, mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Drift: no price, but the subscriber entry stays (no auto-unbind).
+   reference_mapping drifted;
+   drifted.reference = usd_ref;
+   drifted.asset_amount = 1;
+   drifted.reference_amount = 1;
+   rev2_declare_mapping( *this, mia_id(db), alice_id, alice_private_key, drifted );
+   BOOST_REQUIRE( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_REQUIRE_EQUAL( oid(db).subscribers.size(), 1u );
+
+   // The stale entry does not block deletion: it is pruned, the dead binding cleared.
+   rev2_delete_oracle( *this, oid, alice_id, alice_private_key );
+   BOOST_CHECK( nullptr == db.find( oid ) );
+   const auto& exts = mia_id(db).bitasset_data(db).options.extensions.value;
+   BOOST_CHECK( !exts.price_oracle_binding.valid() );
+   BOOST_CHECK( !exts.price_oracle_id.valid() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+} FC_LOG_AND_RETHROW() }
+
+/// T7b (F3): a bind that names no series is REFUSED against a multi-series oracle, as is
+/// an explicit series index outside the oracle's declared list. A valid explicit choice
+/// on the same oracle works (control).
+BOOST_AUTO_TEST_CASE( t7b_multi_series_bind_without_series_choice_is_refused )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+
+   setup_references( alice_id, alice_private_key );
+   const asset_object& mia = create_bitasset( "MIAMULTI", alice_id );
+   const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAM", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
+
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::bid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::ask, oracle_series_rounding::up ),
+   };
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "MULTI.CORE",
+                                      mia_ref, bts_ref, series, opts );
+   BOOST_REQUIRE_EQUAL( oid(db).series.size(), 2u );
+
+   // Legacy bind names no series: refused against a two-series oracle.
+   GRAPHENE_REQUIRE_THROW( rev2_bind_legacy( *this, mia_id(db), alice_id, alice_private_key, oid ),
+                           fc::exception );
+   BOOST_CHECK( oid(db).subscribers.empty() );
+
+   // Explicit but out of range: refused as well.
+   GRAPHENE_REQUIRE_THROW( rev2_bind_explicit( *this, mia_id(db), alice_id, alice_private_key,
+                                               oid, 2 ),
+                           fc::exception );
+   BOOST_CHECK( oid(db).subscribers.empty() );
+
+   // Control: naming a declared series binds.
+   rev2_bind_explicit( *this, mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 1u );
+} FC_LOG_AND_RETHROW() }
+
+/// T7c-1 (F4): a market-issued asset backed by a USER-ISSUED asset binds and converts
+/// through the UIA's mapping home. The UIA maps 100:1 (6-precision token against a
+/// 4-precision USD reference); the conversion crosses that scale exactly.
+BOOST_AUTO_TEST_CASE( t7c_mia_backed_by_mapped_uia_binds_and_converts )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+   rev2_make_committee_member( *this, alice );
+
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAT", 4 );
+
+   // Collateral UIA, precision 6, mapped 100:1 onto USD(4) at creation -- the mapping home
+   // for non-market-issued assets.
+   reference_mapping uia_map;
+   uia_map.reference = usd_ref;
+   uia_map.asset_amount = 100;
+   uia_map.reference_amount = 1;
+   additional_asset_options_t uia_ext;
+   uia_ext.value.reference_asset_mapping = uia_map;
+   const asset_object& uia = create_user_issued_asset(
+      "UCOLL", bob, charge_market_fee,
+      price( asset( 1, asset_id_type(1) ), asset( 1 ) ), 6, 100, std::move( uia_ext ) );
+   const auto uia_id = uia.get_id();
+   {
+      const auto& stored = uia_id(db).options.extensions.value.reference_asset_mapping;
+      BOOST_REQUIRE( stored.valid() );
+      BOOST_CHECK( stored->reference == usd_ref );
+   }
+
+   // Smartcoin backed by that UIA (user-issued backing is allowed for non-committee MIAs),
+   // mapped 1:1 to its own reference.
+   const asset_object& mia = create_bitasset( "MIAUIA", alice_id, 100, charge_market_fee,
+                                              4, uia_id );
+   const auto mia_id = mia.get_id();
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
+
+   // Oracle over MIAT/USD, the orientation a settlement price uses.
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "MIA.USD",
+                                      mia_ref, usd_ref, rev2_single_mid_series(), opts );
+   // (b, q) = (100 MIAT units, 2000 USD units). Debt 1:1, collateral 100:1:
+   // N = 1*100*1 = 100, D = 1*2000*100 = 200000, GCD 100 -> 1 vs 2000.
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 100, 2000 ) } );
+
+   rev2_bind_explicit( *this, mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 2000, uia_id ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T7c-2 (F4 rules): the UIA mapping home accepts a valid mapping and refuses a dangling
+/// reference; a market-issued asset may NOT carry the UIA-home mapping (its mapping lives
+/// in bitasset options, and two homes would disagree about what the token tracks).
+BOOST_AUTO_TEST_CASE( t7c_uia_mapping_home_rules )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice ); fund( bob );
+   rev2_make_committee_member( *this, alice );
+
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   const asset_object& uia = create_user_issued_asset(
+      "UHOME", bob, charge_market_fee,
+      price( asset( 1, asset_id_type(1) ), asset( 1 ) ), 2, 100,
+      additional_asset_options_t() );
+   const auto uia_id = uia.get_id();
+
+   // A mapping to a reference asset that does not exist is refused.
+   {
+      reference_mapping bad;
+      bad.reference = reference_asset_id_type( 999 );
+      bad.asset_amount = 1;
+      bad.reference_amount = 1;
+      GRAPHENE_REQUIRE_THROW( rev2_set_uia_mapping( *this, uia_id(db), bob_id, bob_private_key,
+                                                    bad ),
+                              fc::exception );
+   }
+
+   // A valid mapping stores and reads back.
+   {
+      reference_mapping m;
+      m.reference = usd_ref;
+      m.asset_amount = 1;
+      m.reference_amount = 1;
+      rev2_set_uia_mapping( *this, uia_id(db), bob_id, bob_private_key, m );
+      const auto& stored = uia_id(db).options.extensions.value.reference_asset_mapping;
+      BOOST_REQUIRE( stored.valid() );
+      BOOST_CHECK( stored->reference == usd_ref );
+   }
+
+   // A market-issued asset carrying the UIA-home mapping is refused, at creation...
+   {
+      asset_create_operation acop;
+      acop.issuer = alice_id;
+      acop.symbol = "MIABAD";
+      acop.precision = 4;
+      acop.common_options.core_exchange_rate = price( asset(1,asset_id_type(1)), asset(1) );
+      acop.bitasset_opts = bitasset_options();
+      reference_mapping m;
+      m.reference = usd_ref;
+      m.asset_amount = 1;
+      m.reference_amount = 1;
+      acop.common_options.extensions.value.reference_asset_mapping = m;
+      signed_transaction tx;
+      tx.operations.push_back( acop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+
+   // ...and at update.
+   {
+      const asset_object& mia = create_bitasset( "MIAHOME", alice_id );
+      asset_update_operation op;
+      op.issuer = alice_id;
+      op.asset_to_update = mia.get_id();
+      op.new_options = mia.options;
+      reference_mapping m;
+      m.reference = usd_ref;
+      m.asset_amount = 1;
+      m.reference_amount = 1;
+      op.new_options.extensions.value.reference_asset_mapping = m;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+} FC_LOG_AND_RETHROW() }
+
+/// T7d (F2): the core asset maps 1:1 to the "BTS" reference by protocol rule, and the core
+/// asset has precision 5 -- so a BTS reference at any other precision would silently
+/// mis-scale every core-quoted conversion. Creation with precision != 5 is refused.
+BOOST_AUTO_TEST_CASE( t7d_bts_reference_precision_is_fixed )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice) );
+   fund( alice );
+   rev2_make_committee_member( *this, alice );
+
+   auto try_create = [&]( const string& symbol, uint8_t precision ) {
+      reference_asset_create_operation op;
+      op.creator   = alice_id;
+      op.symbol    = symbol;
+      op.precision = precision;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+
+   GRAPHENE_REQUIRE_THROW( try_create( "BTS", 4 ), fc::exception );
+   GRAPHENE_REQUIRE_THROW( try_create( "BTS", 6 ), fc::exception );
+   GRAPHENE_REQUIRE_THROW( try_create( "BTS", 0 ), fc::exception );
+
+   // Control: BTS at precision 5 creates, and other symbols are unaffected by the rule.
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   BOOST_CHECK_EQUAL( int( bts_ref(db).precision ), 5 );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 2 );
+   BOOST_CHECK_EQUAL( int( usd_ref(db).precision ), 2 );
+} FC_LOG_AND_RETHROW() }
+
+/// T7e: futures-style binding validity -- an underlying reference asset, an on-chain
+/// collateral asset, an oracle and a series. Valid iff the series is declared,
+/// oracle.base is the underlying, and oracle.quote is the collateral's mapped reference.
+/// Validity only: no market object and no matching-engine changes in this stage.
+BOOST_AUTO_TEST_CASE( t7e_futures_style_binding_validity )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+   rev2_make_committee_member( *this, alice );
+
+   const auto btc_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTC", 8 );
+   const auto usd_ref = rev2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const auto xau_ref = rev2_create_reference( *this, alice_id, alice_private_key, "XAU", 4 );
+   const auto bts_ref = rev2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+
+   // Collateral UIA mapped 1:1 onto USD; contract size counts in BTC smallest units, so no
+   // BTC token is needed -- the underlying is named directly as a reference asset.
+   reference_mapping uia_map;
+   uia_map.reference = usd_ref;
+   uia_map.asset_amount = 1;
+   uia_map.reference_amount = 1;
+   additional_asset_options_t uia_ext;
+   uia_ext.value.reference_asset_mapping = uia_map;
+   const asset_object& uia = create_user_issued_asset(
+      "UCOLL", bob, charge_market_fee,
+      price( asset( 1, asset_id_type(1) ), asset( 1 ) ), 4, 100, std::move( uia_ext ) );
+   const auto uia_id = uia.get_id();
+
+   const vector<oracle_series> series = {
+      rseries( oracle_series_kind::mid, oracle_series_rounding::down ),
+      rseries( oracle_series_kind::mid, oracle_series_rounding::up ),
+   };
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "BTC.USD",
+                                      btc_ref, usd_ref, series, opts );
+   const oracle_object& o = oid(db);
+
+   // Valid: underlying BTC, USD-mapped collateral, declared series.
+   BOOST_CHECK( is_futures_binding_valid( o, 0, btc_ref, uia_map ) );
+   BOOST_CHECK( is_futures_binding_valid( o, 1, btc_ref, uia_map ) );
+
+   // Wrong underlying, wrong collateral reference, undeclared series: all invalid.
+   BOOST_CHECK( !is_futures_binding_valid( o, 0, usd_ref, uia_map ) );
+   reference_mapping xau_map = uia_map;
+   xau_map.reference = xau_ref;
+   BOOST_CHECK( !is_futures_binding_valid( o, 0, btc_ref, xau_map ) );
+   BOOST_CHECK( !is_futures_binding_valid( o, 2, btc_ref, uia_map ) );
+
+   // Core collateral resolves through the BTS protocol rule: a BTC/BTS oracle with CORE
+   // collateral is valid.
+   const auto oid2 = rev2_make_oracle( *this, alice_id, alice_private_key, "BTC.CORE",
+                                       btc_ref, bts_ref, rev2_single_mid_series(), opts );
+   reference_mapping core_map;
+   core_map.reference = bts_ref;
+   core_map.asset_amount = 1;
+   core_map.reference_amount = 1;
+   BOOST_CHECK( is_futures_binding_valid( oid2(db), 0, btc_ref, core_map ) );
+   BOOST_CHECK( !is_futures_binding_valid( oid2(db), 0, btc_ref, uia_map ) );
+
+   // Drifted collateral mapping invalidates a previously valid binding.
+   reference_mapping drifted = uia_map;
+   drifted.reference = xau_ref;
+   rev2_set_uia_mapping( *this, uia_id(db), bob_id, bob_private_key, drifted );
+   const auto& stored = uia_id(db).options.extensions.value.reference_asset_mapping;
+   BOOST_REQUIRE( stored.valid() );
+   BOOST_CHECK( !is_futures_binding_valid( o, 0, btc_ref, *stored ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T7f: one USD/BTS oracle feeds two smartcoins of different issuers, both mapped 1:1.
+/// Both settle identically from the same published value -- the sharing the Rev-2 basis
+/// exists for.
+BOOST_AUTO_TEST_CASE( t7f_two_smartcoins_share_one_oracle )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+
+   const asset_object& mia1 = create_bitasset( "MIAONE", alice_id );
+   const auto mia1_id = mia1.get_id();
+   rev2_declare_mapping_1to1( *this, mia1, alice_id, alice_private_key, usd_ref );
+
+   const asset_object& mia2 = create_bitasset( "MIATWO", bob_id );
+   const auto mia2_id = mia2.get_id();
+   // A different issuer declares the same 1:1 mapping on its own asset.
+   {
+      asset_update_bitasset_operation op;
+      op.issuer          = bob_id;
+      op.asset_to_update = mia2_id;
+      op.new_options     = mia2.bitasset_data( db ).options;
+      reference_mapping m;
+      m.reference        = usd_ref;
+      m.asset_amount     = 1;
+      m.reference_amount = 1;
+      op.new_options.extensions.value.reference_asset_mapping = m;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "USD.CORE",
+                                      usd_ref, bts_ref, rev2_single_mid_series(), opts );
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 1, 25 ) } );
+
+   rev2_bind_explicit( *this, mia1_id(db), alice_id, alice_private_key, oid, 0 );
+   rev2_bind_explicit( *this, mia2_id(db), bob_id, bob_private_key, oid, 0 );
+   BOOST_REQUIRE_EQUAL( oid(db).subscribers.size(), 2u );
+
+   const auto& feed1 = mia1_id(db).bitasset_data(db).current_feed.settlement_price;
+   const auto& feed2 = mia2_id(db).bitasset_data(db).current_feed.settlement_price;
+   BOOST_REQUIRE( !feed1.is_null() );
+   BOOST_REQUIRE( !feed2.is_null() );
+   BOOST_CHECK( feed1 == price( asset( 1, mia1_id ), asset( 25, asset_id_type() ) ) );
+   BOOST_CHECK( feed2 == price( asset( 1, mia2_id ), asset( 25, asset_id_type() ) ) );
+   // Full price equality can never hold across two assets (the base asset ids differ);
+   // "settle identically" means the same ratio from the same oracle value.
+   BOOST_CHECK_MESSAGE( feed1.base.amount == feed2.base.amount && feed1.quote == feed2.quote,
+                        "two consumers of one oracle must settle identically" );
+
+   // One publish moves both in the same block.
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 1, 30 ) } );
+   BOOST_CHECK( mia1_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia1_id ), asset( 30, asset_id_type() ) ) );
+   BOOST_CHECK( mia2_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia2_id ), asset( 30, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_SUITE( oracle_wire_format_task7_tests )
+
+/**
+ * price_oracle was appended LAST to bitasset_options::ext (tag 8, after
+ * reference_asset_mapping at 7). Same rule as the earlier pins: the tag must never shift.
+ */
+BOOST_AUTO_TEST_CASE( appending_price_oracle_did_not_shift_existing_extension_tags )
+{
+   bitasset_options o;
+   price_oracle b;
+   b.oracle_id = oracle_id_type( 3 );
+   b.series    = 1;
+   o.extensions.value.price_oracle_binding = b;
+
+   auto bytes = fc::raw::pack( o.extensions );
+   BOOST_REQUIRE( bytes.size() >= 2 );
+   BOOST_CHECK_EQUAL( int( bytes[0] ), 1 );
+   BOOST_CHECK_EQUAL( int( bytes[1] ), 8 );
+
+   auto back = fc::raw::unpack<bitasset_options>( fc::raw::pack( o ) );
+   BOOST_REQUIRE( back.extensions.value.price_oracle_binding.valid() );
+   BOOST_CHECK( back.extensions.value.price_oracle_binding->oracle_id == oracle_id_type( 3 ) );
+   BOOST_CHECK_EQUAL( int( back.extensions.value.price_oracle_binding->series ), 1 );
+   BOOST_CHECK( !back.extensions.value.price_oracle_id.valid() );
+}
+
+/**
+ * The UIA mapping home was appended LAST to additional_asset_options (tag 3, after
+ * taker_fee_percent at 2). Pins the numbering the same way.
+ */
+BOOST_AUTO_TEST_CASE( uia_reference_mapping_has_a_stable_extension_tag )
+{
+   additional_asset_options_t ext;
+   reference_mapping m;
+   m.reference        = reference_asset_id_type( 1 );
+   m.asset_amount     = 100;
+   m.reference_amount = 1;
+   ext.value.reference_asset_mapping = m;
+
+   auto bytes = fc::raw::pack( ext );
+   BOOST_REQUIRE( bytes.size() >= 2 );
+   BOOST_CHECK_EQUAL( int( bytes[0] ), 1 );
+   BOOST_CHECK_EQUAL( int( bytes[1] ), 3 );
+
+   auto back = fc::raw::unpack<additional_asset_options_t>( fc::raw::pack( ext ) );
+   BOOST_REQUIRE( back.value.reference_asset_mapping.valid() );
+   BOOST_CHECK( back.value.reference_asset_mapping->reference == reference_asset_id_type( 1 ) );
+   BOOST_CHECK_EQUAL( back.value.reference_asset_mapping->asset_amount.value, 100 );
+   BOOST_CHECK_EQUAL( back.value.reference_asset_mapping->reference_amount.value, 1 );
+}
+
+BOOST_AUTO_TEST_SUITE_END()

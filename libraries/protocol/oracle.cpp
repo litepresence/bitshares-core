@@ -118,6 +118,23 @@ void reference_mapping::validate()const
               "Mapping reference amount exceeds maximum share supply" );
 }
 
+bool operator==( const reference_mapping& a, const reference_mapping& b )
+{
+   return a.reference == b.reference
+          && a.asset_amount == b.asset_amount
+          && a.reference_amount == b.reference_amount;
+}
+
+void price_oracle::validate()const
+{
+   // The range against the oracle's ACTUAL series list is chain state, so it is checked
+   // in the evaluator; here the index must at least fit the largest list any oracle may
+   // declare, or a binding could name a series no oracle could ever have.
+   FC_ASSERT( series < GRAPHENE_ORACLE_MAX_SERIES,
+              "Bound series ${s} exceeds the maximum an oracle may declare (${m})",
+              ("s", series)("m", GRAPHENE_ORACLE_MAX_SERIES) );
+}
+
 void oracle_options::validate()const
 {
    FC_ASSERT( producers.size() <= GRAPHENE_ORACLE_MAX_PRODUCERS,
@@ -178,6 +195,13 @@ void reference_asset_create_operation::validate()const
    FC_ASSERT( precision <= GRAPHENE_REFERENCE_ASSET_MAX_PRECISION,
               "Reference asset precision should not exceed ${m}",
               ("m", GRAPHENE_REFERENCE_ASSET_MAX_PRECISION) );
+   // The core asset maps 1:1 to "BTS" by protocol rule, and the core asset's precision is
+   // GRAPHENE_REFERENCE_ASSET_BTS_PRECISION: any other precision here would silently
+   // mis-scale every core-quoted conversion, so creation is refused outright.
+   if( symbol == "BTS" )
+      FC_ASSERT( precision == GRAPHENE_REFERENCE_ASSET_BTS_PRECISION,
+                 "The BTS reference asset must have precision ${p}, matching the core asset",
+                 ("p", GRAPHENE_REFERENCE_ASSET_BTS_PRECISION) );
    FC_ASSERT( description.size() <= GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH,
               "Description should not exceed ${m} characters",
               ("m", GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH) );
@@ -330,6 +354,7 @@ price convert_oracle_value_to_price(
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::price_oracle )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::reference_mapping )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_options )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::reference_asset_create_operation::fee_params_t )

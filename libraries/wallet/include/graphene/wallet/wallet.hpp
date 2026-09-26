@@ -1179,8 +1179,8 @@ class wallet_api
        *
        *  An oracle is not tied to any asset: several consumers can reference the same series,
        *  and a price that is not the settlement price of any smartcoin has somewhere to live.
-       *  To feed a smartcoin from it afterwards, set \c price_oracle_id in the asset's
-       *  bitasset options with \c update_bitasset().
+       *  To feed a smartcoin from it afterwards, set \c price_oracle_binding
+       *  ({oracle, series}) in the asset's bitasset options with \c update_bitasset().
        *
        * @param owner the account that will administer the oracle and pay the fee
        * @param name unique, e.g. "BTC.USD"; uppercase letters, digits, '.' and '-'
@@ -1221,11 +1221,12 @@ class wallet_api
                                         const optional<oracle_options>& new_options,
                                         bool broadcast );
 
-      /** Removes an oracle.
-       *
-       *  Refused while any market-issued asset still names it as its price source; clear
-       *  those assets' \c price_oracle_id first, or they would be left unable to margin call.
-       *
+       /** Removes an oracle.
+        *
+        *  Refused while any market-issued asset still reads it through a live binding; clear
+        *  those assets' \c price_oracle_binding first, or they would be left unable to
+        *  margin call. Bindings left stale by mapping drift are pruned, not blocking.
+        *
        * @param owner the oracle's owner
        * @param name_or_id the oracle's name or id
        * @param broadcast true to broadcast the transaction on the network

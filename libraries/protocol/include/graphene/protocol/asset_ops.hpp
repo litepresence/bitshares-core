@@ -29,13 +29,19 @@
 
 namespace graphene { namespace protocol {
 
-   struct additional_asset_options
-   {
-      fc::optional<uint16_t>                  reward_percent;
-      fc::optional<flat_set<account_id_type>> whitelist_market_fee_sharing;
-      // After BSIP81 activation, taker_fee_percent is the taker fee
-      fc::optional<uint16_t>                  taker_fee_percent;
-   };
+    struct additional_asset_options
+    {
+       fc::optional<uint16_t>                  reward_percent;
+       fc::optional<flat_set<account_id_type>> whitelist_market_fee_sharing;
+       // After BSIP81 activation, taker_fee_percent is the taker fee
+       fc::optional<uint16_t>                  taker_fee_percent;
+       /// When set, the asset declares that it tracks this reference asset at the given
+       /// ratio. The mapping home for NON-market-issued assets (UIA collateral, and the
+       /// collateral leg of futures-style bindings): market-issued assets declare theirs
+       /// in bitasset options instead and must NOT set this (the two would disagree about
+       /// what the token tracks). Appended last: extension tags are append-only.
+       fc::optional<reference_mapping>         reference_asset_mapping;
+    };
    typedef extension<additional_asset_options> additional_asset_options_t;
 
    bool is_valid_symbol( const string& symbol );
@@ -151,17 +157,27 @@ namespace graphene { namespace protocol {
          fc::optional<uint16_t> force_settle_fee_percent;  // BSIP-87
          // https://github.com/bitshares/bitshares-core/issues/2467
          fc::optional<uint8_t> black_swan_response_method;
-          /// When set, the settlement price comes from this oracle instead of from the
-          /// legacy price feeds. The oracle must be quoted as <this asset>/<backing asset>.
-          /// Only settable via asset_update_bitasset, never at asset creation: the oracle's
-          /// base asset has to be the smartcoin itself, which does not exist yet at creation.
-          fc::optional<oracle_id_type> price_oracle_id;
-          /// When set, the asset declares that it tracks this reference asset at the given
-          /// ratio (both in smallest units, both positive). Declared by the issuer; nobody
-          /// else may say what the issuer's token tracks. Appended last: extension tags are
-          /// append-only, and inserting here would renumber every field on chain.
-          fc::optional<reference_mapping> reference_asset_mapping;
-       };
+           /// When set, the settlement price comes from this oracle instead of from the
+           /// legacy price feeds. The oracle must be quoted as <this asset>/<backing asset>.
+           /// Only settable via asset_update_bitasset, never at creation: the oracle's
+           /// base asset has to be the smartcoin itself, which does not exist yet at creation.
+           /// Names no series: reads series 0, and is refused against oracles declaring more
+           /// than one series (bind an explicit price_oracle instead).
+           fc::optional<oracle_id_type> price_oracle_id;
+           /// When set, the asset declares that it tracks this reference asset at the given
+           /// ratio (both in smallest units, both positive). Declared by the issuer; nobody
+           /// else may say what the issuer's token tracks. Appended last: extension tags are
+           /// append-only, and inserting here would renumber every field on chain.
+           fc::optional<reference_mapping> reference_asset_mapping;
+           /// When set, the settlement price comes from series @ref price_oracle::series of
+           /// the named oracle instead of from the legacy price feeds. Same orientation rule
+           /// as price_oracle_id, checked at bind time AND on every read (fail closed on
+           /// mapping drift). Mutually exclusive with price_oracle_id on one asset; unlike
+           /// it, valid against multi-series oracles. Settable only via
+           /// asset_update_bitasset, never at creation. Appended last: extension tags are
+           /// append-only.
+           fc::optional<price_oracle> price_oracle_binding;
+        };
 
       /// Time before a price feed expires
       uint32_t feed_lifetime_sec = GRAPHENE_DEFAULT_PRICE_FEED_LIFETIME;
@@ -656,9 +672,10 @@ FC_REFLECT( graphene::protocol::bitasset_options::ext,
             (margin_call_fee_ratio)
             (force_settle_fee_percent)
             (black_swan_response_method)
-            (price_oracle_id)
-            (reference_asset_mapping)
-          )
+             (price_oracle_id)
+             (reference_asset_mapping)
+             (price_oracle_binding)
+           )
 
 FC_REFLECT( graphene::protocol::bitasset_options,
             (feed_lifetime_sec)
@@ -671,7 +688,8 @@ FC_REFLECT( graphene::protocol::bitasset_options,
           )
 
 FC_REFLECT( graphene::protocol::additional_asset_options,
-            (reward_percent)(whitelist_market_fee_sharing)(taker_fee_percent) )
+             (reward_percent)(whitelist_market_fee_sharing)(taker_fee_percent)
+             (reference_asset_mapping) )
 
 FC_REFLECT( graphene::protocol::asset_update_operation::ext, (new_precision)(skip_core_exchange_rate) )
 FC_REFLECT( graphene::protocol::asset_publish_feed_operation::ext, (initial_collateral_ratio) )

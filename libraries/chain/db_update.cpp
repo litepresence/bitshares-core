@@ -303,52 +303,64 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
 
    const auto& head_time = head_block_time();
 
-   // Resolve a bound oracle before entering modify(), which cannot look objects up. The field
-   // can only be set after HARDFORK_ORACLE (see the asset_update_bitasset evaluator), so for
-   // every asset on chain today this stays absent and the legacy path below is unchanged.
-   const auto& bound_oracle = bitasset.options.extensions.value.price_oracle_id;
-   const bool oracle_bound = bound_oracle.valid();
+    // Resolve a bound oracle before entering modify(), which cannot look objects up. The
+    // binding fields can only be set after HARDFORK_ORACLE (see the asset_update_bitasset
+    // evaluator), so for every asset on chain today both stay absent and the legacy path
+    // below is unchanged. The explicit price_oracle_binding names {oracle, series}; the
+    // legacy price_oracle_id names an oracle but no series and reads series 0 (bind-time
+    // refused against multi-series oracles, so index 0 always exists for it).
+    const auto& bound_ext = bitasset.options.extensions.value;
+    optional<oracle_id_type> bound_oracle_id;
+    uint16_t bound_series = 0;
+    if( bound_ext.price_oracle_binding.valid() )
+    {
+       bound_oracle_id = bound_ext.price_oracle_binding->oracle_id;
+       bound_series    = bound_ext.price_oracle_binding->series;
+    }
+    else if( bound_ext.price_oracle_id.valid() )
+       bound_oracle_id = *bound_ext.price_oracle_id;
+    const bool oracle_bound = bound_oracle_id.valid();
    optional<price> oracle_value;
    // Defaults to head time so an absent value still produces a feed stamped "now", which is
    // the same unusable-but-current state the legacy path reaches with too few publishers.
    time_point_sec oracle_value_time = head_time;
-   if( oracle_bound )
-   {
-      const oracle_object* o = find( *bound_oracle );
-      // A bound oracle cannot be deleted (oracle_delete refuses while subscribers remain), but
-      // read defensively: a missing oracle means "no value", never a stale or invented one.
-      //
-      // Freshness is checked HERE rather than trusted from current_value, because that field
-      // is only recomputed when a producer publishes. An oracle whose producers all stopped
-      // keeps its last aggregate for ever, so asking is_value_live is the only thing that
-      // distinguishes a current price from one that expired months ago.
-      //
-      // The binding match is re-checked HERE as well, because a mapping can change after
-      // binding. A binding that no longer matches yields no price -- the smartcoin behaves
-      // as it does when its feeds expire -- never a misquoted one. It fails closed.
-      //
-      // INTERIM (Task 7 owns bindings): the legacy price_oracle_id binding names no series,
-      // so the first declared series feeds it. Task 7 introduces the {oracle, series}
-      // binding and replaces this with the consumer's chosen series.
-      if( nullptr != o && o->is_value_live( head_time )
-          && o->current_value.valid() && !o->series.empty()
-          && o->current_value->size() == o->series.size() )
-      {
-         const auto debt_mapping = get_effective_reference_mapping( *this, bitasset.asset_id );
-         const auto backing_mapping = get_effective_reference_mapping(
-               *this, bitasset.options.short_backing_asset );
-         if( debt_mapping.valid() && backing_mapping.valid()
-             && o->base == debt_mapping->reference
-             && o->quote == backing_mapping->reference )
-         {
-            oracle_value = convert_oracle_value_to_price(
-                  o->current_value->front(), *debt_mapping, bitasset.asset_id,
-                  *backing_mapping, bitasset.options.short_backing_asset,
-                  o->series.front().get_rounding() );
-            oracle_value_time = o->current_value_time;
-         }
-      }
-   }
+    if( oracle_bound )
+    {
+       const oracle_object* o = find( *bound_oracle_id );
+       // A bound oracle cannot be deleted while a live binding references it
+       // (oracle_delete refuses, pruning only stale entries), but read defensively: a
+       // missing oracle means "no value", never a stale or invented one.
+       //
+       // Freshness is checked HERE rather than trusted from current_value, because that field
+       // is only recomputed when a producer publishes. An oracle whose producers all stopped
+       // keeps its last aggregate for ever, so asking is_value_live is the only thing that
+       // distinguishes a current price from one that expired months ago.
+       //
+       // The binding match is re-checked HERE as well, with the same predicate the bind
+       // time uses (is_smartcoin_binding_valid), because a mapping can change after
+       // binding. A binding that no longer matches -- or names a series the oracle does
+       // not declare -- yields no price: the smartcoin behaves as it does when its feeds
+       // expire. It fails closed.
+       if( nullptr != o && o->is_value_live( head_time )
+           && o->current_value.valid()
+           && bound_series < o->series.size()
+           && o->current_value->size() == o->series.size() )
+       {
+          const auto debt_mapping = get_effective_reference_mapping( *this, bitasset.asset_id );
+          const auto backing_mapping = get_effective_reference_mapping(
+                *this, bitasset.options.short_backing_asset );
+          if( debt_mapping.valid() && backing_mapping.valid()
+              && is_smartcoin_binding_valid( *o, bound_series,
+                                             *debt_mapping, *backing_mapping ) )
+          {
+             oracle_value = convert_oracle_value_to_price(
+                   o->current_value->at( bound_series ), *debt_mapping, bitasset.asset_id,
+                   *backing_mapping, bitasset.options.short_backing_asset,
+                   o->series[ bound_series ].get_rounding() );
+             oracle_value_time = o->current_value_time;
+          }
+       }
+    }
 
    // We need to update the database
    modify( bitasset, [this, skip_median_update, &head_time, &new_current_feed_price, &bsrm,

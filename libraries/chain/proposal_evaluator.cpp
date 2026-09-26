@@ -40,6 +40,8 @@ namespace detail {
                                                        const asset_publish_feed_operation::ext& extensions );
    void check_bitasset_options_hf_bsip77(const fc::time_point_sec& block_time, const bitasset_options& options);
 
+   void check_bitasset_options_hf_oracle(const fc::time_point_sec& block_time, const bitasset_options& options);
+
    void check_bitasset_options_hf_bsip74(const fc::time_point_sec& block_time,
                                          const bitasset_options& options); // HF_REMOVABLE
 
@@ -93,6 +95,7 @@ struct proposal_operation_hardfork_visitor
          detail::check_bitasset_options_hf_bsip_48_75( block_time, *v.bitasset_opts );
          detail::check_bitasset_options_hf_bsip74( block_time, *v.bitasset_opts ); // HF_REMOVABLE
          detail::check_bitasset_options_hf_bsip77( block_time, *v.bitasset_opts ); // HF_REMOVABLE
+         detail::check_bitasset_options_hf_oracle( block_time, *v.bitasset_opts );
          detail::check_bitasset_options_hf_bsip87( block_time, *v.bitasset_opts ); // HF_REMOVABLE
          detail::check_bitasset_opts_hf_core2467( next_maintenance_time, *v.bitasset_opts ); // HF_REMOVABLE
       }
@@ -136,6 +139,7 @@ struct proposal_operation_hardfork_visitor
       detail::check_bitasset_options_hf_bsip74( block_time, v.new_options ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip77( block_time, v.new_options ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip87( block_time, v.new_options ); // HF_REMOVABLE
+      detail::check_bitasset_options_hf_oracle( block_time, v.new_options );
       detail::check_bitasset_opts_hf_core2467( next_maintenance_time, v.new_options ); // HF_REMOVABLE
    }
 
@@ -231,6 +235,16 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.current_fees->exists<liquidity_pool_update_operation>(),
                    "Unable to define fees for liquidity pool update operation prior to the core-2604 hardfork");
       }
+      if (!HARDFORK_ORACLE_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_create_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_update_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_delete_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_publish_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+      }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
       FC_ASSERT( block_time >= HARDFORK_CORE_1468_TIME, "Not allowed until hardfork 1468" );
@@ -321,6 +335,18 @@ struct proposal_operation_hardfork_visitor
    // Note: credit_deal_expired_operation is a virtual operation thus no need to add code here
    void operator()(const graphene::chain::credit_deal_update_operation&) const {
       FC_ASSERT( HARDFORK_CORE_2595_PASSED(block_time), "Not allowed until the core-2595 hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_create_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_update_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_delete_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_publish_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
    }
 
    // loop and self visit in proposals

@@ -1,0 +1,9 @@
+// Stealth transfers: ring-signature + Bulletproofs+ private transfers.
+// Placeholder activation flag only -- gates nothing yet. The real date is set
+// by the committee when the feature is scheduled for a particular network.
+// Before it passes, everything gated behind it stays rejected, so no node can
+// produce a block a pre-fork node cannot validate.
+#ifndef HARDFORK_STEALTH_TIME
+#define HARDFORK_STEALTH_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_STEALTH_PASSED(now) (now >= HARDFORK_STEALTH_TIME)
+#endif

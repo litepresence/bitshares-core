@@ -73,6 +73,10 @@ struct hardfork_visitor {
                                            protocol::oracle_delete_operation,
                                            protocol::oracle_publish_operation,
                                            protocol::reference_asset_create_operation >;
+   using h2_bond_ops = fc::typelist::list< protocol::vault_register_operation,
+                                           protocol::vault_bond_lock_operation,
+                                           protocol::oracle_bond_lock_operation,
+                                           protocol::oracle_bond_release_operation >;
 
    fc::time_point_sec now;
 
@@ -111,6 +115,9 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<oracle_ops, Op>(), bool>
    visit() { return HARDFORK_ORACLE_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<h2_bond_ops, Op>(), bool>
+   visit() { return HARDFORK_H2_BONDS_PASSED(now); }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

@@ -36,6 +36,8 @@
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
+#include <graphene/chain/vault_object.hpp>
+#include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
@@ -62,6 +64,8 @@
 #include <graphene/chain/confidential_evaluator.hpp>
 #include <graphene/chain/credit_offer_evaluator.hpp>
 #include <graphene/chain/oracle_evaluator.hpp>
+#include <graphene/chain/vault_evaluator.hpp>
+#include <graphene/chain/bond_evaluator.hpp>
 #include <graphene/chain/custom_evaluator.hpp>
 #include <graphene/chain/liquidity_pool_evaluator.hpp>
 #include <graphene/chain/market_evaluator.hpp>
@@ -157,6 +161,10 @@ void database::initialize_evaluators()
    register_evaluator<oracle_delete_evaluator>();
    register_evaluator<oracle_publish_evaluator>();
    register_evaluator<reference_asset_create_evaluator>();
+   register_evaluator<vault_register_evaluator>();
+   register_evaluator<vault_bond_lock_evaluator>();
+   register_evaluator<oracle_bond_lock_evaluator>();
+   register_evaluator<oracle_bond_release_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -188,6 +196,9 @@ void database::initialize_indexes()
    add_index< primary_index<credit_deal_index> >();
    add_index< primary_index<oracle_index> >();
    add_index< primary_index<reference_asset_index> >();
+   add_index< primary_index<vault_index> >();
+   add_index< primary_index<vault_bond_index> >();
+   add_index< primary_index<producer_bond_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

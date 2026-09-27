@@ -408,6 +408,22 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // creator
    }
+   void operator()( const vault_register_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // registrar
+   }
+   void operator()( const vault_bond_lock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_bond_lock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
+   void operator()( const oracle_bond_release_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

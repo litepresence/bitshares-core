@@ -24,6 +24,7 @@
 #include <graphene/chain/oracle_evaluator.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
+#include <graphene/chain/bond_evaluator.hpp>
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
@@ -392,6 +393,11 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
    } );
 
    refresh_subscribers( d, *_oracle );
+
+   // H2a advancing-unlock rule: a bonded producer's successful publication pushes
+   // its bond unlock out. Unbonded producers (every H1 producer) take no branch
+   // inside and see no behavior change.
+   advance_producer_bond_on_publish( d, op.oracle_id, op.producer, now );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

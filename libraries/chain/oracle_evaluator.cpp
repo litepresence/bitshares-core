@@ -184,6 +184,10 @@ void_result oracle_update_evaluator::do_apply( const oracle_update_operation& op
 { try {
    database& d = db();
    const auto now = d.head_block_time();
+   // Guard inputs come from chain state the object cannot see: the committee-owned
+   // delay and the maintenance interval bounding the rate-limit counter.
+   const uint32_t delay_sec = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
+   const uint32_t maint_sec = d.get_global_properties().parameters.maintenance_interval;
 
    d.modify( *_oracle, [&op]( oracle_object& o ) {
       if( op.new_description.valid() )
@@ -200,9 +204,11 @@ void_result oracle_update_evaluator::do_apply( const oracle_update_operation& op
    // publish would defeat the point.
    if( op.new_options.valid() )
    {
-      d.modify( *_oracle, [now]( oracle_object& o ) { o.update_current_value( now ); } );
+      d.modify( *_oracle, [now, delay_sec, maint_sec]( oracle_object& o )
+         { o.update_current_value( now, delay_sec, maint_sec ); } );
       // Tightening quorum or dropping a producer can change or remove the value, and any
       // asset fed by this oracle has to see that immediately, not at the next publish.
+      // Freezing behaves the same way: the bound feed goes null in this block.
       refresh_subscribers( d, *_oracle );
    }
 
@@ -367,10 +373,16 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
 { try {
    database& d = db();
    const auto now = d.head_block_time();
+   const uint32_t delay_sec = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
+   const uint32_t maint_sec = d.get_global_properties().parameters.maintenance_interval;
 
-   d.modify( *_oracle, [&op, now]( oracle_object& o ) {
+   d.modify( *_oracle, [&op, now, delay_sec, maint_sec]( oracle_object& o ) {
       o.submissions[op.producer] = std::make_pair( now, op.values );
-      o.update_current_value( now );
+      // Reputation counts the attempt here; live/outlier counts accrue inside the
+      // aggregation this publish triggers. No economics reads any of it.
+      o.reputation[op.producer].publish_count++;
+      o.reputation[op.producer].last_publish_time = now;
+      o.update_current_value( now, delay_sec, maint_sec );
    } );
 
    refresh_subscribers( d, *_oracle );

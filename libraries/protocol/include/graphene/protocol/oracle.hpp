@@ -52,6 +52,30 @@ namespace graphene { namespace protocol {
    /// A producer's weight. Weight is set by the owner, never earned; see ORACLE-DESIGN.md.
    constexpr uint16_t GRAPHENE_ORACLE_MAX_PRODUCER_WEIGHT = 1000;
 
+   /**
+    * Track A guard: the most the guarded (consumed) value may move in one promotion,
+    * in parts per million. Proposal value: 5%. A spike beyond the bound holds the
+    * last-good value and raises the rate_limited flag; it never jumps. Exact integer
+    * ratio comparison, like the deviation filter -- no floats anywhere.
+    */
+   constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_MOVE_PPM = 50000;
+
+   /**
+    * Track A guard: OSM-style delay proposal default (1h). How long a computed median
+    * waits before it becomes consumable for margin/settlement. Lives as the
+    * oracle_guard_delay_sec chain parameter so the committee owns it; this constant is
+    * the default while the parameter is absent.
+    */
+   constexpr uint32_t GRAPHENE_ORACLE_GUARD_DEFAULT_DELAY_SEC = 3600;
+
+   /// Upper bound on the committee-set guard delay (1 day). Bounds the pending queue's
+   /// time span; enforced in chain_parameters::validate().
+   constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC = 86400;
+
+   /// Upper bound on an oracle's guarded pending queue. Samples are bucketed so a full
+   /// queue always spans the configured delay whatever the publish rate.
+   constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_PENDING = 16;
+
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH = 2;
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH = 16;
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH = 1000;
@@ -169,6 +193,23 @@ namespace graphene { namespace protocol {
       explicit oracle_producer_entry( uint16_t w ) : weight( w ) {}
    };
 
+   /**
+    * Track A guard: one producer's liveness/deviation history, accrued on-chain.
+    *
+    * Counts only -- deliberately no weights, no rewards, no slashing (H2 economics are
+    * out of scope). publish_count counts publish operations; live_count counts rounds
+    * the producer's submission was live toward the aggregate; outlier_count counts
+    * rounds the quorum-aware filter excluded it. Queryable through the existing oracle
+    * read API, which returns the whole object.
+    */
+   struct oracle_producer_reputation
+   {
+      uint32_t publish_count = 0;
+      uint32_t live_count = 0;
+      uint32_t outlier_count = 0;
+      time_point_sec last_publish_time;
+   };
+
    /// Shared by create and update. Every field is policy the owner controls.
    struct oracle_options
    {
@@ -205,13 +246,40 @@ namespace graphene { namespace protocol {
        * aggregate moves -- otherwise a real crash, where every honest producer moves at once,
        * would freeze the oracle at the moment it most needs to update.
        */
-      uint32_t max_deviation_ppm = 0;
+       uint32_t max_deviation_ppm = 0;
 
       extensions_type extensions;
 
-      /// @return the aggregation method; only valid after validate() has accepted the value
-      oracle_aggregation_method get_aggregation()const
-      { return static_cast<oracle_aggregation_method>( aggregation ); }
+      /**
+       * Track A guard: emergency freeze. While set, the oracle still aggregates (raw
+       * values stay transparent) but nothing is promoted to the consumed value and
+       * bound consumers read no price, so margin actions fail closed. Set and cleared
+       * by the owner through oracle_update; clearing through a proposal vote is the
+       * supported unfreeze path. Appended AFTER extensions, never inserted before
+       * them, so every pre-existing field keeps its wire position.
+       */
+      bool frozen = false;
+
+      /**
+       * Track A guards, new-pairs-only opt-in. Both default OFF, in which case the
+       * guarded (consumed) value tracks the raw aggregate immediately with no band:
+       * an oracle that never opts in behaves exactly as before guards existed
+       * (existing oracle-bound pairs are byte-identical). A NEW pair opts in at
+       * creation (or later via update):
+       * - guard_rate_limit: bound the consumed value's movement per maintenance
+       *   interval to GRAPHENE_ORACLE_GUARD_MAX_MOVE_PPM; spikes beyond it hold the
+       *   last-good value and raise the flag, never jump.
+       * - guard_delay: hold the raw aggregate in the delay queue until the
+       *   committee-owned guard delay (chain parameter, 1h proposal) has passed
+       *   (OSM-style: computed at N, consumable at N + delay).
+       * Appended after frozen, never inserted: wire positions are append-only.
+       */
+      bool guard_rate_limit = false;
+      bool guard_delay = false;
+
+       /// @return the aggregation method; only valid after validate() has accepted the value
+       oracle_aggregation_method get_aggregation()const
+       { return static_cast<oracle_aggregation_method>( aggregation ); }
 
       void validate()const;
    };
@@ -451,6 +519,9 @@ FC_REFLECT( graphene::protocol::oracle_value,
 FC_REFLECT( graphene::protocol::oracle_producer_entry,
              (weight)(extensions) )
 
+FC_REFLECT( graphene::protocol::oracle_producer_reputation,
+             (publish_count)(live_count)(outlier_count)(last_publish_time) )
+
 FC_REFLECT( graphene::protocol::price_oracle,
              (oracle_id)(series) )
 
@@ -459,7 +530,7 @@ FC_REFLECT( graphene::protocol::reference_mapping,
 
 FC_REFLECT( graphene::protocol::oracle_options,
             (producers)(minimum_producers)(value_lifetime_sec)(aggregation)(window_sec)
-            (max_deviation_ppm)(extensions) )
+            (max_deviation_ppm)(extensions)(frozen)(guard_rate_limit)(guard_delay) )
 
 FC_REFLECT( graphene::protocol::reference_asset_create_operation::fee_params_t, (fee)(price_per_kbyte) )
 FC_REFLECT( graphene::protocol::oracle_create_operation::fee_params_t, (fee)(price_per_kbyte) )
@@ -481,6 +552,7 @@ FC_REFLECT( graphene::protocol::oracle_publish_operation,
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_reputation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::price_oracle )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::reference_mapping )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_options )

@@ -104,10 +104,12 @@ oracle_value upper_median( vector<oracle_value>& values )
 
 } // namespace
 
-void oracle_object::update_current_value( time_point_sec now )
+void oracle_object::update_current_value( time_point_sec now, uint32_t delay_sec,
+                                             uint32_t maintenance_interval_sec )
 {
    struct live_submission
    {
+      account_id_type producer;
       uint32_t weight;
       vector<oracle_value> values;
    };
@@ -127,7 +129,8 @@ void oracle_object::update_current_value( time_point_sec now )
       // submission already has exactly series.size() values; read defensively anyway.
       if( s.second.second.size() != series.size() )
          continue;
-      live.push_back( live_submission{ uint32_t( itr->second.weight ), s.second.second } );
+      live.push_back( live_submission{ s.first, uint32_t( itr->second.weight ),
+                                       s.second.second } );
    }
 
    current_value_time = now;
@@ -138,6 +141,10 @@ void oracle_object::update_current_value( time_point_sec now )
       // through an outage would be trading on a number nobody is still asserting.
       current_value.reset();
       current_value_producer_count = 0;
+      // Quorum loss fails the guards closed too: no raw value, no consumed value left
+      // standing, nothing left ripening in the delay queue.
+      consumed_value.reset();
+      pending_queue.clear();
       return;
    }
 
@@ -195,8 +202,36 @@ void oracle_object::update_current_value( time_point_sec now )
       // themselves a minority the producers genuinely disagree, and the median over all of
       // them is a better answer than the median over one arbitrary cluster.
       if( kept.size() >= size_t( options.minimum_producers ) && kept_weight * 2 > live_weight )
+      {
+         // Record who the filter excluded, before replacing the set. Counts only: this
+         // never touches weights, funds, or eligibility (H2 economics are out of scope).
+         for( const auto& e : live )
+         {
+            bool survived = false;
+            for( const auto& k : kept )
+               if( k.producer == e.producer )
+               {
+                  survived = true;
+                  break;
+               }
+            if( !survived )
+               reputation[ e.producer ].outlier_count++;
+         }
          live = std::move( kept );
+      }
    }
+
+   // Liveness accrues for whatever counted toward this round's aggregate. Pruned to the
+   // current producer set first: rotation churn must not grow this map without bound.
+   for( auto it = reputation.begin(); it != reputation.end(); )
+   {
+      if( options.producers.find( it->first ) == options.producers.end() )
+         it = reputation.erase( it );
+      else
+         ++it;
+   }
+   for( const auto& e : live )
+      reputation[ e.producer ].live_count++;
 
    // Aggregation runs per series over the same producer set. This is what keeps bid <= ask
    // true after aggregation: if every producer's bid <= ask, then the weighted median of
@@ -239,31 +274,140 @@ void oracle_object::update_current_value( time_point_sec now )
    if( history.size() > size_t( GRAPHENE_ORACLE_MAX_HISTORY ) )
       history.erase( history.begin() );
 
-   if( oracle_aggregation_method::median_of_latest == options.get_aggregation() )
+    if( oracle_aggregation_method::median_of_latest == options.get_aggregation() )
+    {
+       current_value = latest;
+    }
+    else
+    {
+       vector<oracle_value> in_window;
+       in_window.reserve( history.size() * series.size() );
+       // median_over_window inherits the bid <= ask property, because every history entry
+       // satisfies it: each entry's per-series medians were taken over one producer set.
+       vector<oracle_value> windowed;
+       windowed.reserve( series.size() );
+       for( size_t s = 0; s < series.size(); ++s )
+       {
+          in_window.clear();
+          for( const auto& h : history )
+          {
+             if( ( now - h.first ).to_seconds() <= int64_t( options.window_sec )
+                 && h.second.size() == series.size() )
+                in_window.push_back( h.second[s] );
+          }
+          // Never empty: the entry just appended carries timestamp `now`.
+          windowed.push_back( upper_median( in_window ) );
+       }
+       current_value = windowed;
+    }
+
+    update_guarded_value( now, delay_sec, maintenance_interval_sec );
+}
+
+/**
+ * Track A guards: delay queue + freeze + per-interval rate limit. Raw aggregation above
+ * is untouched; this only decides what bound consumers may consume.
+ *
+ * Deterministic by construction: queue selection and integer ratio comparisons only.
+ * No floats, no unordered containers, head-block time (@p now) only.
+ */
+void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec,
+                                          uint32_t maintenance_interval_sec )
+{
+   // New-pairs-only opt-in: without either guard flag the consumed value tracks the
+   // raw aggregate immediately with no band, so an oracle that never opts in behaves
+   // exactly as before guards existed. The counter still resets (cheap, uniform).
+   const uint64_t epoch = maintenance_interval_sec > 0
+      ? uint64_t( now.sec_since_epoch() ) / maintenance_interval_sec
+      : uint64_t( 0 );
+   if( epoch != guard_epoch )
    {
-      current_value = latest;
+      guard_epoch = epoch;
+      guard_hits = 0;
+      rate_limited = false;
+   }
+
+   // Frozen halts consumption. Raw aggregation above already ran (transparency is
+   // unaffected); only promotion stops. The consumer read path fails closed as well.
+   if( options.frozen )
+      return;
+
+   // current_value is valid here: quorum loss returns early above (failing closed).
+   // Kept defensive anyway -- a guard must never invent a price.
+   if( !current_value.valid() )
+   {
+      consumed_value.reset();
+      pending_queue.clear();
       return;
    }
 
-   vector<oracle_value> in_window;
-   in_window.reserve( history.size() * series.size() );
-   // median_over_window inherits the bid <= ask property, because every history entry
-   // satisfies it: each entry's per-series medians were taken over one producer set.
-   vector<oracle_value> windowed;
-   windowed.reserve( series.size() );
-   for( size_t s = 0; s < series.size(); ++s )
+   // OSM delay applies only to opted-in pairs; everyone else consumes immediately.
+   // (The committee owns the VALUE via the chain parameter; the pair owns the CHOICE.)
+   const uint32_t effective_delay = options.guard_delay ? delay_sec : uint32_t( 0 );
+
+   // Sample the raw aggregate into the bounded delay queue. Bucketed so a full queue
+   // spans the delay whatever the publish rate; the newest bucket refreshes its value
+   // in place, keeping its timestamp (or the bucket would never close -- the same
+   // argument as the history ring above).
+   const uint32_t bucket = std::max<uint32_t>(
+      1, effective_delay / GRAPHENE_ORACLE_GUARD_MAX_PENDING );
+   if( pending_queue.empty()
+       || ( now - pending_queue.back().first ).to_seconds() >= int64_t( bucket ) )
+      pending_queue.emplace_back( now, *current_value );
+   else
+      pending_queue.back().second = *current_value;
+   while( pending_queue.size() > size_t( GRAPHENE_ORACLE_GUARD_MAX_PENDING ) )
+      pending_queue.erase( pending_queue.begin() );
+   // Samples older than the value lifetime can never be consumed (the read path would
+   // reject them), so drop them rather than let them ripen into a jump.
+   while( !pending_queue.empty()
+          && ( now - pending_queue.front().first ).to_seconds()
+                > int64_t( options.value_lifetime_sec ) )
+      pending_queue.erase( pending_queue.begin() );
+
+   // Promote the latest sample aged at least the delay (OSM-style: computed at block N,
+   // consumable at N + delay). Oldest-first scan: the last ripe entry wins.
+   const vector<oracle_value>* ripe = nullptr;
+   time_point_sec ripe_time;
+   for( const auto& entry : pending_queue )
    {
-      in_window.clear();
-      for( const auto& h : history )
+      if( ( now - entry.first ).to_seconds() >= int64_t( effective_delay )
+          && entry.second.size() == series.size() )
       {
-         if( ( now - h.first ).to_seconds() <= int64_t( options.window_sec )
-             && h.second.size() == series.size() )
-            in_window.push_back( h.second[s] );
+         ripe = &entry.second;
+         ripe_time = entry.first;
       }
-      // Never empty: the entry just appended carries timestamp `now`.
-      windowed.push_back( upper_median( in_window ) );
    }
-   current_value = windowed;
+   if( nullptr == ripe )
+      return; // nothing ripe yet: the delay holds, not a bug
+
+   // First promotion seeds the consumed value: there is no previous value to jump from.
+   // So does any promotion while the rate limit is off: passthrough for pairs that
+   // never opted in.
+   if( !consumed_value.valid() || !options.guard_rate_limit )
+   {
+      consumed_value = *ripe;
+      consumed_value_time = ripe_time;
+      rate_limited = false;
+      return;
+   }
+
+   // Rate limit: if ANY series moved beyond the bound, the whole promotion holds.
+   // Holding the whole vector (never per-series) keeps bid <= ask true by construction.
+   bool too_far = false;
+   for( size_t s = 0; s < series.size() && !too_far; ++s )
+      too_far = deviates_too_far( (*ripe)[s], (*consumed_value)[s],
+                                  GRAPHENE_ORACLE_GUARD_MAX_MOVE_PPM );
+   if( too_far )
+   {
+      rate_limited = true;
+      ++guard_hits;
+      return; // last-good stands; never jumps
+   }
+   consumed_value = *ripe;
+   consumed_value_time = ripe_time;
+   rate_limited = false;
+   guard_hits = 0;
 }
 
 } } // graphene::chain
@@ -282,6 +426,13 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (current_value_time)
                     (current_value_producer_count)
                     (subscribers)
+                    (consumed_value)
+                    (consumed_value_time)
+                    (pending_queue)
+                    (rate_limited)
+                    (guard_hits)
+                    (guard_epoch)
+                    (reputation)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::oracle_object )

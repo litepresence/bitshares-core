@@ -94,19 +94,65 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       /// oracle is reporting nothing.
       uint16_t         current_value_producer_count = 0;
 
-      /**
-       * Market-issued assets whose settlement price comes from this oracle.
-       *
-       * Maintained by the asset_update_bitasset evaluator rather than derived by scanning, for
-       * two reasons: publishing must refresh every bound asset's feed, and doing that by walking
-       * all bitassets on every publish would put work proportional to the whole chain's asset
-       * count into an operation designed to be sent every few seconds. It also makes the
-       * "refuse to delete an oracle something depends on" check O(1).
-       *
-       * Capped at GRAPHENE_ORACLE_MAX_SUBSCRIBERS so the work a single publish can trigger is
-       * bounded.
-       */
-      flat_set<asset_id_type> subscribers;
+       /**
+        * Market-issued assets whose settlement price comes from this oracle.
+        *
+        * Maintained by the asset_update_bitasset evaluator rather than derived by scanning, for
+        * two reasons: publishing must refresh every bound asset's feed, and doing that by walking
+        * all bitassets on every publish would put work proportional to the whole chain's asset
+        * count into an operation designed to be sent every few seconds. It also makes the
+        * "refuse to delete an oracle something depends on" check O(1).
+        *
+        * Capped at GRAPHENE_ORACLE_MAX_SUBSCRIBERS so the work a single publish can trigger is
+        * bounded.
+        */
+       flat_set<asset_id_type> subscribers;
+
+       // ---- Track A guards (new-pairs-only) ----
+       //
+       // current_value above is the RAW aggregate: computed immediately, transparent, and
+       // exactly what it was before this change. The guarded value below is what
+       // oracle-bound consumers actually read. Legacy feed paths never touch any of
+       // these fields. All appended after subscribers: pre-existing field positions are
+       // unchanged.
+
+       /**
+        * The guarded value bound consumers read: the raw aggregate after the OSM-style
+        * delay AND the per-interval rate limit. Absent while nothing ripe is available,
+        * while frozen, or on quorum loss -- every one of those fails closed downstream.
+        * One value per declared series, in order, like current_value.
+        */
+       optional<vector<oracle_value>> consumed_value;
+       /// When the consumed value's raw sample was formed (not when promoted). Read-time
+       /// liveness (value_lifetime_sec) counts from here, so a delayed value cannot
+       /// outlive the data it came from.
+       time_point_sec consumed_value_time;
+
+       /**
+        * Delay queue: timestamped raw samples awaiting the guard delay, oldest first.
+        * Capped at GRAPHENE_ORACLE_GUARD_MAX_PENDING with time-bucketed sampling, so a
+        * full queue always spans the configured delay whatever the publish rate (the
+        * same bucketing argument as the history ring: per-publish appends would make the
+        * span a function of publish frequency).
+        */
+       vector<pair<time_point_sec, vector<oracle_value>>> pending_queue;
+
+       /// Set while the last promotion was held by the rate limit. Cleared on the next
+       /// in-band promotion or at the next maintenance-interval boundary.
+       bool rate_limited = false;
+       /// Holds counted in the current maintenance interval. Reset to 0 at each
+       /// interval boundary (and on every successful promotion).
+       uint32_t guard_hits = 0;
+       /// head_block_time / maintenance_interval_sec at the last reset. Integer
+       /// division on head-block time only: no floats, no wall-clock.
+       uint64_t guard_epoch = 0;
+
+       /**
+        * Per-producer liveness/deviation history. Bounded by the producer set
+        * (GRAPHENE_ORACLE_MAX_PRODUCERS): no open-ended growth. Counts only -- never
+        * read by any economic logic in this stage.
+        */
+       flat_map<account_id_type, protocol::oracle_producer_reputation> reputation;
 
       /// @return whether a submission made at @p published is still live at @p now
       bool is_submission_live( time_point_sec published, time_point_sec now )const
@@ -129,17 +175,33 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
          return current_value.valid() && is_submission_live( current_value_time, now );
       }
 
-      /**
-       * Recomputes @ref current_value from @ref submissions and, for median_over_window, from
-       * @ref history, and appends to the history ring.
-       *
-       * Deterministic by construction: it only ever selects one of the observed values, never
-       * computes a new one, so there is no rounding or overflow that could differ between
-       * nodes. Aggregation runs per series over the SAME producer set, which is what keeps
-       * bid <= ask true after aggregation (see ORACLE-DESIGN.md "Series"). @p now must be
-       * the head block time.
-       */
-      void update_current_value( time_point_sec now );
+       /**
+        * Recomputes @ref current_value from @ref submissions and, for median_over_window, from
+        * @ref history, and appends to the history ring.
+        *
+        * Deterministic by construction: it only ever selects one of the observed values, never
+        * computes a new one, so there is no rounding or overflow that could differ between
+        * nodes. Aggregation runs per series over the SAME producer set, which is what keeps
+        * bid <= ask true after aggregation (see ORACLE-DESIGN.md "Series"). @p now must be
+        * the head block time.
+        *
+        * Then runs the Track A guards: samples the raw aggregate into the bounded delay
+        * queue and promotes the latest ripe sample to @ref consumed_value, subject to the
+        * freeze flag (no promotion while frozen) and the per-interval rate limit
+        * (GRAPHENE_ORACLE_GUARD_MAX_MOVE_PPM; holds last-good + flag, never jumps).
+        * @p delay_sec is the committee-owned guard delay;
+        * @p maintenance_interval_sec bounds the rate-limit counter's interval. Both are
+        * head-block-time-derived values passed by the caller (the object has no db).
+        */
+       void update_current_value( time_point_sec now, uint32_t delay_sec,
+                                  uint32_t maintenance_interval_sec );
+
+   private:
+      /// Track A guard promotion (delay queue + freeze + rate limit). Called at the end
+      /// of update_current_value; see the .cpp for the argument contract.
+      void update_guarded_value( time_point_sec now, uint32_t delay_sec,
+                                 uint32_t maintenance_interval_sec );
+   public:
 };
 
 struct by_oracle_name;   ///< unique, and how humans address an oracle

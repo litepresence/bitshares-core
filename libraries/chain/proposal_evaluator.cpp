@@ -252,6 +252,8 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for reference asset operations prior to the oracle hardfork");
          FC_ASSERT(!op.new_parameters.extensions.value.allow_public_reference_asset_creation.valid(),
                    "Unable to set reference asset creation policy before the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.extensions.value.oracle_guard_delay_sec.valid(),
+                   "Unable to set the oracle guard delay before the oracle hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {

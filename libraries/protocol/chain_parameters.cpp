@@ -111,6 +111,12 @@ namespace graphene { namespace protocol {
          FC_ASSERT( *extensions.value.maker_fee_discount_percent <= GRAPHENE_100_PERCENT,
                     "The maker_fee_discount_percent parameter can not exceed 100%" );
       }
+      if( extensions.value.oracle_guard_delay_sec.valid() )
+      {
+         FC_ASSERT( *extensions.value.oracle_guard_delay_sec <= GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC,
+                    "The oracle_guard_delay_sec parameter can not exceed ${m} seconds",
+                    ("m", GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC) );
+      }
    }
 
    uint16_t chain_parameters::get_market_fee_network_percent() const
@@ -123,6 +129,13 @@ namespace graphene { namespace protocol {
    {
       return extensions.value.maker_fee_discount_percent.valid() ?
                 *extensions.value.maker_fee_discount_percent : 0;
+   }
+
+   uint32_t chain_parameters::get_oracle_guard_delay_sec() const
+   {
+      return extensions.value.oracle_guard_delay_sec.valid() ?
+                *extensions.value.oracle_guard_delay_sec
+                : GRAPHENE_ORACLE_GUARD_DEFAULT_DELAY_SEC;
    }
 
 }}

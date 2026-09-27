@@ -324,43 +324,52 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
    // Defaults to head time so an absent value still produces a feed stamped "now", which is
    // the same unusable-but-current state the legacy path reaches with too few publishers.
    time_point_sec oracle_value_time = head_time;
-    if( oracle_bound )
-    {
-       const oracle_object* o = find( *bound_oracle_id );
-       // A bound oracle cannot be deleted while a live binding references it
-       // (oracle_delete refuses, pruning only stale entries), but read defensively: a
-       // missing oracle means "no value", never a stale or invented one.
-       //
-       // Freshness is checked HERE rather than trusted from current_value, because that field
-       // is only recomputed when a producer publishes. An oracle whose producers all stopped
-       // keeps its last aggregate for ever, so asking is_value_live is the only thing that
-       // distinguishes a current price from one that expired months ago.
-       //
-       // The binding match is re-checked HERE as well, with the same predicate the bind
-       // time uses (is_smartcoin_binding_valid), because a mapping can change after
-       // binding. A binding that no longer matches -- or names a series the oracle does
-       // not declare -- yields no price: the smartcoin behaves as it does when its feeds
-       // expire. It fails closed.
-       if( nullptr != o && o->is_value_live( head_time )
-           && o->current_value.valid()
-           && bound_series < o->series.size()
-           && o->current_value->size() == o->series.size() )
-       {
-          const auto debt_mapping = get_effective_reference_mapping( *this, bitasset.asset_id );
-          const auto backing_mapping = get_effective_reference_mapping(
-                *this, bitasset.options.short_backing_asset );
-          if( debt_mapping.valid() && backing_mapping.valid()
-              && is_smartcoin_binding_valid( *o, bound_series,
-                                             *debt_mapping, *backing_mapping ) )
-          {
-             oracle_value = convert_oracle_value_to_price(
-                   o->current_value->at( bound_series ), *debt_mapping, bitasset.asset_id,
-                   *backing_mapping, bitasset.options.short_backing_asset,
-                   o->series[ bound_series ].get_rounding() );
-             oracle_value_time = o->current_value_time;
-          }
-       }
-    }
+     if( oracle_bound )
+     {
+        const oracle_object* o = find( *bound_oracle_id );
+        // A bound oracle cannot be deleted while a live binding references it
+        // (oracle_delete refuses, pruning only stale entries), but read defensively: a
+        // missing oracle means "no value", never a stale or invented one.
+        //
+        // Bound consumers read the GUARDED value (Track A guards, new-pairs-only):
+        // the raw aggregate after the committee-owned delay and the per-interval rate
+        // limit. While frozen, or while nothing ripe is available, or past the value
+        // lifetime, the read yields no price: the smartcoin behaves as it does when
+        // its feeds expire. It fails closed. Legacy (unbound) assets never reach this
+        // branch; their path below is byte-identical.
+        //
+        // Freshness is checked HERE rather than trusted from consumed_value, because that
+        // field is only recomputed when a producer publishes or the owner updates. An
+        // oracle whose producers all stopped keeps its last aggregate for ever, so asking
+        // is_submission_live against the consumed timestamp is the only thing that
+        // distinguishes a current price from one that expired months ago.
+        //
+        // The binding match is re-checked HERE as well, with the same predicate the bind
+        // time uses (is_smartcoin_binding_valid), because a mapping can change after
+        // binding. A binding that no longer matches -- or names a series the oracle does
+        // not declare -- yields no price: the smartcoin behaves as it does when its feeds
+        // expire. It fails closed.
+        if( nullptr != o && !o->options.frozen
+            && o->consumed_value.valid()
+            && o->is_submission_live( o->consumed_value_time, head_time )
+            && bound_series < o->series.size()
+            && o->consumed_value->size() == o->series.size() )
+        {
+           const auto debt_mapping = get_effective_reference_mapping( *this, bitasset.asset_id );
+           const auto backing_mapping = get_effective_reference_mapping(
+                 *this, bitasset.options.short_backing_asset );
+           if( debt_mapping.valid() && backing_mapping.valid()
+               && is_smartcoin_binding_valid( *o, bound_series,
+                                              *debt_mapping, *backing_mapping ) )
+           {
+              oracle_value = convert_oracle_value_to_price(
+                    o->consumed_value->at( bound_series ), *debt_mapping, bitasset.asset_id,
+                    *backing_mapping, bitasset.options.short_backing_asset,
+                    o->series[ bound_series ].get_rounding() );
+              oracle_value_time = o->consumed_value_time;
+           }
+        }
+     }
 
    // We need to update the database
    modify( bitasset, [this, skip_median_update, &head_time, &new_current_feed_price, &bsrm,

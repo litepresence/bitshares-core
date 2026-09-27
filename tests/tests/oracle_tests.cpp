@@ -11,7 +11,9 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
+#include <graphene/chain/witness_object.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/asset_ops.hpp>
 
@@ -2750,6 +2752,491 @@ BOOST_AUTO_TEST_CASE( uia_reference_mapping_has_a_stable_extension_tag )
    BOOST_CHECK( back.value.reference_asset_mapping->reference == reference_asset_id_type( 1 ) );
    BOOST_CHECK_EQUAL( back.value.reference_asset_mapping->asset_amount.value, 100 );
    BOOST_CHECK_EQUAL( back.value.reference_asset_mapping->reference_amount.value, 1 );
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+/**
+ * Track B Task 8: Track A guards on new pairs (TDD).
+ *
+ * T8a rate-limit: aggregate movement bounded per maintenance interval (5%). A spike
+ * beyond the bound holds the last-good consumed value + flag, never jumps.
+ * T8b OSM-style delay: the median computed at block N is consumable for
+ * margin/settlement only at N + delay (proposal: 1h, chain parameter). The test uses a
+ * committee-set short delay and proves the mechanism, not the hour.
+ * T8c emergency freeze: a per-oracle freeze flag halts consumption and fails margin
+ * actions closed; unfreeze by vote resumes.
+ * T8d reputation log: per-producer liveness/deviation history accrues on-chain and is
+ * queryable (no economics attached).
+ * T8e legacy-untouched: legacy-feed expectations pinned byte-for-byte; zero modified
+ * legacy cases allowed.
+ *
+ * Guards are new-pairs-only: only oracle-bound consumers read the guarded
+ * (consumed) value. Legacy feed paths behave byte-identically (T8e).
+ */
+
+/// Guard-test fixture: guard oracles quote <debt-ref, BTS> so a smartcoin mapped 1:1
+/// to debt-ref and backed by core binds exactly like the Task 7 two-consumer test.
+struct guard_fixture : oracle_fixture
+{
+   oracle_id_type make_guard_oracle( account_id_type owner, const fc::ecc::private_key& key,
+                                     const string& name, const oracle_options& opts,
+                                     reference_asset_id_type debt_ref )
+   {
+      BOOST_REQUIRE( references_ready );
+      return rev2_make_oracle( *this, owner, key, name, debt_ref, bts_ref,
+                               rev2_single_mid_series(), opts );
+   }
+
+   void guard_publish( oracle_id_type oid, account_id_type who,
+                       const fc::ecc::private_key& key, int64_t n )
+   {
+      rev2_publish( *this, oid, who, key, { rv( 1, n ) } );
+   }
+
+   asset_id_type make_mapped_mia( const string& sym, account_id_type issuer,
+                                  const fc::ecc::private_key& key,
+                                  reference_asset_id_type debt_ref )
+   {
+      const asset_object& mia = create_bitasset( sym, issuer );
+      const auto mia_id = mia.get_id();
+      rev2_declare_mapping_1to1( *this, mia, issuer, key, debt_ref );
+      return mia_id;
+   }
+
+   void set_frozen( oracle_id_type oid, account_id_type owner,
+                    const fc::ecc::private_key& key, bool frozen )
+   {
+      oracle_options opts = oid(db).options;
+      opts.frozen = frozen;
+      update_options( oid, owner, key, opts );
+   }
+
+   /// Local explicit-bind helper. (The Task 7 rev2_bind_explicit lives in that
+   /// suite's scope; this is the same operation, duplicated so this suite stands alone.)
+   void bind_explicit( const asset_object& mia, account_id_type issuer,
+                       const fc::ecc::private_key& key, oracle_id_type oid, uint16_t series )
+   {
+      asset_update_bitasset_operation op;
+      op.issuer          = issuer;
+      op.asset_to_update = mia.get_id();
+      op.new_options     = mia.bitasset_data( db ).options;
+      price_oracle b;
+      b.oracle_id = oid;
+      b.series    = series;
+      op.new_options.extensions.value.price_oracle_binding = b;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+};
+
+BOOST_FIXTURE_TEST_SUITE( oracle_guard_tests, guard_fixture )
+
+/// T8a: a 10x spike holds the last-good consumed value and raises the flag, never jumps.
+/// The deviation filter is OFF (max_deviation_ppm = 0) so the raw aggregate provably
+/// moves and only the guard holds the consumed value.
+BOOST_AUTO_TEST_CASE( t8a_rate_limit_holds_last_good_and_flags )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+
+   setup_references( alice_id, alice_private_key );
+
+   // New pair opting into the rate limit (delay left off: isolated by the flag).
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id]  = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 2;
+   opts.value_lifetime_sec  = 7 * 86400;
+   opts.max_deviation_ppm   = 0;
+   opts.guard_rate_limit    = true;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+
+   guard_publish( oid, bob_id, bob_private_key, 100 );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   guard_publish( oid, dave_id, dave_private_key, 100 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_REQUIRE( oid(db).consumed_value.valid() );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+
+   const auto mia_id = make_mapped_mia( "MIA8A", alice_id, alice_private_key, usd_ref );
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+
+   // Everyone moves 10x at once: quorum survives, the filter is off, so the raw
+   // aggregate MUST move. The guard must hold the consumed value instead.
+   generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, bob_id, bob_private_key, 1000 );
+   guard_publish( oid, carol_id, carol_private_key, 1000 );
+   guard_publish( oid, dave_id, dave_private_key, 1000 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 1000 ) );
+   BOOST_REQUIRE( oid(db).consumed_value.valid() );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+   BOOST_CHECK( oid(db).rate_limited );
+   BOOST_CHECK_GE( oid(db).guard_hits, 1u );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+
+   // Per-interval reset: past the maintenance boundary the counter restarts (block
+   // production replays pending publishes, so the re-hold count reads at least 1),
+   // and returning in-band clears flag and counter exactly.
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 5 );
+   set_expiration( db, trx );
+   guard_publish( oid, bob_id, bob_private_key, 100 );
+   BOOST_CHECK( oid(db).rate_limited );
+   BOOST_CHECK_GE( oid(db).guard_hits, 1u );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   guard_publish( oid, dave_id, dave_private_key, 100 );
+   BOOST_REQUIRE( oid(db).consumed_value.valid() );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+   BOOST_CHECK( !oid(db).rate_limited );
+   BOOST_CHECK_EQUAL( oid(db).guard_hits, 0u );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T8b: the median computed at block N is consumable only at N + delay. The committee
+/// sets a short delay by vote; the test proves the mechanism, not the hour.
+BOOST_AUTO_TEST_CASE( t8b_delay_holds_value_until_delay_passes )
+{ try {
+   // Pre-fork the delay parameter is refused through the proposal path.
+   {
+      proposal_create_operation cop = proposal_create_operation::committee_proposal(
+            db.get_global_properties().parameters, db.head_block_time() );
+      cop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      cop.expiration_time = db.head_block_time() + *cop.review_period_seconds + 10;
+      committee_member_update_global_parameters_operation cmuop;
+      cmuop.new_parameters = db.get_global_properties().parameters;
+      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 120;
+      cop.proposed_ops.emplace_back( cmuop );
+      trx.operations.push_back( cop );
+      GRAPHENE_CHECK_THROW( PUSH_TX( db, trx, ~0 ), fc::exception );
+      trx.clear();
+      BOOST_CHECK( !db.get_global_properties().parameters
+                        .extensions.value.oracle_guard_delay_sec.valid() );
+   }
+
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   // The committee votes a short delay for the test pair's chain.
+   {
+      proposal_create_operation cop = proposal_create_operation::committee_proposal(
+            db.get_global_properties().parameters, db.head_block_time() );
+      cop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      cop.expiration_time = db.head_block_time() + *cop.review_period_seconds + 10;
+      committee_member_update_global_parameters_operation cmuop;
+      cmuop.new_parameters = db.get_global_properties().parameters;
+      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 120;
+      cop.proposed_ops.emplace_back( cmuop );
+      trx.operations.push_back( cop );
+      processed_transaction ptx = PUSH_TX( db, trx, ~0 );
+      trx.clear();
+      proposal_id_type prop_id { ptx.operation_results[0].get<object_id_type>() };
+
+      proposal_update_operation uop;
+      uop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      uop.active_approvals_to_add = { get_account("init0").get_id(), get_account("init1").get_id(),
+                                      get_account("init2").get_id(), get_account("init3").get_id(),
+                                      get_account("init4").get_id(), get_account("init5").get_id(),
+                                      get_account("init6").get_id(), get_account("init7").get_id() };
+      trx.operations.push_back( uop );
+      PUSH_TX( db, trx, ~0 );
+      trx.clear();
+
+      generate_blocks( prop_id( db ).expiration_time + 5 );
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time );
+      generate_block();
+      BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters
+                              .get_oracle_guard_delay_sec(), 120u );
+   }
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   opts.guard_delay         = true; // new pair opting into the OSM delay
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+
+   // Computed at block N: raw is live, but nothing is consumable yet.
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK( !oid(db).consumed_value.valid() );
+
+   // A bound asset fails closed until the delay passes: no price, not a stale one.
+   const auto mia_id = make_mapped_mia( "MIA8B", alice_id, alice_private_key, usd_ref );
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Past N + delay the same value becomes consumable and the feed goes live.
+   generate_blocks( db.head_block_time() + 180 );
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_REQUIRE( oid(db).consumed_value.valid() );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+   BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T8c: freeze halts consumption and fails margin actions closed; unfreeze by vote
+/// resumes the feed.
+BOOST_AUTO_TEST_CASE( t8c_freeze_halts_consumption_and_unfreeze_by_vote_resumes )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_REQUIRE( oid(db).consumed_value.valid() );
+
+   const auto mia_id = make_mapped_mia( "MIA8C", alice_id, alice_private_key, usd_ref );
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Borrowing works while the oracle is live: the margin path is open.
+   BOOST_REQUIRE( nullptr != borrow( bob, asset( 500, mia_id ), asset( 100000, asset_id_type() ) ) );
+
+   // The owner freezes: consumption halts, the bound feed goes null, and margin
+   // actions fail closed instead of trading on the frozen price.
+   set_frozen( oid, alice_id, alice_private_key, true );
+   BOOST_REQUIRE( oid(db).options.frozen );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   GRAPHENE_REQUIRE_THROW(
+      borrow( dave, asset( 500, mia_id ), asset( 100000, asset_id_type() ) ), fc::exception );
+
+   // Unfreeze by vote: alice proposes the unfreeze and approves it; execution on
+   // approval resumes the oracle without any further action.
+   proposal_id_type pid;
+   {
+      proposal_create_operation pcop;
+      pcop.fee_paying_account = alice_id;
+      oracle_update_operation unfreeze;
+      unfreeze.owner     = alice_id;
+      unfreeze.oracle_id = oid;
+      oracle_options live = oid(db).options;
+      live.frozen = false;
+      unfreeze.new_options = live;
+      pcop.proposed_ops = { op_wrapper( unfreeze ) };
+      pcop.expiration_time = db.head_block_time() + 100;
+      pcop.fee = pcop.calculate_fee(
+            db.current_fee_schedule().get<proposal_create_operation>() );
+      signed_transaction tx;
+      tx.operations = { pcop };
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      pid = proposal_id_type{ db.push_transaction( tx ).operation_results[0]
+                                                   .get<object_id_type>() };
+   }
+   BOOST_REQUIRE( nullptr != db.find( pid ) );
+   {
+      proposal_update_operation puop;
+      puop.fee_paying_account = alice_id;
+      puop.proposal = pid;
+      puop.active_approvals_to_add = { alice_id };
+      puop.fee = puop.calculate_fee(
+            db.current_fee_schedule().get<proposal_update_operation>() );
+      signed_transaction tx;
+      tx.operations = { puop };
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   BOOST_CHECK( db.find( pid ) == nullptr );
+   BOOST_CHECK( !oid(db).options.frozen );
+
+   // A fresh publish resumes the feed at the same price with no rebind. In a fresh
+   // block: the pre-freeze publish is byte-identical, which the chain would reject
+   // as a duplicate within one block.
+   generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T8d: per-producer liveness/deviation history accrues on-chain and is queryable.
+/// No economics attached: counts only, never weights, rewards, or slashing.
+BOOST_AUTO_TEST_CASE( t8d_reputation_accrues_and_is_queryable )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id]  = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 2;
+   opts.value_lifetime_sec  = 7 * 86400;
+   opts.max_deviation_ppm   = 100000; // 10%: a 2x deviant is an outlier, noise is not
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+
+   guard_publish( oid, bob_id, bob_private_key, 100 );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   guard_publish( oid, dave_id, dave_private_key, 100 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+
+   // Every publisher accrued liveness with no deviations yet.
+   BOOST_REQUIRE_EQUAL( oid(db).reputation.size(), 3u );
+   for( const auto& entry : oid(db).reputation )
+   {
+      BOOST_CHECK_GE( entry.second.publish_count, 1u );
+      BOOST_CHECK_GE( entry.second.live_count, 1u );
+      BOOST_CHECK_EQUAL( entry.second.outlier_count, 0u );
+   }
+
+   // Bob deviates 2x alone: the quorum-aware filter excludes him while quorum survives,
+   // and his deviation is recorded without touching his weight or anyone's funds.
+   guard_publish( oid, bob_id, bob_private_key, 200 );
+   BOOST_REQUIRE( oid(db).current_value.valid() );
+   BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
+   BOOST_REQUIRE( oid(db).reputation.find( bob_id ) != oid(db).reputation.end() );
+   BOOST_CHECK_EQUAL( oid(db).reputation.find( bob_id )->second.publish_count, 2u );
+   BOOST_CHECK_GE( oid(db).reputation.find( bob_id )->second.outlier_count, 1u );
+   BOOST_CHECK_EQUAL( oid(db).options.producers.find( bob_id )->second.weight, 1u );
+
+   // The history travels the API wire: pack/unpack round-trips the counts exactly.
+   const auto rep = oid(db).reputation.find( bob_id )->second;
+   const auto rep_back = fc::raw::unpack<oracle_producer_reputation>( fc::raw::pack( rep ) );
+   BOOST_CHECK_EQUAL( rep_back.publish_count, rep.publish_count );
+   BOOST_CHECK_EQUAL( rep_back.live_count, rep.live_count );
+   BOOST_CHECK_EQUAL( rep_back.outlier_count, rep.outlier_count );
+} FC_LOG_AND_RETHROW() }
+
+/// T8e: legacy-untouched. A witness-fed smartcoin with no oracle binding anywhere
+/// keeps byte-identical feed behaviour: legacy median expectations pinned exactly.
+BOOST_AUTO_TEST_CASE( t8e_legacy_feed_path_is_untouched )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice) );
+   fund( alice );
+
+   // Default (witness-account) issuer: a witness-fed legacy asset, exactly the
+   // bitasset_tests shape. No oracle binding anywhere on this asset.
+   const asset_object& legacy = create_bitasset( "LEGACY8E" );
+   const asset_id_type legacy_id = legacy.get_id();
+   const asset_id_type core_id = asset_id_type();
+   const auto& ext = legacy_id(db).bitasset_data(db).options.extensions.value;
+   BOOST_REQUIRE( !ext.price_oracle_id.valid() );
+   BOOST_REQUIRE( !ext.price_oracle_binding.valid() );
+
+   const auto& global_props = db.get_global_properties();
+   std::vector<account_id_type> active_witnesses;
+   for( const witness_id_type& wit_id : global_props.active_witnesses )
+      active_witnesses.push_back( wit_id(db).witness_account );
+   BOOST_REQUIRE_GE( active_witnesses.size(), 3u );
+
+   publish_feed( active_witnesses[0], core_id, 1, legacy_id, 300, core_id );
+   BOOST_CHECK_EQUAL(
+      legacy_id(db).bitasset_data(db).current_feed.settlement_price.to_real(), 300.0 );
+   publish_feed( active_witnesses[1], core_id, 1, legacy_id, 100, core_id );
+   BOOST_CHECK_EQUAL(
+      legacy_id(db).bitasset_data(db).current_feed.settlement_price.to_real(), 300.0 );
+   publish_feed( active_witnesses[2], core_id, 1, legacy_id, 1, core_id );
+   BOOST_CHECK_EQUAL(
+      legacy_id(db).bitasset_data(db).current_feed.settlement_price.to_real(), 100.0 );
+   BOOST_CHECK( legacy_id(db).bitasset_data(db).current_feed
+                   .maintenance_collateral_ratio
+                == GRAPHENE_DEFAULT_MAINTENANCE_COLLATERAL_RATIO );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_SUITE( oracle_guard_wire_tests )
+
+/**
+ * oracle_guard_delay_sec was appended LAST to chain_parameters::ext (tag 5, after
+ * allow_public_reference_asset_creation at 4). The tag must never shift, and the
+ * getter defaults to the 1h proposal value while the field is absent.
+ */
+BOOST_AUTO_TEST_CASE( guard_delay_chain_parameter_tag_is_stable )
+{
+   chain_parameters p;
+   BOOST_CHECK_EQUAL( p.get_oracle_guard_delay_sec(),
+                      GRAPHENE_ORACLE_GUARD_DEFAULT_DELAY_SEC );
+   p.extensions.value.oracle_guard_delay_sec = 120;
+   auto bytes = fc::raw::pack( p.extensions );
+   BOOST_REQUIRE( bytes.size() >= 2 );
+   BOOST_CHECK_EQUAL( int( bytes[0] ), 1 );
+   BOOST_CHECK_EQUAL( int( bytes[1] ), 5 );
+
+   auto back = fc::raw::unpack<chain_parameters>( fc::raw::pack( p ) );
+   BOOST_REQUIRE( back.extensions.value.oracle_guard_delay_sec.valid() );
+   BOOST_CHECK_EQUAL( int( *back.extensions.value.oracle_guard_delay_sec ), 120 );
+   BOOST_CHECK_EQUAL( back.get_oracle_guard_delay_sec(), 120u );
+}
+
+/**
+ * frozen was appended AFTER extensions on oracle_options (never inserted before it),
+ * so pre-existing field positions are unchanged and the flag round-trips.
+ */
+BOOST_AUTO_TEST_CASE( oracle_options_frozen_flag_round_trips )
+{
+   oracle_options o;
+   o.producers[ account_id_type( 1 ) ] = oracle_producer_entry( 1 );
+   o.minimum_producers = 1;
+   BOOST_CHECK( !o.frozen );
+   o.frozen = true;
+   auto back = fc::raw::unpack<oracle_options>( fc::raw::pack( o ) );
+   BOOST_CHECK( back.frozen );
+   BOOST_REQUIRE_EQUAL( back.producers.size(), 1u );
+   BOOST_CHECK_EQUAL( back.minimum_producers, 1u );
+}
+
+/**
+ * The guard opt-in flags were appended after frozen (never inserted): pre-existing
+ * positions unchanged, both flags round-trip, both default OFF (passthrough).
+ */
+BOOST_AUTO_TEST_CASE( oracle_options_guard_flags_round_trip )
+{
+   oracle_options o;
+   BOOST_CHECK( !o.guard_rate_limit );
+   BOOST_CHECK( !o.guard_delay );
+   o.guard_rate_limit = true;
+   o.guard_delay = true;
+   auto back = fc::raw::unpack<oracle_options>( fc::raw::pack( o ) );
+   BOOST_CHECK( back.guard_rate_limit );
+   BOOST_CHECK( back.guard_delay );
+   BOOST_CHECK( !back.frozen );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

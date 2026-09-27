@@ -424,6 +424,22 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // producer
    }
+   void operator()( const vault_challenge_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const oracle_dispute_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const oracle_dispute_escalate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // escalator
+   }
+   void operator()( const challenge_vote_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // voter
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

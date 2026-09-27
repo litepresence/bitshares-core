@@ -37,6 +37,12 @@ void vault_register_operation::validate()const
               "Vault min_bond exceeds maximum share supply" );
    FC_ASSERT( min_bond_usd_cents > 0,
               "Vault min_bond_usd_cents records the USD-terms basis and must be positive" );
+   // BTS-only at genesis (inventory OQ-05 reversible minimum): the basket join
+   // rule is a later task's explicit allow-list, never a silent expansion. The
+   // evaluator re-checks this against the registered asset; validate pins the
+   // core asset statically.
+   FC_ASSERT( bond_asset == asset_id_type(),
+              "Vault bond asset is BTS-only at genesis" );
    FC_ASSERT( secure_ratio_bps > 10000,
               "Secure ratio must exceed 100% (10000 bps)" );
    FC_ASSERT( challenge_window_sec > 0,

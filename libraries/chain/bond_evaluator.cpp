@@ -23,6 +23,7 @@
  */
 #include <graphene/chain/bond_evaluator.hpp>
 #include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/challenge_object.hpp>
 
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -111,11 +112,20 @@ void_result oracle_bond_release_evaluator::do_evaluate( const oracle_bond_releas
    FC_ASSERT( _bond->producer == op.producer,
               "Only the bond producer may release it" );
    // The bond still secures the oracle until the unlock: early release is
-   // refused, and the 7-day unbond is baked into the unlock itself. Open
-   // disputes naming the producer additionally block release from H2b onward.
+   // refused, and the 7-day unbond is baked into the unlock itself. An open
+   // dispute naming the producer additionally blocks release (H2b): the
+   // vacuous-true H2a placeholder is now the real query over the defender
+   // index. Terminal disputes (decided or expired) no longer block.
    FC_ASSERT( d.head_block_time() >= _bond->unlock_time,
               "Producer bond unlocks at ${u}; release refused before then",
               ("u", _bond->unlock_time) );
+   const auto& defender_idx = d.get_index_type<oracle_dispute_index>()
+                                 .indices().get<by_dispute_defender>();
+   const auto range = defender_idx.equal_range( op.producer );
+   for( auto itr = range.first; itr != range.second; ++itr )
+      FC_ASSERT( itr->state != GRAPHENE_H2_CHALLENGE_OPEN,
+                 "Producer bond is named in open dispute ${x}; release refused",
+                 ("x", itr->id) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

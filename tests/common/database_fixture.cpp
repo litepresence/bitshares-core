@@ -41,6 +41,10 @@
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
+#include <graphene/chain/vault_object.hpp>
+#include <graphene/chain/challenge_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/hardfork_visitor.hpp>
 
@@ -676,6 +680,29 @@ void database_fixture_base::verify_asset_supplies( const database& db )
    {
       total_balances[itr->transfer.asset_id] += itr->transfer.amount;
    }
+
+   // H2b dispute escrows: open challenges/disputes hold challenger/defender
+   // bonds outside any account balance (limit-order/htlc precedent: escrowed
+   // funds stay supply-visible). Terminal states hold nothing: their escrow
+   // has been returned or split, so only open ones count. Accrued 15% pool
+   // shares sit on the target objects until the H2d reward pool sweeps them.
+   for( const vault_challenge_object& o : db.get_index_type< vault_challenge_index >().indices() )
+   {
+      if( o.state == GRAPHENE_H2_CHALLENGE_OPEN )
+         total_balances[asset_id_type()] += o.challenge_bond;
+   }
+   for( const oracle_dispute_object& o : db.get_index_type< oracle_dispute_index >().indices() )
+   {
+      if( o.state == GRAPHENE_H2_CHALLENGE_OPEN )
+      {
+         total_balances[asset_id_type()] += o.challenger_bonds;
+         total_balances[asset_id_type()] += o.defender_bonds;
+      }
+   }
+   for( const vault_object& o : db.get_index_type< vault_index >().indices() )
+      total_balances[asset_id_type()] += o.forfeit_pool_balance;
+   for( const oracle_object& o : db.get_index_type< oracle_index >().indices() )
+      total_balances[asset_id_type()] += o.forfeit_pool_balance;
 
    for( const asset_object& asset_obj : db.get_index_type<asset_index>().indices() )
    {

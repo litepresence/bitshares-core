@@ -42,6 +42,7 @@
 #include <graphene/protocol/ticket.hpp>
 #include <graphene/protocol/transfer.hpp>
 #include <graphene/protocol/vault_ops.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/vesting.hpp>
 #include <graphene/protocol/withdraw_permission.hpp>
 #include <graphene/protocol/witness.hpp>
@@ -141,7 +142,11 @@ namespace graphene { namespace protocol {
              /* 83 */ vault_register_operation,
              /* 84 */ vault_bond_lock_operation,
              /* 85 */ oracle_bond_lock_operation,
-             /* 86 */ oracle_bond_release_operation
+             /* 86 */ oracle_bond_release_operation,
+             /* 87 */ vault_challenge_operation,
+             /* 88 */ oracle_dispute_operation,
+             /* 89 */ oracle_dispute_escalate_operation,
+             /* 90 */ challenge_vote_operation
            >;
 
    /**

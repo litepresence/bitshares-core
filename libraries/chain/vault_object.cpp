@@ -39,6 +39,9 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_object, (graphene::db::ob
                     (challenge_window_sec)
                     (outstanding)
                     (frozen)
+                    (open_challenges)
+                    (last_challenge_time)
+                    (forfeit_pool_balance)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::vault_object )

@@ -433,6 +433,9 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (guard_hits)
                     (guard_epoch)
                     (reputation)
+                    (open_disputes)
+                    (last_dispute_time)
+                    (forfeit_pool_balance)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::oracle_object )

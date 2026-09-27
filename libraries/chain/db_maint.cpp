@@ -43,6 +43,7 @@
 #include <graphene/chain/special_authority_object.hpp>
 #include <graphene/chain/ticket_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/vote_count.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -1591,6 +1592,10 @@ void database::perform_chain_maintenance( const signed_block& next_block )
 
    process_bitassets();
    delete_expired_custom_auths(*this);
+   // H2b fail-closed arbitration: open challenges/disputes past their vote
+   // window expire into frozen targets at the first maintenance after the
+   // deadline (inventory OQ-19 vehicle). Pre-fork this is a gated no-op.
+   process_expired_h2_challenges(*this);
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

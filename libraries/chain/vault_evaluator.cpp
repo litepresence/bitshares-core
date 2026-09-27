@@ -45,6 +45,11 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
               "Vault pair asset ${a} does not exist", ("a", op.pair) );
    FC_ASSERT( nullptr != d.find( op.bond_asset ),
               "Bond asset ${a} does not exist", ("a", op.bond_asset) );
+   // Allow-list enforced at registration (H2a review direction): locks check
+   // per-type, so registration must not accept anything else. BTS-only at
+   // genesis; basket assets join through an explicit later rule.
+   FC_ASSERT( op.bond_asset == asset_id_type(),
+              "Vault bond asset is BTS-only at genesis" );
 
    // Threshold custody must be satisfiable: an impossible threshold would lock
    // the vault on day one. Member count is bounded so the authority stays

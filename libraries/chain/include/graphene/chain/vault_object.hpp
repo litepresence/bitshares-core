@@ -56,6 +56,10 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
       uint32_t      challenge_window_sec = 0;
       share_type    outstanding;      ///< Liabilities minted against this vault, smallest units
       bool          frozen = false;   ///< Fail-closed: while set, mint blocked
+      // ---- H2b dispute bookkeeping (appended-last, never inserted) ----
+      uint16_t      open_challenges = 0; ///< Open challenges (concurrency source of truth)
+      time_point_sec last_challenge_time; ///< Last challenge open (24h cooldown anchor)
+      share_type    forfeit_pool_balance; ///< Accrued 15% forfeit shares, swept by H2d
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const

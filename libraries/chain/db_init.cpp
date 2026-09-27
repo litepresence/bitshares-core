@@ -38,6 +38,7 @@
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
@@ -66,6 +67,7 @@
 #include <graphene/chain/oracle_evaluator.hpp>
 #include <graphene/chain/vault_evaluator.hpp>
 #include <graphene/chain/bond_evaluator.hpp>
+#include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/custom_evaluator.hpp>
 #include <graphene/chain/liquidity_pool_evaluator.hpp>
 #include <graphene/chain/market_evaluator.hpp>
@@ -165,6 +167,10 @@ void database::initialize_evaluators()
    register_evaluator<vault_bond_lock_evaluator>();
    register_evaluator<oracle_bond_lock_evaluator>();
    register_evaluator<oracle_bond_release_evaluator>();
+   register_evaluator<vault_challenge_evaluator>();
+   register_evaluator<oracle_dispute_evaluator>();
+   register_evaluator<oracle_dispute_escalate_evaluator>();
+   register_evaluator<challenge_vote_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -199,6 +205,8 @@ void database::initialize_indexes()
    add_index< primary_index<vault_index> >();
    add_index< primary_index<vault_bond_index> >();
    add_index< primary_index<producer_bond_index> >();
+   add_index< primary_index<vault_challenge_index> >();
+   add_index< primary_index<oracle_dispute_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

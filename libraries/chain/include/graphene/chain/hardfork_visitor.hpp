@@ -77,6 +77,10 @@ struct hardfork_visitor {
                                            protocol::vault_bond_lock_operation,
                                            protocol::oracle_bond_lock_operation,
                                            protocol::oracle_bond_release_operation >;
+   using h2_dispute_ops = fc::typelist::list< protocol::vault_challenge_operation,
+                                              protocol::oracle_dispute_operation,
+                                              protocol::oracle_dispute_escalate_operation,
+                                              protocol::challenge_vote_operation >;
 
    fc::time_point_sec now;
 
@@ -117,6 +121,9 @@ struct hardfork_visitor {
    visit() { return HARDFORK_ORACLE_PASSED(now); }
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<h2_bond_ops, Op>(), bool>
+   visit() { return HARDFORK_H2_BONDS_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<h2_dispute_ops, Op>(), bool>
    visit() { return HARDFORK_H2_BONDS_PASSED(now); }
    /// @}
 

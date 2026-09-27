@@ -378,6 +378,18 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::oracle_bond_release_operation&) const {
       FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
    }
+   void operator()(const graphene::chain::vault_challenge_operation&) const {
+      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_dispute_operation&) const {
+      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_dispute_escalate_operation&) const {
+      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+   }
+   void operator()(const graphene::chain::challenge_vote_operation&) const {
+      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+   }
 
    // loop and self visit in proposals
    void operator()(const graphene::chain::proposal_create_operation &v) const {

@@ -154,6 +154,18 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
         */
        flat_map<account_id_type, protocol::oracle_producer_reputation> reputation;
 
+       // ---- H2b dispute bookkeeping (appended-last, never inserted) ----
+       //
+       // Dormant until an H2 dispute names the oracle, so H1 paths are
+       // byte-identical: nothing here is read outside dispute evaluation and
+       // the expiry sweep, both hardfork-gated.
+       /// Open disputes (concurrency source of truth).
+       uint16_t open_disputes = 0;
+       /// Last dispute open (24h cooldown anchor).
+       time_point_sec last_dispute_time;
+       /// Accrued 15% forfeit shares, swept by the H2d reward pool.
+       share_type forfeit_pool_balance;
+
       /// @return whether a submission made at @p published is still live at @p now
       bool is_submission_live( time_point_sec published, time_point_sec now )const
       {

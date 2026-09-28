@@ -37,6 +37,11 @@ void vault_rotate_operation::validate()const
               ("m", GRAPHENE_H2_VAULT_MAX_AUTHORITY_MEMBERS) );
    FC_ASSERT( !new_authority.is_impossible(),
               "New vault authority threshold exceeds the sum of member weights" );
+   FC_ASSERT( co_signers.size() <= GRAPHENE_H2_VAULT_MAX_AUTHORITY_MEMBERS,
+              "Rotation co-signers exceed ${m} members",
+              ("m", GRAPHENE_H2_VAULT_MAX_AUTHORITY_MEMBERS) );
+   FC_ASSERT( co_signers.find( rotator ) == co_signers.end(),
+              "Rotator is already required; listing it as a co-signer double-counts weight" );
    if( memo.valid() )
       FC_ASSERT( memo->size() <= GRAPHENE_H2_VAULT_MAX_MEMO_LENGTH,
                  "Memo should not exceed ${m} characters",

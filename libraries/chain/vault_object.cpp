@@ -45,6 +45,8 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_object, (graphene::db::ob
                     (maintenance_state)
                     (top_up_deadline)
                     (last_breach_time)
+                    (bound_oracle)
+                    (tripwire_door_hold)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::vault_object )

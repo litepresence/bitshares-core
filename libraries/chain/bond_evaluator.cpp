@@ -24,6 +24,7 @@
 #include <graphene/chain/bond_evaluator.hpp>
 #include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/challenge_object.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
 
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -97,6 +98,10 @@ object_id_type oracle_bond_lock_evaluator::do_apply( const oracle_bond_lock_oper
       b.bootstrap_weight = op.bootstrap_weight;
       b.slashed          = false;
    } );
+   // A bonded producer brings the oracle into the H2 economics: shell the
+   // reward pool + guard state now, so promotion records and forfeit sweeps
+   // have somewhere to land (idempotent; H2-gated by this evaluator).
+   h2_ensure_oracle_econ( d, op.oracle );
    return object_id_type( new_bond.id );
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

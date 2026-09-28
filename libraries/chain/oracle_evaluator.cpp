@@ -25,6 +25,7 @@
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/bond_evaluator.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
@@ -398,6 +399,13 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
    // its bond unlock out. Unbonded producers (every H1 producer) take no branch
    // inside and see no behavior change.
    advance_producer_bond_on_publish( d, op.oracle_id, op.producer, now );
+
+   // H2d promotion observation: hardened OSM records + rate counting for the
+   // oracle's guard shell. Self-gated on the H2 hardfork with shell creation
+   // inside, so H1 publishes (pre-fork, or forked oracles no H2 op ever
+   // touched... post-fork H1 publishes shell but change nothing H1 reads)
+   // keep byte-identical guarded values.
+   h2_observe_publication( d, op.oracle_id, now );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

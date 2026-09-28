@@ -44,6 +44,7 @@
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -704,6 +705,16 @@ void database_fixture_base::verify_asset_supplies( const database& db )
       total_balances[asset_id_type()] += o.forfeit_pool_balance;
    for( const oracle_object& o : db.get_index_type< oracle_index >().indices() )
       total_balances[asset_id_type()] += o.forfeit_pool_balance;
+   // H2d reward pools: the maintenance sweep drains the 15% accrual shells
+   // above into pool balances and pays producers out of them. Swept shares
+   // were already counted in current_supply (only the burn leg left it), so
+   // the pool remainder stays supply-visible until paid, exactly like the
+   // shells it drains (which the sweep zeroes, never double-counting).
+   for( const reward_pool_object& o : db.get_index_type< reward_pool_index >().indices() )
+   {
+      if( o.balance > share_type( 0 ) )
+         total_balances[asset_id_type()] += o.balance;
+   }
    // H2c wind-down escrows: creation debits the failed vault's vesting
    // balances (supply-visible) into segregated_bond, and claim payouts
    // re-enter circulation via adjust_balance. The unclaimed remainder

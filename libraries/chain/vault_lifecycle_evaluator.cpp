@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/winddown_object.hpp>
 
 #include <graphene/chain/account_object.hpp>
@@ -138,11 +139,14 @@ void process_h2_vault_maintenance( database& d )
                   pinned = true;
                   break;
                }
-            d.modify( *itr, [pinned]( vault_object& v ) {
-               v.maintenance_state = GRAPHENE_H2_VAULT_HEALTHY;
-               if( !pinned )
-                  v.frozen = false;
-            } );
+             d.modify( *itr, [pinned]( vault_object& v ) {
+                v.maintenance_state = GRAPHENE_H2_VAULT_HEALTHY;
+                // The tripwire owns its door hold: coverage recovery must not
+                // clear a freeze the deviation ladder set (H2d). Unset only
+                // the H2c hold leaves frozen untouched.
+                if( !pinned && !v.tripwire_door_hold )
+                   v.frozen = false;
+             } );
          }
          else if( now >= itr->top_up_deadline )
             h2_create_winddown( d, *itr );
@@ -168,16 +172,36 @@ void_result vault_rotate_evaluator::do_evaluate( const vault_rotate_operation& o
               "Not allowed until the H2 bonds hardfork" );
 
    _vault = d.find( op.vault );
-   FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
-   FC_ASSERT( nullptr != d.find( op.rotator ),
-              "Rotator account ${a} does not exist", ("a", op.rotator) );
-   // H2c minimum authorization: rotation must be initiated by a current
-   // member of the old authority (the full old-threshold signature check is a
-   // follow-on with the issuance engine, documented on the op).
-   FC_ASSERT( _vault->vault_authority.account_auths.find( op.rotator )
-                 != _vault->vault_authority.account_auths.end(),
-              "Rotator ${a} is not a member of the vault authority",
-              ("a", op.rotator) );
+    FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
+    FC_ASSERT( nullptr != d.find( op.rotator ),
+               "Rotator account ${a} does not exist", ("a", op.rotator) );
+    // H2d full-threshold authorization: the rotator plus the named co-signers
+    // must carry at least the old authority's full weight threshold. Every
+    // named account's ACTIVE authority is signature-required on the
+    // transaction (the op's get_required_active_authorities), so this weight
+    // sum is carried by real signatures, not assertions. Key/address-held
+    // weights cannot co-sign (they name no account); such sets rotate only
+    // through account-held weight meeting the threshold alone.
+    {
+       const auto& auths = _vault->vault_authority.account_auths;
+       FC_ASSERT( auths.find( op.rotator ) != auths.end(),
+                  "Rotator ${a} is not a member of the vault authority",
+                  ("a", op.rotator) );
+       uint32_t weight = 0;
+       const auto ritr = auths.find( op.rotator );
+       weight += ritr->second;
+       for( const account_id_type& co : op.co_signers )
+       {
+          const auto citr = auths.find( co );
+          FC_ASSERT( citr != auths.end(),
+                     "Co-signer ${a} is not a member of the vault authority",
+                     ("a", co) );
+          weight += citr->second;
+       }
+       FC_ASSERT( weight >= _vault->vault_authority.weight_threshold,
+                  "Rotation carries ${w} of ${t} required old-threshold weight",
+                  ("w", weight)("t", _vault->vault_authority.weight_threshold) );
+    }
    // Never rotate under fire: an open challenge must resolve first.
    FC_ASSERT( _vault->open_challenges == 0,
               "Vault carries open challenges; rotation refused until they resolve" );
@@ -282,11 +306,21 @@ void_result pair_freeze_evaluator::do_evaluate( const pair_freeze_operation& op 
    FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
               "Not allowed until the H2 bonds hardfork" );
 
-   FC_ASSERT( nullptr != d.find( op.vault ), "Vault ${v} does not exist", ("v", op.vault) );
+   const vault_object* vault = d.find( op.vault );
+   FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );
    FC_ASSERT( nullptr != d.find( op.oracle ), "Oracle ${o} does not exist", ("o", op.oracle) );
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
    FC_ASSERT( member_idx.find( op.freezer ) != member_idx.end(),
               "Freezer ${a} is not a seated committee member", ("a", op.freezer) );
+   // Canonical pair<->oracle binding (H2d): the first freeze pins the vault's
+   // price leg; every later freeze must name the same oracle. Without this a
+   // committee member could swing a vault's freeze scope onto an unrelated
+   // debt tap. Unbound vaults (every H2c vault) pin on first use: H2c tests
+   // freeze once and pass unchanged.
+   if( vault->bound_oracle.valid() )
+      FC_ASSERT( *vault->bound_oracle == op.oracle,
+                 "Vault ${v} is canonically bound to oracle ${b}; freezing ${o} refused",
+                 ("v", op.vault)("b", *vault->bound_oracle)("o", op.oracle) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -297,7 +331,11 @@ void_result pair_freeze_evaluator::do_apply( const pair_freeze_operation& op ) c
    // Atomic by construction: both flags flip in this single apply step, so no
    // block can ever observe the door closed with debt still open.
    const vault_object& vault = op.vault(d);
-   d.modify( vault, []( vault_object& v ) { v.frozen = true; } );
+   d.modify( vault, [&op]( vault_object& v ) {
+      v.frozen = true;
+      if( !v.bound_oracle.valid() )
+         v.bound_oracle = op.oracle; // first freeze pins the canonical binding
+   } );
    const oracle_object& oracle = op.oracle(d);
    d.modify( oracle, []( oracle_object& o ) { o.options.frozen = true; } );
    return void_result();
@@ -305,7 +343,7 @@ void_result pair_freeze_evaluator::do_apply( const pair_freeze_operation& op ) c
 
 void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operation& op )
 { try {
-   const database& d = db();
+   database& d = db();
 
    FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
               "Not allowed until the H2 bonds hardfork" );
@@ -315,6 +353,11 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
    FC_ASSERT( _winddown->state != GRAPHENE_H2_WINDDOWN_COMPLETE,
               "Wind-down ${w} is complete; no further claims",
               ("w", op.winddown) );
+   // Tripwire redemptions latch (H2d): while the pair's wire holds
+   // redemptions shut, no claim for the pair is admitted. Holder exit is
+   // preserved by the reopen rule, never by bypassing the latch.
+   FC_ASSERT( !h2_redemptions_halted( d, _winddown->pair ),
+              "Redemptions for this pair are held shut by the tripwire" );
    FC_ASSERT( nullptr != d.find( op.claimant ),
               "Claimant account ${a} does not exist", ("a", op.claimant) );
    // One claim per account: the claim index is the double-claim guard.
@@ -328,14 +371,36 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
    const share_type next_claimed = _winddown->claimed_total + op.claim_amount;
    FC_ASSERT( next_claimed <= _winddown->total_claims,
               "Claim exceeds the wind-down's frozen liabilities" );
-   // Seniors settle first at the haircut face; juniors dilute behind them with
-   // junior-paid capped at rmax times senior-paid (running cap: seniors must
-   // have claimed first, matching the "seniors first" pay order).
-   const share_type payout = winddown_vault_object::payout_for(
-         op.claim_amount, _winddown->segregated_bond,
-         _winddown->total_claims, _winddown->haircut_bps );
-   FC_ASSERT( payout > share_type( 0 ),
-              "Dust claims that pay nothing are refused" );
+    // Seniors settle first at the haircut face; juniors dilute behind them with
+    // junior-paid capped at rmax times senior-paid (running cap: seniors must
+    // have claimed first, matching the "seniors first" pay order).
+    //
+    // USD-terms leg (H2d, closes the H2c-deferred raw-vs-USD check): when the
+    // source vault carries a canonical bound oracle, the payout converts
+    // through the live H2 price read (primary, else the single backup). A
+    // dual-stale read refuses the claim: conversion-dependent exits halt
+    // rather than pay on a dead price. Unbound vaults keep the H2c same-asset
+    // math byte-identical.
+    const vault_object* source = d.find( _winddown->source_vault );
+    share_type payout;
+    if( source != nullptr && source->bound_oracle.valid() )
+    {
+       const auto price = h2_read_pair_price( d, *source, 0, d.head_block_time() );
+       FC_ASSERT( price.valid(),
+                  "Bound price leg is dual-stale; conversion-dependent claims halt" );
+       payout = h2_converted_payout_for_claim(
+             op.claim_amount, _winddown->segregated_bond,
+             _winddown->total_claims, _winddown->haircut_bps, *price );
+    }
+    else
+    {
+       payout = winddown_vault_object::payout_for(
+             op.claim_amount, _winddown->segregated_bond,
+             _winddown->total_claims, _winddown->haircut_bps );
+    }
+    _payout = payout;
+    FC_ASSERT( payout > share_type( 0 ),
+               "Dust claims that pay nothing are refused" );
    if( op.tranche == GRAPHENE_H2_WINDDOWN_JUNIOR )
    {
       const share_type next_junior = _winddown->junior_paid + payout;
@@ -353,9 +418,9 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
 object_id_type winddown_claim_evaluator::do_apply( const winddown_claim_operation& op ) const
 { try {
    database& d = db();
-   const share_type payout = winddown_vault_object::payout_for(
-         op.claim_amount, _winddown->segregated_bond,
-         _winddown->total_claims, _winddown->haircut_bps );
+   // The payout was fixed at evaluate time (same-asset or converted): apply
+   // never recomputes economics, so the checked amount is the paid amount.
+   const share_type payout = _payout;
    d.adjust_balance( op.claimant, asset( payout, asset_id_type() ) );
    const auto& new_claim = d.create<winddown_claim_object>(
          [&op, &payout]( winddown_claim_object& c ) {

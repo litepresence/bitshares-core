@@ -81,11 +81,12 @@ struct hardfork_visitor {
                                               protocol::oracle_dispute_operation,
                                               protocol::oracle_dispute_escalate_operation,
                                               protocol::challenge_vote_operation >;
-   using h2_lifecycle_ops = fc::typelist::list< protocol::vault_rotate_operation,
-                                                protocol::vault_bond_release_operation,
-                                                protocol::vault_resolve_operation,
-                                                protocol::pair_freeze_operation,
-                                                protocol::winddown_claim_operation >;
+    using h2_lifecycle_ops = fc::typelist::list< protocol::vault_rotate_operation,
+                                                 protocol::vault_bond_release_operation,
+                                                 protocol::vault_resolve_operation,
+                                                 protocol::pair_freeze_operation,
+                                                 protocol::winddown_claim_operation >;
+    using h2_economics_ops = fc::typelist::list< protocol::oracle_fallback_set_operation >;
 
    fc::time_point_sec now;
 
@@ -130,9 +131,12 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<h2_dispute_ops, Op>(), bool>
    visit() { return HARDFORK_H2_BONDS_PASSED(now); }
-   template<typename Op>
-   std::enable_if_t<fc::typelist::contains<h2_lifecycle_ops, Op>(), bool>
-   visit() { return HARDFORK_H2_BONDS_PASSED(now); }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<h2_lifecycle_ops, Op>(), bool>
+    visit() { return HARDFORK_H2_BONDS_PASSED(now); }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<h2_economics_ops, Op>(), bool>
+    visit() { return HARDFORK_H2_BONDS_PASSED(now); }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

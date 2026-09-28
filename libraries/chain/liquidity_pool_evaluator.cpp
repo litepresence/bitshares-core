@@ -28,6 +28,7 @@
 
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/exceptions.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 
@@ -481,6 +482,12 @@ generic_exchange_operation_result liquidity_pool_exchange_evaluator::do_apply(
    result.fees.emplace_back( _maker_market_fee );
    result.fees.emplace_back( _taker_market_fee );
    result.fees.emplace_back( _pool_taker_fee );
+
+   // H2d tripwire sampling: records the pool-side execution ratio when the
+   // leg is bond-quoted for a vaulted pair. Self-gated (pre-fork no-op) and
+   // vault-gated (H1 pairs return before touching state): pool behavior is
+   // otherwise untouched.
+   h2_observe_pool_exchange( d, liquidity_pool_id_type( _pool->id ), _pool_receives, _pool_pays );
 
    return result;
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

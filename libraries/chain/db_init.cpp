@@ -69,6 +69,8 @@
 #include <graphene/chain/bond_evaluator.hpp>
 #include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/chain/custom_evaluator.hpp>
 #include <graphene/chain/liquidity_pool_evaluator.hpp>
@@ -178,6 +180,7 @@ void database::initialize_evaluators()
    register_evaluator<vault_resolve_evaluator>();
    register_evaluator<pair_freeze_evaluator>();
    register_evaluator<winddown_claim_evaluator>();
+   register_evaluator<oracle_fallback_set_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -216,6 +219,10 @@ void database::initialize_indexes()
    add_index< primary_index<oracle_dispute_index> >();
    add_index< primary_index<winddown_vault_index> >();
    add_index< primary_index<winddown_claim_index> >();
+   add_index< primary_index<reward_pool_index> >();
+   add_index< primary_index<guard_state_index> >();
+   add_index< primary_index<tripwire_index> >();
+   add_index< primary_index<recovery_state_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

@@ -24,6 +24,7 @@
 #include <graphene/chain/vault_evaluator.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 
 #include <graphene/chain/asset_object.hpp>
@@ -66,6 +67,14 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
    const auto& pair_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
    FC_ASSERT( pair_idx.find( op.pair ) == pair_idx.end(),
               "Pair ${a} already has a live vault set", ("a", op.pair) );
+
+   // Recovery suspends new debt (H2d): while the system scope sits below
+   // 150%, registering a new vault (new debt capacity) is refused. Exits
+   // (wind-down claims) stay open: this gate touches entry only.
+   const auto& rec_idx = d.get_index_type<recovery_state_index>().indices();
+   if( !rec_idx.empty() )
+      FC_ASSERT( !rec_idx.begin()->new_debt_suspended,
+                 "Recovery is active: new debt suspended until scope restores" );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

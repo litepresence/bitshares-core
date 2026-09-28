@@ -45,6 +45,7 @@
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/vote_count.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -1600,6 +1601,9 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    // H2c vault lifecycle: 150% coverage rule -> mint halt -> 36h top-up ->
    // auto wind-down + seizure (inventory OQ-09/OQ-19 vehicles). Pre-fork no-op.
    process_h2_vault_maintenance(*this);
+   // H2d oracle economics: reward-pool sweep + pro-rata payouts, guard rate
+   // windows, Recovery scope, tripwire ladder. Pre-fork no-op.
+   process_h2_oracle_economics(*this);
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

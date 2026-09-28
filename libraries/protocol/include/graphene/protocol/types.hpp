@@ -392,6 +392,10 @@ GRAPHENE_DEFINE_IDS(protocol, protocol_ids, /*protocol objects are not prefixed*
                      /* 1.29.x */ (oracle_dispute)
                      /* 1.30.x */ (winddown_vault)
                      /* 1.31.x */ (winddown_claim)
+                     /* 1.32.x */ (reward_pool)
+                     /* 1.33.x */ (guard_state)
+                     /* 1.34.x */ (tripwire_state)
+                     /* 1.35.x */ (recovery_state)
                      )
 
 FC_REFLECT(graphene::protocol::public_key_type, (key_data))

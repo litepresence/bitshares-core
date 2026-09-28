@@ -84,6 +84,9 @@ namespace graphene { namespace chain {
          object_id_type do_apply( const winddown_claim_operation& op ) const;
 
          const winddown_vault_object* _winddown = nullptr;
+         /// Payout fixed at evaluate time so apply cannot diverge from the
+         /// checked economics (same-asset H2c math or bound-oracle conversion).
+         share_type _payout;
    };
 
    /**

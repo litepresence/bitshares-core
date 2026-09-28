@@ -460,6 +460,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // claimant
    }
+   void operator()( const oracle_fallback_set_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

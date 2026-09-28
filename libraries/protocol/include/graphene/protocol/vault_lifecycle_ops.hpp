@@ -57,33 +57,46 @@ namespace graphene { namespace protocol {
    constexpr uint8_t GRAPHENE_H2_WINDDOWN_SENIOR = 0;
    constexpr uint8_t GRAPHENE_H2_WINDDOWN_JUNIOR = 1;
 
-   /**
-    * @brief Rotates a vault's threshold set in place; liabilities migrate by staying put.
-    * @ingroup operations
-    *
-    * The incoming set proves capital first (at least one bond must already be
-    * locked against the vault). Rotation must be initiated by a current member
-    * of the old authority; the full old-threshold signature check is a
-    * follow-on with the issuance engine. Rotation is refused while any
-    * challenge against the vault is open. Outstanding liabilities carry over
-    * unchanged; the old bonds release only through vault_bond_release once the
-    * challenge window has passed at zero open liabilities.
-    */
-   struct vault_rotate_operation : public base_operation
-   {
-      struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
+    /**
+     * @brief Rotates a vault's threshold set in place; liabilities migrate by staying put.
+     * @ingroup operations
+     *
+     * The incoming set proves capital first (at least one bond must already be
+     * locked against the vault). Rotation must carry the FULL weight of the
+     * old threshold: the rotator plus the named co-signers must sum to at
+     * least the old authority's weight_threshold, and every named account's
+     * ACTIVE authority is required on the transaction (signature-verified by
+     * consensus, not merely asserted). Rotation is refused while any
+     * challenge against the vault is open. Outstanding liabilities carry over
+     * unchanged; the old bonds release only through vault_bond_release once the
+     * challenge window has passed at zero open liabilities.
+     */
+    struct vault_rotate_operation : public base_operation
+    {
+       struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
 
-      asset           fee;
-      account_id_type rotator;       ///< Pays the fee; must sit in the old authority
-      vault_id_type   vault;         ///< Target vault; must exist
-      authority       new_authority; ///< Replaces vault_authority in full
-      optional<string> memo;         ///< Rotation rationale carrier; never authorizes mint
-      extensions_type extensions;    ///< Appended-last rule
+       asset           fee;
+       account_id_type rotator;       ///< Pays the fee; must sit in the old authority
+       vault_id_type   vault;         ///< Target vault; must exist
+       authority       new_authority; ///< Replaces vault_authority in full
+       optional<string> memo;         ///< Rotation rationale carrier; never authorizes mint
+       extensions_type extensions;    ///< Appended-last rule
+       /// Old-set co-signers (H2d full-threshold check, appended after
+       /// extensions per the oracle_options precedent: pre-existing wire
+       /// positions are unchanged). Each named account's active authority is
+       /// signature-required; the evaluator sums rotator + co-signer weights
+       /// against the old threshold.
+       flat_set<account_id_type> co_signers;
 
-      account_id_type fee_payer()const { return rotator; }
-      void            validate()const;
-      share_type      calculate_fee( const fee_params_t& k )const;
-   };
+       account_id_type fee_payer()const { return rotator; }
+       void            validate()const;
+       share_type      calculate_fee( const fee_params_t& k )const;
+       void get_required_active_authorities( flat_set<account_id_type>& a )const
+       {
+          for( const account_id_type& co : co_signers )
+             a.insert( co );
+       }
+    };
 
    /**
     * @brief Releases a vault bond once its unlock has passed at zero open liabilities.
@@ -190,7 +203,7 @@ FC_REFLECT( graphene::protocol::pair_freeze_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::winddown_claim_operation::fee_params_t, (fee) )
 
 FC_REFLECT( graphene::protocol::vault_rotate_operation,
-            (fee)(rotator)(vault)(new_authority)(memo)(extensions) )
+            (fee)(rotator)(vault)(new_authority)(memo)(extensions)(co_signers) )
 FC_REFLECT( graphene::protocol::vault_bond_release_operation,
             (fee)(owner)(bond)(extensions) )
 FC_REFLECT( graphene::protocol::vault_resolve_operation,

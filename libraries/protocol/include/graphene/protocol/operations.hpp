@@ -44,6 +44,7 @@
 #include <graphene/protocol/vault_ops.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
+#include <graphene/protocol/h2_economics.hpp>
 #include <graphene/protocol/vesting.hpp>
 #include <graphene/protocol/withdraw_permission.hpp>
 #include <graphene/protocol/witness.hpp>
@@ -152,7 +153,8 @@ namespace graphene { namespace protocol {
              /* 92 */ vault_bond_release_operation,
              /* 93 */ vault_resolve_operation,
              /* 94 */ pair_freeze_operation,
-             /* 95 */ winddown_claim_operation
+             /* 95 */ winddown_claim_operation,
+             /* 96 */ oracle_fallback_set_operation
            >;
 
    /**

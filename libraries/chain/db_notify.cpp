@@ -408,6 +408,22 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // creator
    }
+   void operator()( const stealth_transfer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // GRAPHENE_TEMP_ACCOUNT
+      for( const auto& out : op.outputs )
+         add_authority_accounts( _impacted, out.owner );
+   }
+   void operator()( const freeze_blind_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // voter
+   }
+   void operator()( const turnstile_reproof_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // GRAPHENE_TEMP_ACCOUNT
+      add_authority_accounts( _impacted, op.owner );
+      add_authority_accounts( _impacted, op.new_output.owner );
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );
@@ -607,7 +623,12 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
               accounts.insert( aobj->offer_owner );
               accounts.insert( aobj->borrower );
               break;
-           }
+           } case impl_stealth_nullifier_object_type:
+              /** key-image nullifiers carry no account info */
+              break;
+             case impl_stealth_status_object_type:
+              /** singleton consensus state carries no account info */
+              break;
            // Do not have a default fallback so that there will be a compiler warning when a new type is added
       }
    }

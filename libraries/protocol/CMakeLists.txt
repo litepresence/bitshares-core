@@ -29,6 +29,7 @@ list(APPEND SOURCES account.cpp
                     oracle.cpp
                     liquidity_pool.cpp
                     samet_fund.cpp
+                    stealth.cpp
                     ticket.cpp
                     operations.cpp
                     pts_address.cpp

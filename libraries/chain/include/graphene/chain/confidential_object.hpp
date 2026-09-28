@@ -45,6 +45,12 @@ class blinded_balance_object : public graphene::db::abstract_object<blinded_bala
       fc::ecc::commitment_type                commitment;
       asset_id_type                           asset_id;
       authority                               owner;
+      /// G1 (STEALTH hardfork): creation metadata for decoy-eligibility
+      /// (BSIP-2 §1: 24h min age, 100-block skew windows). Appended last;
+      /// pre-fork balances carry 0/epoch (treated as grandfathered:
+      /// NEVER decoy-eligible, spendable only explicitly or via turnstile).
+      uint32_t                                created_block = 0;
+      fc::time_point_sec                      created_time;
 };
 
 struct by_commitment;

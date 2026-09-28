@@ -47,6 +47,7 @@
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/custom_authority_object.hpp>
+#include <graphene/chain/stealth_evaluator.hpp>
 
 namespace graphene { namespace chain {
 
@@ -1591,6 +1592,12 @@ void database::perform_chain_maintenance( const signed_block& next_block )
 
    process_bitassets();
    delete_expired_custom_auths(*this);
+
+   // G1 (STEALTH hardfork): record activation timestamps once, then reconcile
+   // the blinded-supply shadow against live counters (auto-halt on divergence).
+   // Both are internally gated on HARDFORK_STEALTH_PASSED (no-op pre-fork).
+   stealth_maybe_record_activation( *this );
+   stealth_reconcile_supplies( *this );
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

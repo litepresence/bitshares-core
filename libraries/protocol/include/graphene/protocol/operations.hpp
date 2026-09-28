@@ -39,6 +39,7 @@
 #include <graphene/protocol/market.hpp>
 #include <graphene/protocol/proposal.hpp>
 #include <graphene/protocol/samet_fund.hpp>
+#include <graphene/protocol/stealth.hpp>
 #include <graphene/protocol/ticket.hpp>
 #include <graphene/protocol/transfer.hpp>
 #include <graphene/protocol/vesting.hpp>
@@ -136,7 +137,10 @@ namespace graphene { namespace protocol {
             /* 79 */ oracle_update_operation,
             /* 80 */ oracle_delete_operation,
             /* 81 */ oracle_publish_operation,
-            /* 82 */ reference_asset_create_operation
+            /* 82 */ reference_asset_create_operation,
+            /* 83 */ stealth_transfer_operation,   // G1 BSIP-2 (STEALTH hardfork-gated)
+            /* 84 */ freeze_blind_operation,       // G1 BSIP-2 (STEALTH hardfork-gated)
+            /* 85 */ turnstile_reproof_operation   // G1 BSIP-2 (STEALTH hardfork-gated)
           >;
 
    /**

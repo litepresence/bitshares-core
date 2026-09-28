@@ -53,6 +53,7 @@
 #include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/custom_authority_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 
 #include <graphene/chain/account_evaluator.hpp>
 #include <graphene/chain/asset_evaluator.hpp>
@@ -75,6 +76,7 @@
 #include <graphene/chain/worker_evaluator.hpp>
 #include <graphene/chain/htlc_evaluator.hpp>
 #include <graphene/chain/custom_authority_evaluator.hpp>
+#include <graphene/chain/stealth_evaluator.hpp>
 
 namespace graphene { namespace chain {
 
@@ -157,6 +159,9 @@ void database::initialize_evaluators()
    register_evaluator<oracle_delete_evaluator>();
    register_evaluator<oracle_publish_evaluator>();
    register_evaluator<reference_asset_create_evaluator>();
+   register_evaluator<stealth_transfer_evaluator>();
+   register_evaluator<freeze_blind_evaluator>();
+   register_evaluator<turnstile_reproof_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -188,6 +193,8 @@ void database::initialize_indexes()
    add_index< primary_index<credit_deal_index> >();
    add_index< primary_index<oracle_index> >();
    add_index< primary_index<reference_asset_index> >();
+   add_index< primary_index<stealth_nullifier_index> >();
+   add_index< primary_index<stealth_status_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

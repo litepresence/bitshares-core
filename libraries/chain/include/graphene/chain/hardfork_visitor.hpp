@@ -73,6 +73,9 @@ struct hardfork_visitor {
                                            protocol::oracle_delete_operation,
                                            protocol::oracle_publish_operation,
                                            protocol::reference_asset_create_operation >;
+   using stealth_ops = fc::typelist::list< protocol::stealth_transfer_operation,
+                                           protocol::freeze_blind_operation,
+                                           protocol::turnstile_reproof_operation >;
 
    fc::time_point_sec now;
 
@@ -111,6 +114,9 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<oracle_ops, Op>(), bool>
    visit() { return HARDFORK_ORACLE_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<stealth_ops, Op>(), bool>
+   visit() { return HARDFORK_STEALTH_PASSED(now); }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

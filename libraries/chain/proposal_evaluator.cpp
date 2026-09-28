@@ -260,6 +260,14 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.extensions.value.oracle_guard_delay_sec.valid(),
                    "Unable to set the oracle guard delay before the oracle hardfork");
       }
+      if (!HARDFORK_STEALTH_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<stealth_transfer_operation>(),
+                   "Unable to define fees for stealth transfer operations prior to the stealth hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<freeze_blind_operation>(),
+                   "Unable to define fees for freeze blind operations prior to the stealth hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<turnstile_reproof_operation>(),
+                   "Unable to define fees for turnstile re-proof operations prior to the stealth hardfork");
+      }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
       FC_ASSERT( block_time >= HARDFORK_CORE_1468_TIME, "Not allowed until hardfork 1468" );
@@ -365,6 +373,15 @@ struct proposal_operation_hardfork_visitor
    }
    void operator()(const graphene::chain::reference_asset_create_operation&) const {
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::stealth_transfer_operation&) const {
+      FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
+   }
+   void operator()(const graphene::chain::freeze_blind_operation&) const {
+      FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
+   }
+   void operator()(const graphene::chain::turnstile_reproof_operation&) const {
+      FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
    }
 
    // loop and self visit in proposals

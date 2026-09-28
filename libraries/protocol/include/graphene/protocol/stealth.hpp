@@ -1,0 +1,285 @@
+/*
+ * Copyright (c) 2026 BitShares contributors.
+ *
+ * The MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+
+#pragma once
+#include <graphene/protocol/base.hpp>
+#include <graphene/protocol/asset.hpp>
+#include <graphene/protocol/authority.hpp>
+
+namespace graphene { namespace protocol {
+
+using fc::ecc::blind_factor_type;
+using fc::ecc::commitment_type;
+using fc::ecc::range_proof_type;
+
+/**
+ * @defgroup g1_stealth G1 stealth transfers (BSIP-2)
+ * @brief Consensus parameters and operations for bonded-era private transfers.
+ *
+ * All numeric constants below are PROPOSALS per BSIP-2 §7b/Discussion: the
+ * pre-G1 specialist audit may RAISE security minimums, never lower them;
+ * auditor deadlock falls back to these floor values after 90 days.
+ * @{
+ */
+
+/// Floor ring size: an 11-member ring is the smallest spend the network relays.
+constexpr uint32_t GRAPHENE_STEALTH_RING_MIN = 11;
+/// Target ring size: wallets default here; budgets are measured here and up.
+constexpr uint32_t GRAPHENE_STEALTH_RING_TARGET = 16;
+/// Ceiling ring size: bounds verifier work per input (DoS cap, not privacy).
+constexpr uint32_t GRAPHENE_STEALTH_RING_MAX = 32;
+
+/// Per-block blind-operation budget shared by ops 39/40/41/83/85 (see G1a §4c:
+/// 100 x ring-16 worst case ~= 690ms <= 750ms = 25% of the 3s interval).
+/// Counts every blind op (legacy + stealth) so the budget is one number.
+/// Reserved transparent/market space rides the same counter: when the budget
+/// is exhausted the block simply carries no more blind ops. Parity-pool fee
+/// subsidy and wallet defaults are G1c, explicitly NOT here.
+constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK = 100;
+
+/// Decoy eligibility: outputs younger than this are ineligible as decoys
+/// (Sybil-poisoning cost: an attacker must park outputs for a full day
+/// before they can flood anyone's rings). Proposal; auditors may raise.
+constexpr uint32_t GRAPHENE_STEALTH_DECOY_MIN_AGE_SEC = 86400;
+/// Skew window for the age-distribution rule, in blocks (~5 minutes).
+constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS = 100;
+/// Max share of one ring's decoys that may fall in a single skew window
+/// (percent). Proposal: no 100-block window contributes more than 40%.
+constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_MAX_PCT = 40;
+/// Blind-pool floor: per-asset count of unspent decoy-candidate blind outputs
+/// (post-fork creation metadata present; spent-but-retained outputs do NOT
+/// count) below which blind SPENDS of that asset halt. Deposits are never
+/// gated (they create decoys — gating them would deadlock bootstrapping).
+/// Availability yields to privacy, explicitly (thin-pool rings are worse
+/// than no rings: they mark the spender as one of few).
+constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
+
+/// Proof versions. V1 = Borromean range proofs via the fc backend (legacy
+/// proofs verify forever; no forced migration of existing blind balances).
+/// V2 = Bulletproofs+ (G1 wire format, secp256k1 port of 2020-735).
+constexpr uint8_t GRAPHENE_STEALTH_PROOF_V1 = 1;
+constexpr uint8_t GRAPHENE_STEALTH_PROOF_V2 = 2;
+
+/// V1 lifetime after activation (proposal: 365 days). At sunset V1 spends
+/// become spend-only-via-turnstile; turnstile G2 IS this date, fixed at
+/// activation per BSIP-2 §1 (never "next hardfork TBD"). Dual-verify window
+/// = [activation, sunset]: both nullifier sets enforced throughout.
+constexpr uint32_t GRAPHENE_STEALTH_V1_LIFETIME_SEC = 31536000;
+
+/// Committee freeze-backup quorum (proposal): distinct committee-member votes
+/// required to (un)halt blind ops. Named-operator role approximation: any
+/// elected member may vote; votes expire after 48h (proposal).
+constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED = 2;
+constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC = 172800;
+
+/// Consensus seeds (embedded in code, test-vector pinned in the audit
+/// report; any library with opaque parameters stays rejected per BSIP-2).
+/// H (Pedersen value base) is NOT derived from these: it is the S2/Elements
+/// H constant verbatim (see stealth_proof.cpp), because legacy fc
+/// commitments must verify under it.
+#define GRAPHENE_STEALTH_BP_SEED "BitShares-G1-BP-secp256k1-v1"
+#define GRAPHENE_STEALTH_J1_SEED "BitShares-G1-J1-secp256k1-v1"
+#define GRAPHENE_STEALTH_J2_SEED "BitShares-G1-J2-secp256k1-v1"
+
+/** @} endgroup g1_stealth */
+
+/**
+ * @brief One linkable-ring spend authorization (G1 ring scheme).
+ * @ingroup g1_stealth
+ *
+ * The ring lists decoy-eligible blind-output commitments; the prover knows
+ * the Pedersen opening (blind, value) of exactly one member but the proof
+ * hides which. Authorization is knowledge-of-opening: no per-input account
+ * authority is declared, so observers learn only the candidate set.
+ * Double-spend protection is the key image: I = b*J1 + v*J2 for the spent
+ * opening, domain-separated per proof version (J1/J2 differ per version).
+ * The same opening spent twice yields the same image and is rejected.
+ *
+ * Conservation kernel (pseudo-output pattern): each input carries a
+ * pseudo-output commitment P = b'*G + v*H committing to the SAME value as
+ * the real spent member under a fresh blind b'. The ring signature binds P
+ * to the ring (per-member M equation over D_i = P - Q_i; forging an
+ * inflated P requires log_G(H)), and the consensus excess equation
+ * sum(P) - sum(outputs) - fee*H == excess*G proves balance without
+ * revealing which member is real. Pseudos are ephemeral kernel inputs:
+ * they are never indexed as balances.
+ *
+ * Wire note: decoy heights/times are NOT on the wire. The evaluator reads
+ * creation metadata from chain state (blinded_balance_object, appended
+ * fields); wire-claimed metadata would be a malleability surface.
+ */
+struct stealth_ring_input
+{
+   /// Ring of blind-output commitments (real + decoys), size [11, 32],
+   /// all distinct, all currently unspent. Order is consensus-significant
+   /// (it is the signature's member order).
+   vector<commitment_type> ring;
+   /// Key image: 33-byte compressed secp256k1 point, unique per spent
+   /// opening per version. Enforced in the nullifier set (both version sets
+   /// during the dual-verify window).
+   vector<char>            key_image;
+   /// Ring signature: c_0 || (rb_0, rv_0, rd_0) ... || (rb_{n-1}, rv_{n-1},
+   /// rd_{n-1}), 32-byte big-endian scalars, total 32 + 96*n bytes. The
+   /// third response per member (rd) is the pseudo-output binding leg.
+   vector<char>            ring_sig;
+   /// Pseudo-output commitment (appended-last): same value as the real
+   /// spent member, fresh blind. Bound to the ring by the signature's M
+   /// equation; consumed by the excess equation. Never indexed.
+   commitment_type         pseudo_output;
+};
+
+/**
+ * @brief A new blinded output (works for both proof versions).
+ * @ingroup g1_stealth
+ */
+struct stealth_blind_output
+{
+   commitment_type       commitment;
+   /// V1: fc Borromean proof bytes. V2: G1 Bulletproofs+ blob
+   /// (m || A || S || T1 || T2 || taux || mu || L/R pairs || a || b || t_hat).
+   vector<char>          range_proof;
+   authority             owner;
+};
+
+/**
+ * @brief Ring-signed blind-to-blind transfer (new stealth path).
+ * @ingroup g1_stealth
+ *
+ * Asset type stays VISIBLE (amount privacy, never asset privacy: per-asset
+ * supply auditability is load-bearing for the whole program). Conservation
+ * is a Mimblewimble-style kernel over the per-input pseudo-outputs:
+ * sum(pseudo) - sum(outputs) - fee*H == excess*G, checked in consensus;
+ * the excess scalar is sum(pseudo blinds) - sum(output blinds) mod n, and
+ * each pseudo is bound to its ring's real input value by the ring
+ * signature's M equation. Fee payer is TEMP (threshold-0 genesis
+ * account: requires no signature); the fee itself is covered by the blind
+ * surplus exactly like legacy blind_transfer, and paid via the FBA path.
+ */
+struct stealth_transfer_operation : public base_operation
+{
+   struct fee_params_t {
+      uint64_t fee              = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+      uint32_t price_per_output = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+   };
+
+   asset                          fee;
+   asset_id_type                  asset_id; ///< visible asset type
+   uint8_t                        proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   blind_factor_type              excess; ///< sum(in blinds) - sum(out blinds), mod n
+   vector<stealth_ring_input>     inputs;
+   vector<stealth_blind_output>   outputs;
+
+   extensions_type                extensions; ///< appended-last; new fields go here
+
+   account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
+   void            validate()const;
+   share_type      calculate_fee( const fee_params_t& k )const;
+};
+
+/**
+ * @brief Committee backup halt switch for blind ops (BSIP-2 §1).
+ * @ingroup g1_stealth
+ *
+ * The tripwire fires this automatically; the human backup is distinct
+ * member votes reaching GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED within the
+ * 48h expiry. Freeze and resume are symmetric (same quorum both ways) so
+ * no minority can hold the halt hostage and no single key can halt alone.
+ */
+struct freeze_blind_operation : public base_operation
+{
+   struct fee_params_t { uint64_t fee = 0; };
+
+   asset                 fee;
+   account_id_type       voter; ///< must hold a committee_member_object
+   bool                  freeze = true;
+   string                reason;
+
+   extensions_type       extensions; ///< appended-last
+
+   account_id_type fee_payer()const { return voter; }
+   void            validate()const;
+};
+
+/**
+ * @brief Turnstile migration of a V1 blind balance to a newer proof version.
+ * @ingroup g1_stealth
+ *
+ * The migration leg is transparent BY DESIGN (old commitment consumed in
+ * the clear, new commitment created): a turnstile cannot unlink what it
+ * migrates, it only re-proofs it under the surviving system. Available from
+ * activation (early migration allowed); the ONLY V1-spend path past sunset.
+ * Ownership follows the legacy model (owner authority signature) because
+ * the spent output is explicit, not ring-hidden.
+ */
+struct turnstile_reproof_operation : public base_operation
+{
+   struct fee_params_t {
+      uint64_t fee              = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+      uint32_t price_per_output = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+   };
+
+   asset                 fee;
+   asset_id_type         asset_id; ///< visible asset type
+   commitment_type       old_commitment; ///< V1 blind balance consumed
+   authority             owner; ///< must match the balance owner
+   blind_factor_type     old_blind; ///< revealed: conservation check needs it
+   blind_factor_type     new_blind; ///< revealed: conservation check needs it
+   stealth_blind_output  new_output;
+   uint8_t               new_proof_version = GRAPHENE_STEALTH_PROOF_V2;
+
+   extensions_type       extensions; ///< appended-last
+
+   account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
+   void            validate()const;
+   share_type      calculate_fee( const fee_params_t& k )const;
+
+   void            get_required_authorities( vector<authority>& a )const
+   {
+      a.push_back( owner );
+   }
+};
+
+} } // graphene::protocol
+
+FC_REFLECT( graphene::protocol::stealth_ring_input,
+            (ring)(key_image)(ring_sig)(pseudo_output) )
+FC_REFLECT( graphene::protocol::stealth_blind_output,
+            (commitment)(range_proof)(owner) )
+FC_REFLECT( graphene::protocol::stealth_transfer_operation,
+            (fee)(asset_id)(proof_version)(excess)(inputs)(outputs)(extensions) )
+FC_REFLECT( graphene::protocol::freeze_blind_operation,
+            (fee)(voter)(freeze)(reason)(extensions) )
+FC_REFLECT( graphene::protocol::turnstile_reproof_operation,
+            (fee)(asset_id)(old_commitment)(owner)(old_blind)(new_blind)
+            (new_output)(new_proof_version)(extensions) )
+FC_REFLECT( graphene::protocol::stealth_transfer_operation::fee_params_t, (fee)(price_per_output) )
+FC_REFLECT( graphene::protocol::freeze_blind_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::turnstile_reproof_operation::fee_params_t, (fee)(price_per_output) )
+
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )

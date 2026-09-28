@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/proposal_evaluator.hpp>
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -366,47 +367,49 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::reference_asset_create_operation&) const {
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
    }
+   // H2 legs (H2e): the proposal pre-check mirrors the evaluator gates, so
+   // a leg-dark op is refused at proposal creation, not only at execution.
    void operator()(const graphene::chain::vault_register_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_gateway_leg(block_time);
    }
    void operator()(const graphene::chain::vault_bond_lock_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_gateway_leg(block_time);
    }
    void operator()(const graphene::chain::oracle_bond_lock_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::oracle_bond_release_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::vault_challenge_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_primitives(block_time);
    }
    void operator()(const graphene::chain::oracle_dispute_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_primitives(block_time);
    }
    void operator()(const graphene::chain::oracle_dispute_escalate_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_primitives(block_time);
    }
    void operator()(const graphene::chain::challenge_vote_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_primitives(block_time);
    }
    void operator()(const graphene::chain::vault_rotate_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_gateway_leg(block_time);
    }
    void operator()(const graphene::chain::vault_bond_release_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_gateway_leg(block_time);
    }
    void operator()(const graphene::chain::vault_resolve_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::pair_freeze_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::winddown_claim_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::oracle_fallback_set_operation&) const {
-      FC_ASSERT( HARDFORK_H2_BONDS_PASSED(block_time), "Not allowed until the H2 bonds hardfork" );
+      h2_require_price_leg(block_time);
    }
 
    // loop and self visit in proposals

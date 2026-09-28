@@ -31,6 +31,7 @@
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -168,8 +169,9 @@ void_result vault_rotate_evaluator::do_evaluate( const vault_rotate_operation& o
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Gateway leg (H2e): custody rotation seasons with custody. Ordering
+   // asserted inside.
+   h2_require_gateway_leg( d.head_block_time() );
 
    _vault = d.find( op.vault );
     FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
@@ -234,8 +236,9 @@ void_result vault_bond_release_evaluator::do_evaluate( const vault_bond_release_
 { try {
    const database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Gateway leg (H2e): custody exit, symmetric with the lock. Ordering
+   // asserted inside.
+   h2_require_gateway_leg( d.head_block_time() );
 
    _bond = d.find( op.bond );
    FC_ASSERT( nullptr != _bond, "Vault bond ${b} does not exist", ("b", op.bond) );
@@ -268,8 +271,10 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Price leg (H2e): execution creates the wind-down whose claims convert
+   // through the bonded price, so it admits at the price height. Ordering
+   // asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    _challenge = d.find( op.challenge );
    FC_ASSERT( nullptr != _challenge, "Challenge ${c} does not exist", ("c", op.challenge) );
@@ -303,8 +308,10 @@ void_result pair_freeze_evaluator::do_evaluate( const pair_freeze_operation& op 
 { try {
    const database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Price leg (H2e): the freeze pins the canonical pair<->oracle binding
+   // and touches the oracle's debt tap, so it admits at the price height.
+   // Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    const vault_object* vault = d.find( op.vault );
    FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );
@@ -345,8 +352,9 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Price leg (H2e): bound-vault claims convert USD-terms through the live
+   // H2 read, so they admit at the price height. Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    _winddown = d.find( op.winddown );
    FC_ASSERT( nullptr != _winddown, "Wind-down ${w} does not exist", ("w", op.winddown) );

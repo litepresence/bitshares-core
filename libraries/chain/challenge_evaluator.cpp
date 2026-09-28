@@ -29,6 +29,7 @@
 #include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -176,8 +177,9 @@ void_result vault_challenge_evaluator::do_evaluate( const vault_challenge_operat
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Shared primitives (H2e): judgment machinery built once, usable by both
+   // tracks. Ordering asserted inside.
+   h2_require_primitives( d.head_block_time() );
 
    _challenger = d.find( op.challenger );
    FC_ASSERT( nullptr != _challenger,
@@ -244,8 +246,9 @@ void_result oracle_dispute_evaluator::do_evaluate( const oracle_dispute_operatio
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Shared primitives (H2e): judgment machinery built once, usable by both
+   // tracks. Ordering asserted inside.
+   h2_require_primitives( d.head_block_time() );
 
    _challenger = d.find( op.challenger );
    FC_ASSERT( nullptr != _challenger,
@@ -327,8 +330,9 @@ void_result oracle_dispute_escalate_evaluator::do_evaluate( const oracle_dispute
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Shared primitives (H2e): judgment machinery built once, usable by both
+   // tracks. Ordering asserted inside.
+   h2_require_primitives( d.head_block_time() );
 
    _dispute = d.find( op.dispute );
    FC_ASSERT( nullptr != _dispute, "Dispute ${x} does not exist", ("x", op.dispute) );
@@ -503,8 +507,9 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
 { try {
    const database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Shared primitives (H2e): judgment machinery built once, usable by both
+   // tracks. Ordering asserted inside.
+   h2_require_primitives( d.head_block_time() );
 
    _challenge = nullptr;
    _dispute = nullptr;

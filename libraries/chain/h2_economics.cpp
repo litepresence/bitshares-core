@@ -29,6 +29,7 @@
 #include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
@@ -657,8 +658,9 @@ void_result oracle_fallback_set_evaluator::do_evaluate(
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Price leg (H2e): the fallback configures the consumed H2 read path.
+   // Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    _oracle = d.find( op.oracle );
    FC_ASSERT( nullptr != _oracle, "Oracle ${o} does not exist", ("o", op.oracle) );

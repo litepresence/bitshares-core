@@ -99,10 +99,13 @@ namespace graphene { namespace chain {
 
    /**
     * Converted wind-down payout (declared, rounding DOWN against claimants):
-    * the haircut face converts pair-units to bond-units through the bound
-    * price, and the pro-rata leg divides the segregated bond by the claim
-    * book's bond value. At a 1:1 price both legs reduce exactly to the H2c
-    * same-asset formula (continuity, not coincidence).
+    * payout = min(haircut face converted to bond units through the bound
+    * price, face × segregated / total). The pro-rata leg stays
+    * face × segregated / total verbatim in 128-bit (price cancels by
+    * construction, zero truncation drift); ONLY the haircut cap converts
+    * pair-units to bond-units through the bound price. At a 1:1 price both
+    * legs reduce exactly to the H2c same-asset formula (continuity, not
+    * coincidence).
     */
    share_type h2_converted_payout_for_claim( share_type face, share_type segregated,
                                              share_type total, uint32_t haircut_bps,

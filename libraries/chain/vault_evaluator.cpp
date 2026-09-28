@@ -29,6 +29,7 @@
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 
@@ -38,15 +39,29 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
 { try {
    const database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Gateway leg (H2e): bonded custody admits at the gateway height, ahead
+   // of price judgment. Also asserts the gateway-before-price ordering, so
+   // an inverted schedule refuses here, never silently stages.
+   h2_require_gateway_leg( d.head_block_time() );
 
    FC_ASSERT( nullptr != d.find( op.registrar ),
-              "Registrar account ${a} does not exist", ("a", op.registrar) );
-   FC_ASSERT( nullptr != d.find( op.pair ),
-              "Vault pair asset ${a} does not exist", ("a", op.pair) );
+               "Registrar account ${a} does not exist", ("a", op.registrar) );
+   const asset_object* pair_asset = d.find( op.pair );
+   FC_ASSERT( nullptr != pair_asset,
+               "Vault pair asset ${a} does not exist", ("a", op.pair) );
    FC_ASSERT( nullptr != d.find( op.bond_asset ),
               "Bond asset ${a} does not exist", ("a", op.bond_asset) );
+   // H1-exclusion is consensus-reject (BSIP-1 section 6): bonded custody
+   // is for vault-backed UIAs only. An H1-priced pair (explicit oracle
+   // binding on its bitasset options) can never migrate into H2 coverage,
+   // and neither can any other market-issued asset (the H1/legacy track):
+   // unbonded inputs must not move bonded medians, so they are refused at
+   // the custody door, not filtered downstream.
+   FC_ASSERT( !h2_pair_has_h1_binding( *pair_asset, d ),
+              "H1-priced pairs are excluded from H2 bonded custody" );
+   FC_ASSERT( !pair_asset->is_market_issued(),
+              "Vault pairs must be vault-backed UIAs: market-issued (H1-track) "
+              "assets are excluded from bonded custody" );
    // Allow-list enforced at registration (H2a review direction): locks check
    // per-type, so registration must not accept anything else. BTS-only at
    // genesis; basket assets join through an explicit later rule.
@@ -99,8 +114,9 @@ void_result vault_bond_lock_evaluator::do_evaluate( const vault_bond_lock_operat
 { try {
    const database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Gateway leg (H2e): vault funding seasons with custody, ahead of price
+   // judgment. Ordering asserted inside.
+   h2_require_gateway_leg( d.head_block_time() );
 
    const vault_object* vault = d.find( op.vault );
    FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );

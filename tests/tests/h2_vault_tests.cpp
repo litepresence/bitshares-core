@@ -58,6 +58,11 @@ constexpr int64_t H2C_RAW_PER_USD_CENT = 1000000LL;
 constexpr uint64_t H2C_VAULT_USD_CENTS = 1340000;    // $13,400 vault min_bond
 constexpr uint64_t H2C_FLOOR_USD_CENTS = 83750;      // $837.50 challenge floor
 constexpr uint64_t H2C_GRIEF_USD_CENTS = 8375;       // $83.75 griefing/direction
+// H2c F2: the suite mirror above is pinned to the protocol proposal, so the
+// griefing constant can never drift silently (it has no consensus reader:
+// griefing travels via htlc_create + memo convention, OQ-14).
+static_assert( H2C_GRIEF_USD_CENTS == GRAPHENE_H2_GRIEFING_BOND_USD_CENTS,
+               "H2c griefing mirror must equal the protocol proposal" );
 const share_type H2C_VAULT_RAW =
       share_type( int64_t( H2C_VAULT_USD_CENTS ) * H2C_RAW_PER_USD_CENT );
 const share_type H2C_ROUND1_RAW =
@@ -224,7 +229,7 @@ void h2c_sustain_from_genesis( database_fixture& f, object_id_type target )
    const uint64_t n =
          f.db.get_index_type<committee_member_index>().indices().size();
    BOOST_REQUIRE( n > 0 );
-   const uint64_t need = ( 2 * n + 2 ) / 3; // ceil(2N/3)
+   const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
    for( uint64_t i = 0; i < need; ++i )
       h2c_vote( f, f.get_account( string( "init" ) + fc::to_string( i ) ).get_id(),
                 f.init_account_priv_key, target, GRAPHENE_H2_DISPUTE_SUSTAIN );

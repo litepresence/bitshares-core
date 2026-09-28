@@ -27,6 +27,7 @@
 #include <graphene/chain/h2_economics_evaluator.hpp>
 
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
@@ -39,8 +40,9 @@ void_result oracle_bond_lock_evaluator::do_evaluate( const oracle_bond_lock_oper
 { try {
    database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Price leg (H2e): producer bonds back price publications, so they admit
+   // at the price height. Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    FC_ASSERT( nullptr != d.find( op.producer ),
               "Producer account ${a} does not exist", ("a", op.producer) );
@@ -109,8 +111,8 @@ void_result oracle_bond_release_evaluator::do_evaluate( const oracle_bond_releas
 { try {
    const database& d = db();
 
-   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ),
-              "Not allowed until the H2 bonds hardfork" );
+   // Price leg (H2e), symmetric with the lock. Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    _bond = d.find( op.bond );
    FC_ASSERT( nullptr != _bond, "Producer bond ${b} does not exist", ("b", op.bond) );

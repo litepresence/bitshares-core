@@ -518,7 +518,7 @@ optional<protocol::oracle_value> h2_read_consumed_price(
 }
 
 optional<protocol::oracle_value> h2_read_pair_price(
-      database& d, const vault_object& vault, uint16_t series, time_point_sec now )
+      const database& d, const vault_object& vault, uint16_t series, time_point_sec now )
 {
    if( !vault.bound_oracle.valid() )
       return optional<protocol::oracle_value>();
@@ -546,18 +546,20 @@ share_type h2_converted_payout_for_claim( share_type face, share_type segregated
 {
    if( face <= 0 || segregated <= 0 || total <= 0 )
       return share_type( 0 );
-   // Haircut face converts pair-units to bond-units through the bound price;
-   // the pro-rata leg divides the segregated bond by the face's bond value.
-   // At a 1:1 price both legs reduce exactly to the H2c same-asset formula.
-   const share_type haircut_face = share_type(
-         face.value * ( 10000 - int64_t( haircut_bps ) ) / 10000 );
-   const share_type haircut_bond = h2_convert_face_to_bond( haircut_face, price );
-   const share_type total_bond = h2_convert_face_to_bond( total, price );
-   if( total_bond <= 0 )
-      return share_type( 0 );
-   const uint256_t pro_rata = uint256_t( uint64_t( face.value ) )
-                            * uint256_t( uint64_t( segregated.value ) )
-                            / uint256_t( uint64_t( total_bond.value ) );
+   // Price-invariant converted payout (H2c payout_for precedent): the
+   // pro-rata share leg stays face x segregated / total verbatim (price
+   // cancels by construction, zero truncation drift); ONLY the haircut cap
+   // converts pair-units to bond-units through the bound price. At a 1:1
+   // price both legs reduce exactly to the H2c same-asset formula.
+   const fc::uint128_t haircut_face =
+         fc::uint128_t( uint64_t( face.value ) )
+         * fc::uint128_t( 10000 - haircut_bps ) / fc::uint128_t( 10000 );
+   const share_type haircut_bond = h2_convert_face_to_bond(
+         share_type( int64_t( uint64_t( haircut_face ) ) ), price );
+   const fc::uint128_t pro_rata =
+         fc::uint128_t( uint64_t( face.value ) )
+         * fc::uint128_t( uint64_t( segregated.value ) )
+         / fc::uint128_t( uint64_t( total.value ) );
    const share_type pro_rata_share = share_type( int64_t( uint64_t( pro_rata ) ) );
    return std::min( haircut_bond, pro_rata_share );
 }

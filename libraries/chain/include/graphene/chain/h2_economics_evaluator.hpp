@@ -91,7 +91,7 @@ namespace graphene { namespace chain {
     * Unbound vaults have no price leg by construction.
     */
    optional<protocol::oracle_value> h2_read_pair_price(
-         database& d, const vault_object& vault, uint16_t series,
+         const database& d, const vault_object& vault, uint16_t series,
          time_point_sec now );
 
    /// @return whether redemptions for @p pair are held shut by the tripwire.

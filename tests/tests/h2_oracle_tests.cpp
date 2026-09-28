@@ -789,9 +789,11 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    set_expiration( db, ctx );
    ctx.sign( carol_private_key, db.get_chain_id() );
    PUSH_TX( db, ctx );
-   // min(haircut-face in bond, pro-rata in bond) = min(85000*100..., face/100).
+   // Price-invariant converted payout: the pro-rata share leg is face x
+   // segregated / total verbatim (price cancels), so carol at 100 BTS/face
+   // equals dave at 200 BTS/face: min(haircut-in-bond, 1000000) = 1000000.
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount
-                == carol_before + share_type( 10000 ) );
+                == carol_before + share_type( 1000000 ) );
 
    // Primary goes stale; backup stays live: the switch serves backup math.
    generate_blocks( db.head_block_time() + 90000 );
@@ -808,8 +810,10 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    set_expiration( db, dtx );
    dtx.sign( dave_private_key, db.get_chain_id() );
    PUSH_TX( db, dtx );
+   // Price-invariance check: dave at backup price 200 BTS/face must equal
+   // carol at 100 BTS/face (share leg verbatim, only the haircut cap converts).
    BOOST_CHECK( db.get_balance( dave_id, asset_id_type() ).amount
-                == dave_before + share_type( 5000 ) );
+                == dave_before + share_type( 1000000 ) );
 
    // Dual-stale halts: no live leg, no conversion-dependent claim.
    generate_blocks( db.head_block_time() + 90000 );
@@ -1321,8 +1325,10 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
    set_expiration( db, htx2 );
    htx2.sign( carol_private_key, db.get_chain_id() );
    PUSH_TX( db, htx2 );
+   // Price-invariant converted payout (share leg verbatim: face x
+   // segregated / total); the hold clear reopens the same 1000000 claim.
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount
-                == carol_before + share_type( 10000 ) );
+                == carol_before + share_type( 1000000 ) );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

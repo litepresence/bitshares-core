@@ -44,6 +44,7 @@
 #include <graphene/chain/ticket_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/challenge_evaluator.hpp>
+#include <graphene/chain/vault_lifecycle_evaluator.hpp>
 #include <graphene/chain/vote_count.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -1596,6 +1597,9 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    // window expire into frozen targets at the first maintenance after the
    // deadline (inventory OQ-19 vehicle). Pre-fork this is a gated no-op.
    process_expired_h2_challenges(*this);
+   // H2c vault lifecycle: 150% coverage rule -> mint halt -> 36h top-up ->
+   // auto wind-down + seizure (inventory OQ-09/OQ-19 vehicles). Pre-fork no-op.
+   process_h2_vault_maintenance(*this);
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

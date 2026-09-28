@@ -99,16 +99,21 @@ bool h2_sets_overlap( const flat_set<account_id_type>& a_accts,
    return false;
 }
 
-/// 2/3-supermajority threshold over N seated members, in integers: ceil(2N/3).
+/// 2/3-supermajority threshold over N seated members, from the published
+/// GRAPHENE_H2_SUPERMAJORITY_BPS constant (H2c cleanup: was an inline
+/// ceil(2N/3); the BPS form is authoritative. It coincides with ceil(2N/3)
+/// except where 6667bps strictly exceeds two-thirds (N a multiple of 3),
+/// where it requires one more vote — the conservative side).
 uint64_t h2_supermajority_of( uint64_t n )
 {
-   return ( 2 * n + 2 ) / 3;
+   return ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
 }
 
 bool h2_quorum_met( uint64_t votes_cast, uint64_t n )
 {
-   // Published quorum: half the deciding set participates (5000 bps).
-   return 2 * votes_cast >= n;
+   // Published quorum GRAPHENE_H2_QUORUM_BPS participation (H2c cleanup: now
+   // computed from the constant; arithmetically identical to 2*votes >= n).
+   return votes_cast * 10000 >= n * GRAPHENE_H2_QUORUM_BPS;
 }
 
 } // namespace
@@ -628,6 +633,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_challenge_object, (graphe
                     (votes)
                     (state)
                     (finder)
+                    (executed)
                   )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_dispute_object, (graphene::db::object),

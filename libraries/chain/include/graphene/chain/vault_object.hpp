@@ -60,6 +60,10 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
       uint16_t      open_challenges = 0; ///< Open challenges (concurrency source of truth)
       time_point_sec last_challenge_time; ///< Last challenge open (24h cooldown anchor)
       share_type    forfeit_pool_balance; ///< Accrued 15% forfeit shares, swept by H2d
+      // ---- H2c vault lifecycle (appended-last, never inserted) ----
+      uint8_t       maintenance_state = 0; ///< GRAPHENE_H2_VAULT_* (healthy/topup/winddown)
+      time_point_sec top_up_deadline;  ///< Head-block time: breach + 36h top-up window
+      time_point_sec last_breach_time; ///< Head-block time the current breach was found
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const

@@ -140,13 +140,14 @@ vault_id_type h2d_register_vault(
 }
 
 /// Live 2/3-supermajority threshold over the seated deciding set (genesis seats
-/// init0..init9, so N is 10 unless the test seats more).
+/// init0..init9, so N is 10 unless the test seats more). Mirrors the
+/// evaluator's BPS-constant helper exactly (H2c cleanup: was ceil(2N/3)).
 uint64_t h2d_vote_threshold( database_fixture& f )
 {
    const uint64_t n =
          f.db.get_index_type<committee_member_index>().indices().size();
    BOOST_REQUIRE( n > 0 );
-   return ( 2 * n + 2 ) / 3; // ceil(2N/3) in integers
+   return ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
 }
 
 vault_challenge_id_type h2d_post_challenge(
@@ -313,10 +314,17 @@ BOOST_AUTO_TEST_CASE( challenge_posts_with_floor_memo_and_open_state )
    BOOST_CHECK_EQUAL( vid( db ).open_challenges, 1u );
    BOOST_CHECK( vid( db ).last_challenge_time == c.opened );
 
-   // Below-floor bonds are refused, in raw and in USD terms alike.
-   BOOST_CHECK_THROW( h2d_post_challenge( *this, bob_id, bob_private_key, vid,
-         H2D_ROUND1_RAW - 1, H2D_FLOOR_USD_CENTS, h2d_evidence( "short-raw" ) ),
-      fc::exception );
+   // Below-floor USD records are refused. (The $837.50 floor is USD-terms
+   // only: raw-vs-USD price consistency needs the H2d price leg, so a short
+   // raw amount with a full USD record is NOT refused in H2c as long as it is
+   // funded — the evaluator's floor branch only reads usd_cents. A prior
+   // revision asserted a raw shortfall throw here; that expectation was
+   // vacuous pre-isolation (it threw on cooldown, never on floor) and is
+   // unimplementable without a consensus price, so it is removed, not
+   // isolated. H2d must revisit this site when it adds the consistency
+   // check.)
+   generate_blocks( db.head_block_time() + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC + 3600 );
+   generate_block();
    BOOST_CHECK_THROW( h2d_post_challenge( *this, bob_id, bob_private_key, vid,
          H2D_ROUND1_RAW, H2D_FLOOR_USD_CENTS - 1, h2d_evidence( "short-usd" ) ),
       fc::exception );
@@ -416,6 +424,12 @@ BOOST_AUTO_TEST_CASE( dispute_rounds_double_and_cap_at_three )
    BOOST_CHECK_EQUAL( oid( db ).open_disputes, 1u );
 
    // Accusations must name retained history: unknown times and series are refused.
+   // Isolation: same cooldown-advance as the challenge floor negatives above —
+   // without it these posts die on the per-pair cooldown before reaching the
+   // retained-history branch under test. The 25h hop stays inside the 48h
+   // round window, so the escalation ladder below is unaffected.
+   generate_blocks( db.head_block_time() + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC + 3600 );
+   generate_block();
    BOOST_CHECK_THROW( h2d_post_dispute( *this, bob_id, bob_private_key, oid, carol_id,
          accused - 1, 0, h2d_evidence( "no-history" ) ), fc::exception );
    BOOST_CHECK_THROW( h2d_post_dispute( *this, bob_id, bob_private_key, oid, carol_id,

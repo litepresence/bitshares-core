@@ -24,6 +24,7 @@
 #include <graphene/chain/vault_evaluator.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/bond_object.hpp>
+#include <graphene/protocol/vault_lifecycle_ops.hpp>
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/database.hpp>
@@ -115,6 +116,19 @@ void_result vault_bond_lock_evaluator::do_evaluate( const vault_bond_lock_operat
               "Bond amount must equal the vault min_bond" );
    FC_ASSERT( op.bond_usd_cents == vault->min_bond_usd_cents,
               "Bond USD-terms record must match the vault min_bond basis" );
+
+   // Sub-vault bound (inventory OQ-10 proposal: 64): per-deposit sub-vaults
+   // stay countable on-chain; the 65th lock is refused while the first 64
+   // stand. Counted over live bond objects, seized bonds included (a seized
+   // bond still occupies its deposit slot; wind-downs never free it).
+   const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
+   const auto bond_range = bond_idx.equal_range( op.vault );
+   uint32_t bond_count = 0;
+   for( auto bitr = bond_range.first; bitr != bond_range.second; ++bitr )
+      ++bond_count;
+   FC_ASSERT( bond_count < GRAPHENE_H2_SUBVAULT_CAP,
+              "Vault already carries ${m} bonded sub-vaults",
+              ("m", GRAPHENE_H2_SUBVAULT_CAP) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

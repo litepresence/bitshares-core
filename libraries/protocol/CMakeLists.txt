@@ -37,6 +37,7 @@ list(APPEND SOURCES account.cpp
                     types.cpp
                     vault_ops.cpp
                     challenge_ops.cpp
+                    vault_lifecycle_ops.cpp
                     withdraw_permission.cpp
                     worker.cpp
                     htlc.cpp)

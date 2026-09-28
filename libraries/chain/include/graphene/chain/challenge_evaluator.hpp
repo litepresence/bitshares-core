@@ -104,6 +104,14 @@ namespace graphene { namespace chain {
                                      account_id_type defender );
 
    /**
+    * Cross-round vote accumulation (H2c decision, logged): votes are
+    * cumulative sentiment — escalation opens a fresh 48h window but never
+    * clears the vote map, so pre-escalation votes still count toward the
+    * supermajority in the new round. Rationale: every vote is an on-chain
+    * committee attestation on the same underlying dispute; discarding them
+    * would let a losing side reset the tally by escalating. The window
+    * extension (not a tally reset) is what the escalator's doubled bond buys.
+    *
     * Fail-closed expiry sweep (maintenance hook, inventory OQ-19 vehicle): every
     * still-open challenge/dispute whose deadline has passed transitions to
     * expired-frozen, frees its concurrency slot, returns all escrowed bonds in

@@ -55,6 +55,8 @@ class vault_challenge_object : public abstract_object<vault_challenge_object, pr
       flat_map<account_id_type, uint8_t> votes; ///< Committee voter -> decision; one each
       uint8_t         state = 0;        ///< Lifecycle state (GRAPHENE_H2_CHALLENGE_*); terminal sticks
       account_id_type finder;           ///< Finder-fee recipient on forfeit (decisive voter)
+      // ---- H2c execution (appended-last, never inserted) ----
+      bool            executed = false; ///< Set by vault_resolve (sustained -> wind-down)
 };
 
 struct by_challenge_vault;   ///< challenges by target vault (concurrency source of truth lives on the vault)

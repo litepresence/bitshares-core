@@ -43,6 +43,7 @@
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/challenge_object.hpp>
+#include <graphene/chain/winddown_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -703,6 +704,17 @@ void database_fixture_base::verify_asset_supplies( const database& db )
       total_balances[asset_id_type()] += o.forfeit_pool_balance;
    for( const oracle_object& o : db.get_index_type< oracle_index >().indices() )
       total_balances[asset_id_type()] += o.forfeit_pool_balance;
+   // H2c wind-down escrows: creation debits the failed vault's vesting
+   // balances (supply-visible) into segregated_bond, and claim payouts
+   // re-enter circulation via adjust_balance. The unclaimed remainder
+   // (segregated_bond - paid_total) is escrowed off-ledger exactly like the
+   // H2b dispute bonds above, so it stays supply-visible until claimed.
+   for( const winddown_vault_object& o : db.get_index_type< winddown_vault_index >().indices() )
+   {
+      const share_type remainder = o.segregated_bond - o.paid_total;
+      if( remainder > share_type( 0 ) )
+         total_balances[asset_id_type()] += remainder;
+   }
 
    for( const asset_object& asset_obj : db.get_index_type<asset_index>().indices() )
    {

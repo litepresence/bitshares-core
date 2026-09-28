@@ -42,6 +42,9 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_object, (graphene::db::ob
                     (open_challenges)
                     (last_challenge_time)
                     (forfeit_pool_balance)
+                    (maintenance_state)
+                    (top_up_deadline)
+                    (last_breach_time)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::vault_object )

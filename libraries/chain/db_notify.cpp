@@ -440,6 +440,26 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // voter
    }
+   void operator()( const vault_rotate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // rotator
+   }
+   void operator()( const vault_bond_release_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const vault_resolve_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // resolver
+   }
+   void operator()( const pair_freeze_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // freezer
+   }
+   void operator()( const winddown_claim_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimant
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

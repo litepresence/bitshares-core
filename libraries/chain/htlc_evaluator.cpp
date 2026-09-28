@@ -90,6 +90,14 @@ namespace graphene {
          const auto& from_account = o.from( d );
          const auto& to_account = o.to( d );
          detail::check_htlc_create_hf_bsip64(d.head_block_time(), o, asset_to_transfer);
+         // H2c griefing preimage rule (audit sunset): past the H2 bonds gate no
+         // new sha1 HTLC creates are accepted — griefing locks use sha256 only,
+         // and in-flight sha1 HTLCs drain via natural expiry. Pre-fork behavior
+         // is untouched; legacy non-griefing flows keep working with sha256,
+         // ripemd160, and hash160 exactly as before.
+         if( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ) )
+            FC_ASSERT( !o.preimage_hash.is_type<fc::sha1>(),
+                  "SHA1 HTLC creates are sunset past the H2 bonds hardfork; use sha256" );
          FC_ASSERT( is_authorized_asset( d, from_account, asset_to_transfer ),
                "Asset ${asset} is not authorized for account ${acct}.",
                ( "asset", asset_to_transfer.id )( "acct", from_account.id ) );

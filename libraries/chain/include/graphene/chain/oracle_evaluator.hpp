@@ -125,4 +125,15 @@ namespace graphene { namespace chain {
          const oracle_object* _oracle = nullptr;
    };
 
+   class oracle_unfreeze_evaluator : public evaluator<oracle_unfreeze_evaluator>
+   {
+      public:
+         using operation_type = oracle_unfreeze_operation;
+
+         void_result do_evaluate( const oracle_unfreeze_operation& op );
+         void_result do_apply( const oracle_unfreeze_operation& op ) const;
+
+         const oracle_object* _oracle = nullptr;
+   };
+
 } } // graphene::chain

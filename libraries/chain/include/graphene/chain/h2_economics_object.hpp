@@ -59,6 +59,19 @@ class reward_pool_object : public abstract_object<reward_pool_object, protocol_i
       uint16_t       routing_vault_bps = 0;   ///< 3000 proposal: vault leg (issuance engine)
       uint16_t       routing_reserve_bps = 0; ///< 2000 proposal: reserve leg (issuance engine)
       time_point_sec last_payout;       ///< Last sweep that processed this pool
+      /**
+       * X-03 joint-cap merge contract (H2 side, bounded scope): per-sweep
+       * recorded H2 diversion in bps on the shared 10000-bps denominator.
+       * The H2 reward sweep writes routing_oracle_bps here each sweep; the
+       * G1 merge reads this field and asserts
+       * parity_bps + h2_diversion_bps <= 7000
+       * (GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS) on one shared denominator in
+       * both routers. H2 asserts its half locally
+       * (h2_diversion_bps <= cap); the G1-side sum assert lands with the
+       * merge, not here. No cross-branch writes: this field is H2-written,
+       * G1-read. Appended-last, never inserted.
+       */
+      uint16_t       h2_diversion_bps = 0;
 };
 
 /**
@@ -139,8 +152,9 @@ struct h2_tripwire_window
  *
  * The feed leg is the pair's BOUND oracle series-0 value (binding
  * convention: bond-per-pair); unbound pairs have no feed leg and never
- * evaluate, however full their windows. Breach escalates one stage per
- * breached evaluation (door -> debt -> redemptions, max 3, idempotent);
+ * evaluate, however full their windows. Breach escalates atomically
+ * door+debt on first breach (X-05: no block observes door-closed/debt-open),
+ * then redemptions on the next breach (max 3, idempotent);
  * clean evaluations build the reopen streak (2 clears). Paused evaluations
  * (invalid windows or missing feed) hold the stage and reset the streak:
  * reopen needs two CONSECUTIVE clean windows.

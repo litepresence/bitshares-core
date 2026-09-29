@@ -325,7 +325,7 @@ BOOST_AUTO_TEST_CASE( h2c_ops_are_refused_before_the_hardfork )
 /// bond releases only after the challenge window at zero open liabilities.
 BOOST_AUTO_TEST_CASE( vault_rotate_moves_authority_and_gates_old_release )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -409,7 +409,7 @@ BOOST_AUTO_TEST_CASE( vault_rotate_moves_authority_and_gates_old_release )
 /// whose evidence names the timed-out HTLC, and it is accepted as proof.
 BOOST_AUTO_TEST_CASE( htlc_griefing_lock_and_timeout_evidence_posts_challenge )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -469,7 +469,7 @@ BOOST_AUTO_TEST_CASE( htlc_griefing_lock_and_timeout_evidence_posts_challenge )
 /// expiry at maintenance auto-creates the wind-down and seizes the bonds.
 BOOST_AUTO_TEST_CASE( maintenance_breach_halts_topup_expires_into_winddown )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -527,7 +527,7 @@ BOOST_AUTO_TEST_CASE( maintenance_breach_halts_topup_expires_into_winddown )
 /// at 2x senior-paid, double-claims refused, sibling vaults never touched.
 BOOST_AUTO_TEST_CASE( winddown_claim_pays_seniors_first_juniors_dilute_no_cross_reserve )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -629,7 +629,7 @@ BOOST_AUTO_TEST_CASE( winddown_claim_pays_seniors_first_juniors_dilute_no_cross_
 /// slice into a segregated wind-down (no cross-collateralization).
 BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -687,7 +687,7 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
 /// after one op the vault blocks mints and the oracle stops promoting.
 BOOST_AUTO_TEST_CASE( pair_freeze_closes_door_and_debt_atomically )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -741,7 +741,7 @@ BOOST_AUTO_TEST_CASE( pair_freeze_closes_door_and_debt_atomically )
 /// the 65th lock is refused while the first 64 stand.
 BOOST_AUTO_TEST_CASE( subvault_bond_cap_64 )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 

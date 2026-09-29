@@ -319,6 +319,16 @@ void_result pair_freeze_evaluator::do_evaluate( const pair_freeze_operation& op 
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
    FC_ASSERT( member_idx.find( op.freezer ) != member_idx.end(),
               "Freezer ${a} is not a seated committee member", ("a", op.freezer) );
+   // X-01 H1-exclusion at the freeze door (defense in depth behind
+   // vault_register): an H1-priced pair can never be pinned into H2 bonded
+   // custody, so unbonded inputs can never move bonded medians.
+   {
+      const asset_object* pair_asset = d.find( vault->vault_pair );
+      FC_ASSERT( nullptr != pair_asset,
+                 "Vault pair asset ${a} does not exist", ("a", vault->vault_pair) );
+      FC_ASSERT( !h2_pair_has_h1_binding( *pair_asset, d ),
+                 "H1-priced pairs are excluded from H2 bonded custody" );
+   }
    // Canonical pair<->oracle binding (H2d): the first freeze pins the vault's
    // price leg; every later freeze must name the same oracle. Without this a
    // committee member could swing a vault's freeze scope onto an unrelated

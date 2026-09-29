@@ -475,9 +475,13 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
       d.modify( oracle, []( oracle_object& o ) {
          o.open_disputes -= 1;
          // Fail-closed: a sustained bad print stops value promotion while the
-         // raw aggregate stays transparent. Persistent halt enforcement (H2c
-         // wind-downs) owns what happens next; the owner can clear this flag
-         // through oracle_update, exactly as with a Track A freeze.
+         // raw aggregate stays transparent. R-02: the owner MUST NOT clear
+         // this challenge-set freeze through oracle_update (refused while a
+         // sustained/expired dispute names the oracle); only the committee
+         // oracle_unfreeze op clears after resolution. Track A owner freezes
+         // (no dispute history) still clear via oracle_update.
+         // Slash stays flag-only here (slashed=true above); slash-to-seizure
+         // is a follow-on phase, not half-built.
          o.options.frozen = true;
       } );
       return;
@@ -620,6 +624,9 @@ void process_expired_h2_challenges( database& d )
       } );
       d.modify( oracle, []( oracle_object& o ) {
          o.open_disputes -= 1;
+         // R-02: expiry freeze is challenge-set like sustain: owner
+         // oracle_update MUST NOT clear it (refused); committee
+         // oracle_unfreeze clears after resolution.
          o.options.frozen = true;
       } );
    }

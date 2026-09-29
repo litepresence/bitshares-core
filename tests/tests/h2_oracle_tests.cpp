@@ -472,7 +472,7 @@ BOOST_AUTO_TEST_CASE( osm_bucket_anchor_is_absolute_grid )
 /// maintenance with exact remainder; the unbonded and the stale get nothing.
 BOOST_AUTO_TEST_CASE( reward_pool_pays_pro_rata_live_weight_with_exact_remainder )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -583,7 +583,7 @@ BOOST_AUTO_TEST_CASE( reward_pool_pays_pro_rata_live_weight_with_exact_remainder
 /// the H2 read path holds fail-closed; the next window clears it.
 BOOST_AUTO_TEST_CASE( promotion_rate_limit_holds_h2_reads_past_512 )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -642,7 +642,7 @@ BOOST_AUTO_TEST_CASE( promotion_rate_limit_holds_h2_reads_past_512 )
 /// self-reference and out-of-range series are refused; clearing works.
 BOOST_AUTO_TEST_CASE( fallback_set_op_auth_and_bounds )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -712,7 +712,7 @@ BOOST_AUTO_TEST_CASE( fallback_set_op_auth_and_bounds )
 /// stale, dual-stale halts the conversion-dependent claim.
 BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -835,7 +835,7 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
 /// (vault_register) is refused while exits stay possible; restoration clears.
 BOOST_AUTO_TEST_CASE( recovery_suspends_new_debt_at_150_scope_then_clears )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -896,7 +896,7 @@ BOOST_AUTO_TEST_CASE( recovery_suspends_new_debt_at_150_scope_then_clears )
 /// 1-of-3 member cannot rotate; two members co-signing can.
 BOOST_AUTO_TEST_CASE( rotate_requires_full_old_threshold_weight )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -965,7 +965,7 @@ BOOST_AUTO_TEST_CASE( rotate_requires_full_old_threshold_weight )
 /// stays atomic.
 BOOST_AUTO_TEST_CASE( pair_freeze_pins_canonical_binding_and_enforces_it )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -1018,7 +1018,7 @@ BOOST_AUTO_TEST_CASE( pair_freeze_pins_canonical_binding_and_enforces_it )
 /// and an unbound vault's windows never evaluate (no feed, no halt).
 BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_h2_medians )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -1077,7 +1077,7 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_h2_medians )
 /// across consecutive breached windows; two clean windows reopen everything.
 BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -1165,8 +1165,10 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
    BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->clean_streak, 1u );
 
     // Window 3: both pools shift to 200 (withdraw + redeposit at the new ratio);
-    // heavy flow at ~199 vs feed 100 -> breach -> DOOR halts.
-    // Pool objects are re-fetched by ID: no reference survives block production.
+    // heavy flow at ~199 vs feed 100 -> breach -> DOOR+DEBT halt ATOMICALLY
+    // (X-05: first breach jumps past DEBT, so no block observes
+    // door-closed/debt-open). Pool objects are re-fetched by ID: no reference
+    // survives block production.
     for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
     {
        const liquidity_pool_object& pool = pid( db );
@@ -1180,9 +1182,12 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
    pass_window();
    const tripwire_state_object* tw3 = h2e_find_tripwire( *this, pairp );
    BOOST_REQUIRE( tw3 != nullptr );
-   BOOST_CHECK_EQUAL( tw3->halt_stage, GRAPHENE_H2E_TRIPWIRE_STAGE_DOOR );
+   // X-05 atomicity: first breach lands at DEBT (door AND debt together),
+   // never DOOR alone.
+   BOOST_CHECK_EQUAL( tw3->halt_stage, GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( vid( db ).tripwire_door_hold, true );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
    BOOST_CHECK_EQUAL( tw3->clean_streak, 0u );
     // The median sits inside the dislocated window's sample range (selection,
     // never an average): every window-3 sample prices far above the feed.
@@ -1190,24 +1195,17 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
     for( const auto& s : tw3->win_old.samples )
        BOOST_CHECK( s.price.base_amount.value > s.price.quote_amount.value * 150 );
 
-   // Window 4: dislocation persists -> DEBT halts (bound oracle frozen).
+   // Window 4: dislocation persists -> REDEMPTIONS halt last (only lagging rung).
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    trade_both( 100000000, 7 );
    pass_window();
-   BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
-                      GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
-   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
-
-   // Window 5: still dislocated -> REDEMPTIONS halt last.
-   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 100000000, 9 );
-   pass_window();
-   const tripwire_state_object* tw5 = h2e_find_tripwire( *this, pairp );
-   BOOST_CHECK_EQUAL( tw5->halt_stage, GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS );
-   BOOST_CHECK_EQUAL( tw5->redemptions_halted, true );
+   const tripwire_state_object* tw4 = h2e_find_tripwire( *this, pairp );
+   BOOST_CHECK_EQUAL( tw4->halt_stage,
+                      GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS );
+   BOOST_CHECK_EQUAL( tw4->redemptions_halted, true );
    BOOST_CHECK( h2_redemptions_halted( db, pairp ) );
 
-    // Windows 6-7: the feed tells the truth again (tracks pool marginals, so
+   // Windows 5-6: the feed tells the truth again (tracks pool marginals, so
     // restoration is exact by construction) -> two clean windows reopen.
     // Binding convention is bond-per-pair: (balance_a, balance_b) with the
     // core leg first, matching the market samples' (bond, pair) orientation.
@@ -1234,7 +1232,7 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
 /// wind-down claims for that pair are refused; clearing reopens them.
 BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -1327,6 +1325,301 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
    PUSH_TX( db, htx2 );
    // Price-invariant converted payout (share leg verbatim: face x
    // segregated / total); the hold clear reopens the same 1000000 claim.
+   BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount
+                == carol_before + share_type( 1000000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// X-01 adversarial: a live H1-style oracle (quorum-live consumed value, no
+/// producer bonds) yields NO H2 price. Reads fail closed, the tripwire feed
+/// leg pauses, and conversion-dependent debt (wind-down claims) is blocked.
+/// If existing tests read without bonds, THOSE TESTS post bonds (matching
+/// production reality) — the gate is never weakened for green suites.
+BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   // Live but never bonded: single producer, no bond locks anywhere.
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "NOBOND.USD", bts_ref, usd_ref, opts );
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   // H1 liveness holds (consumed tracks raw, quorum met)...
+   BOOST_REQUIRE( oid( db ).consumed_value.valid() );
+   // ...but H2 reads fail closed without a bonded live set.
+   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+
+   // Bound vault on a plain UIA: pin the canonical binding, then unfreeze for
+   // the test (binding persists; the freeze was the pin).
+   const asset_id_type pairu = h2e_create_uia( *this, alice_id, alice_private_key, "NOBOND" );
+   authority vault_auth( 1, alice_id, 1 );
+   const share_type small_bond( 1000000000 );
+   const vault_id_type vid = h2e_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, small_bond, uint64_t( 100000 ), pairu );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, small_bond );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, small_bond,
+                        uint64_t( 100000 ) );
+   h2e_freeze( *this, alice_id, alice_private_key, vid, oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   // Pair read also fails closed (primary unbonded, no fallback).
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+
+   // Breach -> top-up -> wind-down, then a fresh live publish (still unbonded).
+   generate_block();
+   h2e_set_outstanding( *this, vid, small_bond );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_REQUIRE( oid( db ).consumed_value.valid() );
+   BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+
+   // Debt blocked: conversion-dependent claims halt on dual-stale/unbonded.
+   winddown_claim_operation cop;
+   cop.claimant     = carol_id;
+   cop.winddown     = wdid;
+   cop.claim_amount = share_type( 1000000 );
+   cop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction ctx; ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( carol_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, ctx ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// X-03 H2-side merge-contract half: every sweep records h2_diversion_bps
+/// (the oracle-leg share) on the shared 10000-bps denominator inside the
+/// 7000bps joint ceiling. G1 reads this field at merge time; no cross-branch
+/// writes here.
+BOOST_AUTO_TEST_CASE( h2_diversion_bps_recorded_within_joint_cap )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "DIV.USD", bts_ref, usd_ref, opts );
+   const auto vb = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, oid, vb, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   // Shell advertises a valid half at creation...
+   BOOST_REQUIRE( h2e_find_pool( *this, oid ) != nullptr );
+   BOOST_CHECK_EQUAL( h2e_find_pool( *this, oid )->h2_diversion_bps,
+                      GRAPHENE_H2E_REWARD_ORACLE_BPS );
+   BOOST_CHECK( h2e_find_pool( *this, oid )->h2_diversion_bps
+                <= GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS );
+   // ...and every sweep re-records it inside the cap with a valid triple.
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   const reward_pool_object* pool = h2e_find_pool( *this, oid );
+   BOOST_REQUIRE( pool != nullptr );
+   BOOST_CHECK_EQUAL( pool->h2_diversion_bps, pool->routing_oracle_bps );
+   BOOST_CHECK( pool->h2_diversion_bps <= GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS );
+   BOOST_CHECK( h2_routing_valid( pool->routing_oracle_bps, pool->routing_vault_bps,
+                                  pool->routing_reserve_bps,
+                                  GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS ) );
+} FC_LOG_AND_RETHROW() }
+
+/// X-05 + V-07 coincident both-legs breach (BSIP acceptance vector): vault
+/// coverage <150% AND tripwire deviation breach in ONE maintenance window.
+/// Asserts: no block observes door-closed/debt-open (atomic DEBT on first
+/// breach), redemptions_hold freezes claims, seniors-first wind-down follows.
+BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(sam) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( sam, asset( 4000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   // Pair COIN with a bonded vault and a bonded producer on its oracle.
+   const asset_id_type pairc = h2e_create_uia( *this, alice_id, alice_private_key, "COIN" );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2e_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS,
+         pairc );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "COIN.USD", bts_ref, usd_ref, opts );
+   const auto vb = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, oid, vb, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   h2e_freeze( *this, alice_id, alice_private_key, vid, oid );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   // Two pools at 100 CORE per COIN, zero fees (ladder pattern).
+   const asset_id_type s1 = h2e_create_uia( *this, sam_id, sam_private_key, "COS1" );
+   const asset_id_type s2 = h2e_create_uia( *this, sam_id, sam_private_key, "COS2" );
+   const liquidity_pool_id_type pool1_id = create_liquidity_pool(
+         sam_id, asset_id_type(), pairc, s1, 0, 0 ).get_id();
+   const liquidity_pool_id_type pool2_id = create_liquidity_pool(
+         sam_id, asset_id_type(), pairc, s2, 0, 0 ).get_id();
+   issue_uia( sam, asset( 100000000000LL, pairc ) );
+   deposit_to_liquidity_pool( sam_id, pool1_id,
+                              asset( 1000000000000LL ), asset( 10000000000LL, pairc ) );
+   deposit_to_liquidity_pool( sam_id, pool2_id,
+                              asset( 1000000000000LL ), asset( 10000000000LL, pairc ) );
+   auto trade_both = [&]( int64_t sell_p, int64_t tweak )
+   {
+      exchange_with_liquidity_pool( sam_id, pool1_id,
+                                    asset( sell_p + tweak, pairc ),
+                                    asset( 1, asset_id_type() ) );
+      exchange_with_liquidity_pool( sam_id, pool2_id,
+                                    asset( sell_p - tweak, pairc ),
+                                    asset( 1, asset_id_type() ) );
+   };
+   auto pass_window = [&]()
+   {
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+      generate_block();
+   };
+
+   // Windows 1-2: aligned (feed 100, market ~100) to fill both windows clean.
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   trade_both( 2000000, 1 );
+   pass_window();
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   trade_both( 2000000, 3 );
+   pass_window();
+   BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairc )->halt_stage, 0u );
+
+   // COINCIDENT window 3: vault coverage breach (100% < 150%) AND tripwire
+   // dislocation (pools to 200, feed stays 100) in the SAME window.
+   generate_block();
+   h2e_set_outstanding( *this, vid, H2E_VAULT_RAW );
+   for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
+   {
+      const liquidity_pool_object& pool = pid( db );
+      const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
+      withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
+      deposit_to_liquidity_pool( sam_id, pid,
+                                 asset( 2000000000000LL ), asset( 10000000000LL, pairc ) );
+   }
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   trade_both( 100000000, 5 );
+   pass_window();
+
+   // Atomicity: ONE sweep applied door AND debt together. No block observed
+   // door-closed/debt-open: after the single sweep both flags are set and the
+   // stage is past DEBT (never DOOR alone).
+   const tripwire_state_object* tw3 = h2e_find_tripwire( *this, pairc );
+   BOOST_REQUIRE( tw3 != nullptr );
+   BOOST_CHECK_EQUAL( tw3->halt_stage, GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+   BOOST_CHECK_EQUAL( vid( db ).tripwire_door_hold, true );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+   // Vault leg breached in the same window: TOPUP with mint halt.
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+
+   // Window 4: dislocation persists -> REDEMPTIONS (only lagging rung).
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   trade_both( 100000000, 7 );
+   pass_window();
+   const tripwire_state_object* tw4 = h2e_find_tripwire( *this, pairc );
+   BOOST_REQUIRE( tw4 != nullptr );
+   BOOST_CHECK_EQUAL( tw4->halt_stage, GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS );
+   BOOST_CHECK_EQUAL( tw4->redemptions_halted, true );
+   BOOST_CHECK( h2_redemptions_halted( db, pairc ) );
+
+   // Wind-down follows the coverage breach: past the 36h top-up deadline.
+   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+
+   // Redemptions hold freezes claims: live bonded price, but the latch holds.
+   // White-box isolation: the tripwire froze the debt tap (oracle frozen)
+   // along with the latch; unfreeze the tap so the price leg is live again
+   // while redemptions_halted persists, proving the hold ALONE freezes
+   // claims. The fresh publish needs the guard delay to promote to consumed
+   // (H1 rule), so advance past it: the refusal below must be the hold
+   // latch, never a stale price.
+   generate_block();
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   generate_blocks( db.head_block_time() + 2
+                    * db.get_global_properties().parameters.get_oracle_guard_delay_sec() );
+   generate_block();
+   BOOST_REQUIRE( h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+   winddown_claim_operation hop;
+   hop.claimant     = carol_id;
+   hop.winddown     = wdid;
+   hop.claim_amount = share_type( 1000000 );
+   hop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction htx; htx.operations.push_back( hop );
+   db.current_fee_schedule().set_fee( htx.operations.back() );
+   set_expiration( db, htx );
+   htx.sign( carol_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, htx ), fc::exception );
+
+   // Clear the hold through clean windows (feed tracks pool marginals),
+   // then seniors-first wind-down proceeds at converted math. The wind-down
+   // gap's paused sweeps rotated the ring to empty, so three truthful
+   // windows are needed: the first refills (pause), the next two build the
+   // reopen streak.
+   for( int w = 0; w < 3; ++w )
+   {
+      const liquidity_pool_object& p1 = pool1_id( db );
+      h2e_publish( *this, oid, bob_id, bob_private_key,
+                   p1.balance_a.value, p1.balance_b.value );
+      trade_both( 100000000, 11 + w );
+      pass_window();
+   }
+   BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairc )->halt_stage, 0u );
+   // Fresh price leg for the claim itself: the loop's last publish is a full
+   // window old (dual-stale at claim time), so republish like the
+   // redemptions-hold precedent does before claiming.
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   generate_block();
+   const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
+   signed_transaction htx2; htx2.operations.push_back( hop );
+   db.current_fee_schedule().set_fee( htx2.operations.back() );
+   set_expiration( db, htx2 );
+   htx2.sign( carol_private_key, db.get_chain_id() );
+   PUSH_TX( db, htx2 );
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount
                 == carol_before + share_type( 1000000 ) );
 } FC_LOG_AND_RETHROW() }

@@ -272,6 +272,11 @@ void oracle_delete_operation::validate()const
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
 }
 
+void oracle_unfreeze_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+}
+
 void oracle_publish_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
@@ -371,5 +376,7 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_op
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::reference_asset_create_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_create_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_update_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation )

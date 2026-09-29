@@ -87,7 +87,8 @@ struct hardfork_visitor {
                                             protocol::vault_resolve_operation,
                                             protocol::pair_freeze_operation,
                                             protocol::winddown_claim_operation,
-                                            protocol::oracle_fallback_set_operation >;
+                                            protocol::oracle_fallback_set_operation,
+                                            protocol::oracle_unfreeze_operation >;
 
    fc::time_point_sec now;
 
@@ -129,17 +130,21 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<h2_primitives_ops, Op>(), bool>
    visit() { return HARDFORK_H2_BONDS_PASSED(now)
-                    && h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME,
+                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                        HARDFORK_H2_GATEWAY_TIME,
                                         HARDFORK_H2_PRICE_TIME ); }
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<h2_gateway_ops, Op>(), bool>
    visit() { return HARDFORK_H2_GATEWAY_PASSED(now)
-                    && h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME,
+                    && HARDFORK_H2_BONDS_PASSED(now)
+                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                        HARDFORK_H2_GATEWAY_TIME,
                                         HARDFORK_H2_PRICE_TIME ); }
     template<typename Op>
     std::enable_if_t<fc::typelist::contains<h2_price_ops, Op>(), bool>
     visit() { return HARDFORK_H2_PRICE_PASSED(now)
-                     && h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME,
+                     && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                         HARDFORK_H2_GATEWAY_TIME,
                                          HARDFORK_H2_PRICE_TIME ); }
    /// @}
 

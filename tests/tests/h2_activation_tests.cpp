@@ -169,15 +169,43 @@ vault_challenge_operation h2g_challenge_op(
 
 BOOST_FIXTURE_TEST_SUITE( h2_activation_tests, database_fixture )
 
-/// BSIP-1 section 6: the configured gateway height strictly precedes the
-/// price height. Inversion (and equality) is refused by the predicate every
-/// H2 gate helper asserts, so a mis-scheduled configuration can never stage
-/// price judgment before bonded custody.
+/// BSIP-1 section 6 (E-03): the configured schedule reads BONDS < GATEWAY <
+/// PRICE with distinct heights. Inversion (and equality) is refused by the
+/// predicate every H2 gate helper asserts, so a mis-scheduled configuration
+/// can never stage custody before judgment machinery or price judgment
+/// before bonded custody.
 BOOST_AUTO_TEST_CASE( gateway_activation_precedes_price_by_rule )
 {
+   // Authoritative three-leg ordering (E-03: BONDS leg included).
+   BOOST_CHECK( h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                 HARDFORK_H2_GATEWAY_TIME,
+                                 HARDFORK_H2_PRICE_TIME ) );
+   // Legacy two-leg form still holds gateway<price.
    BOOST_CHECK( h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME, HARDFORK_H2_PRICE_TIME ) );
    BOOST_CHECK( !h2_legs_ordered( HARDFORK_H2_PRICE_TIME, HARDFORK_H2_GATEWAY_TIME ) );
    BOOST_CHECK( !h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME, HARDFORK_H2_GATEWAY_TIME ) );
+}
+
+/// E-03 ordering matrix: every inversion or collapse of BONDS<GATEWAY<PRICE
+/// is refused by the three-leg predicate, so all H2 gates fail closed
+/// together (never silently staged).
+BOOST_AUTO_TEST_CASE( h2_bonds_gateway_price_ordering_matrix )
+{
+   const auto B = HARDFORK_H2_BONDS_TIME;
+   const auto G = HARDFORK_H2_GATEWAY_TIME;
+   const auto P = HARDFORK_H2_PRICE_TIME;
+   // Distinct heights pinned: BONDS(2029-11-01) < GATEWAY(2029-12-01) < PRICE(2030-01-01).
+   BOOST_CHECK( B < G );
+   BOOST_CHECK( G < P );
+   BOOST_CHECK( h2_legs_ordered( B, G, P ) );
+   // Inversions and collapses all refuse.
+   BOOST_CHECK( !h2_legs_ordered( G, B, P ) );
+   BOOST_CHECK( !h2_legs_ordered( B, P, G ) );
+   BOOST_CHECK( !h2_legs_ordered( P, G, B ) );
+   BOOST_CHECK( !h2_legs_ordered( B, B, P ) );
+   BOOST_CHECK( !h2_legs_ordered( B, G, G ) );
+   BOOST_CHECK( !h2_legs_ordered( B, B, B ) );
+   BOOST_CHECK( !h2_legs_ordered( G, G, P ) );
 }
 
 /// One op per gate is refused before any leg activates: vault_register
@@ -239,8 +267,10 @@ BOOST_AUTO_TEST_CASE( all_three_gates_refuse_before_activation )
 } FC_LOG_AND_RETHROW() }
 
 /// Between the gateway and price heights bonded custody is admitted while
-/// price judgment is still refused; at the price height the same challenge
-/// posts. This is the observable gateway-before-price staging.
+/// price judgment is still refused; shared primitives are already live
+/// (E-03: BONDS < GATEWAY, so challenge machinery precedes custody and the
+/// Dec 2029 unchallengeable window is closed). At the price height the
+/// price-leg refusal lifts.
 BOOST_AUTO_TEST_CASE( gateway_window_admits_custody_not_price )
 { try {
    generate_blocks( HARDFORK_H2_GATEWAY_TIME );
@@ -250,22 +280,26 @@ BOOST_AUTO_TEST_CASE( gateway_window_admits_custody_not_price )
    ACTORS( (alice)(bob) );
    fund( alice, asset( 100000000000LL ) );
    fund( bob, asset( 100000000000LL ) );
+   h2g_make_committee_member( *this, alice );
 
-   // Gateway leg live: custody registers in the window.
+   // Gateway leg live (and BONDS already passed): custody registers.
    const asset_id_type pair = h2g_create_uia( *this, alice_id, alice_private_key, "GATE" );
    const vault_id_type vid = h2g_register_vault(
          *this, alice_id, alice_private_key, pair, authority( 1, alice_id, 1 ) );
    BOOST_CHECK( vid( db ).vault_pair == pair );
 
-   // Shared primitives still dark: the same challenge the price height will
-   // admit is refused in the window (gate fires before existence/terms).
+   // Shared primitives already live in the gateway window (E-03): the same
+   // challenge posts here (it was refused pre-BONDS, admitted since BONDS).
    {
       vault_challenge_operation cop = h2g_challenge_op( bob_id, vid );
       signed_transaction tx;
       tx.operations.push_back( cop );
       set_expiration( db, tx );
       tx.sign( bob_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      const vault_challenge_id_type cid = vault_challenge_id_type {
+         PUSH_TX( db, tx ).operation_results.front().get<object_id_type>() };
+      BOOST_CHECK( vid( db ).open_challenges == 1 );
+      BOOST_CHECK( cid( db ).vault == vid );
    }
 
    // Price leg still dark: producer bonding is refused in the window.
@@ -283,27 +317,50 @@ BOOST_AUTO_TEST_CASE( gateway_window_admits_custody_not_price )
       GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
    }
 
-   // At the price height the refusal lifts for the identical challenge.
+   // At the price height the price-leg refusal lifts (fallback set admits).
    generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    {
-      vault_challenge_operation cop = h2g_challenge_op( bob_id, vid );
+      // The gateway-window challenge above already proved primitives live;
+      // here the price leg admits bond locks (existence-checked: unknown
+      // oracle still refused, but the gate itself no longer fires first).
+      // A well-formed fallback set on a fresh oracle posts.
+      const auto bts_ref = h2g_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+      const auto usd_ref = h2g_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+      const oracle_id_type oid =
+            h2g_make_oracle( *this, alice_id, alice_private_key, "GATE.USD", bts_ref, usd_ref );
+      oracle_fallback_set_operation fop;
+      fop.owner  = alice_id;
+      fop.oracle = oid;
       signed_transaction tx;
-      tx.operations.push_back( cop );
+      tx.operations.push_back( fop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
-      tx.sign( bob_private_key, db.get_chain_id() );
-      const vault_challenge_id_type cid = vault_challenge_id_type {
-         PUSH_TX( db, tx ).operation_results.front().get<object_id_type>() };
-      BOOST_CHECK( vid( db ).open_challenges == 1 );
-      BOOST_CHECK( cid( db ).vault == vid );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
    }
 } FC_LOG_AND_RETHROW() }
+
+/// E-03: gateway pre-BONDS refuses vault_register (challenge machinery must
+/// be live first). Direct gate-level proof: the gateway helper asserts BONDS
+/// passed, so a time before BONDS refuses even though the call shape is
+/// otherwise valid; at GATEWAY (BONDS already passed) it admits.
+BOOST_AUTO_TEST_CASE( gateway_requires_bonds_gate_level )
+{
+   const auto before_bonds = HARDFORK_H2_BONDS_TIME - 1;
+   BOOST_CHECK_THROW( h2_require_gateway_leg( before_bonds ), fc::exception );
+   BOOST_CHECK_THROW( h2_require_primitives( before_bonds ), fc::exception );
+   BOOST_CHECK_NO_THROW( h2_require_primitives( HARDFORK_H2_BONDS_TIME ) );
+   BOOST_CHECK_NO_THROW( h2_require_gateway_leg( HARDFORK_H2_GATEWAY_TIME ) );
+   BOOST_CHECK_THROW( h2_require_price_leg( HARDFORK_H2_PRICE_TIME - 1 ), fc::exception );
+   BOOST_CHECK_NO_THROW( h2_require_price_leg( HARDFORK_H2_PRICE_TIME ) );
+}
 
 /// H1-exclusion is consensus-reject at the custody door: a market-issued
 /// pair and an H1-bound pair are both refused, while a plain UIA registers.
 BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -407,9 +464,9 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
    BOOST_CHECK( vid( db ).vault_pair == free_id );
 } FC_LOG_AND_RETHROW() }
 
-/// Operation tags 83-96 are the on-chain numbering and must never move: a
+/// Operation tags 83-97 are the on-chain numbering and must never move: a
 /// later edit that appends out of order or renumbers fails here, not on a
-/// live chain.
+/// live chain. Tag 97 is the R-02 committee oracle_unfreeze (price leg).
 BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_96 )
 {
    using graphene::protocol::operation;
@@ -427,6 +484,7 @@ BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_96 )
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::pair_freeze_operation>::value ), 94 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::winddown_claim_operation>::value ), 95 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::oracle_fallback_set_operation>::value ), 96 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::oracle_unfreeze_operation>::value ), 97 );
 }
 
 /// Protocol-space object IDs 1.25.x-1.35.x are the on-chain numbering and
@@ -488,6 +546,15 @@ BOOST_AUTO_TEST_CASE( h2_appended_fields_round_trip )
       BOOST_REQUIRE( back.fallback.valid() );
       BOOST_CHECK( back.fallback->oracle_id == oracle_id_type( 8 ) );
       BOOST_CHECK_EQUAL( int( back.fallback->series ), 1 );
+   }
+   {
+      // R-02 unfreeze op (tag 97): extensions appended-last round-trips.
+      oracle_unfreeze_operation op;
+      op.unfreezer = account_id_type( 9 );
+      op.oracle    = oracle_id_type( 10 );
+      auto back = fc::raw::unpack<oracle_unfreeze_operation>( fc::raw::pack( op ) );
+      BOOST_CHECK( back.unfreezer == op.unfreezer );
+      BOOST_CHECK( back.oracle == op.oracle );
    }
 }
 

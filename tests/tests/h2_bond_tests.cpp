@@ -188,7 +188,7 @@ BOOST_AUTO_TEST_CASE( h2_bond_ops_are_refused_before_the_hardfork )
 
 BOOST_AUTO_TEST_CASE( vault_registers_threshold_authority_and_terms )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -229,7 +229,7 @@ BOOST_AUTO_TEST_CASE( vault_registers_threshold_authority_and_terms )
 
 BOOST_AUTO_TEST_CASE( bond_locks_vesting_pointer_with_7d_unlock )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -283,7 +283,7 @@ BOOST_AUTO_TEST_CASE( bond_locks_vesting_pointer_with_7d_unlock )
 
 BOOST_AUTO_TEST_CASE( publish_advances_producer_unlock )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -329,7 +329,7 @@ BOOST_AUTO_TEST_CASE( publish_advances_producer_unlock )
 
 BOOST_AUTO_TEST_CASE( release_refused_before_unlock_then_allowed )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 

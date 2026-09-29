@@ -25,11 +25,13 @@
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/bond_evaluator.hpp>
+#include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 
 namespace graphene { namespace chain {
@@ -178,6 +180,28 @@ void_result oracle_update_evaluator::do_evaluate( const oracle_update_operation&
 
    if( op.new_options.valid() )
       check_producers_exist( d, *op.new_options );
+
+   // R-02 owner-unfreeze bypass closed: an owner clear of `frozen` (currently
+   // frozen, new options set false) is refused while the oracle carries open
+   // disputes OR a challenge-set freeze (sustained/expiry terminal dispute
+   // for this oracle). Track A owner freezes (no open disputes, no
+   // sustained/expired history) still clear here; challenge-set freezes clear
+   // only through the committee oracle_unfreeze op. Slash stays flag-only.
+   if( _oracle->options.frozen && op.new_options.valid() && !op.new_options->frozen )
+   {
+      FC_ASSERT( _oracle->open_disputes == 0,
+                 "Oracle carries open disputes; owner unfreeze refused until "
+                 "resolution (committee oracle_unfreeze after resolution)" );
+      const auto& dispute_idx = d.get_index_type<oracle_dispute_index>()
+                                   .indices().get<by_dispute_oracle>();
+      const auto range = dispute_idx.equal_range( op.oracle_id );
+      for( auto itr = range.first; itr != range.second; ++itr )
+         FC_ASSERT( itr->state != GRAPHENE_H2_CHALLENGE_SUSTAINED
+                    && itr->state != GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN,
+                    "Oracle freeze was challenge-set (dispute ${x}); owner "
+                    "unfreeze refused, use committee oracle_unfreeze",
+                    ("x", itr->id) );
+   }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -407,6 +431,46 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
    // keep byte-identical guarded values.
    h2_observe_publication( d, op.oracle_id, now );
 
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+void_result oracle_unfreeze_evaluator::do_evaluate( const oracle_unfreeze_operation& op )
+{ try {
+   database& d = db();
+
+   // Price leg (R-02): the unfreeze clears the H2 debt-tap freeze, so it
+   // admits at the price height. Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
+
+   _oracle = d.find( op.oracle );
+   FC_ASSERT( nullptr != _oracle, "Oracle ${o} does not exist", ("o", op.oracle) );
+   const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   FC_ASSERT( member_idx.find( op.unfreezer ) != member_idx.end(),
+              "Unfreezer ${a} is not a seated committee member", ("a", op.unfreezer) );
+   FC_ASSERT( _oracle->options.frozen,
+              "Oracle ${o} is not frozen; unfreeze is a no-op refused", ("o", op.oracle) );
+   // Clearing after resolution only: an open dispute must resolve (or expire)
+   // first, never mid-vote.
+   FC_ASSERT( _oracle->open_disputes == 0,
+              "Oracle carries open disputes; unfreeze refused until resolution" );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+void_result oracle_unfreeze_evaluator::do_apply( const oracle_unfreeze_operation& op ) const
+{ try {
+   database& d = db();
+   const auto now = d.head_block_time();
+   const uint32_t delay_sec = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
+   const uint32_t maint_sec = d.get_global_properties().parameters.maintenance_interval;
+   d.modify( *_oracle, [now, delay_sec, maint_sec]( oracle_object& o ) {
+      o.options.frozen = false;
+      // Resume promotion math immediately (owner-update precedent): the flag
+      // alone does not recompute the aggregate, so refresh the guarded value
+      // and bound feeds in this block.
+      o.update_current_value( now, delay_sec, maint_sec );
+   } );
+   refresh_subscribers( d, *_oracle );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

@@ -154,8 +154,9 @@ namespace graphene { namespace protocol {
              /* 93 */ vault_resolve_operation,
              /* 94 */ pair_freeze_operation,
              /* 95 */ winddown_claim_operation,
-             /* 96 */ oracle_fallback_set_operation
-           >;
+             /* 96 */ oracle_fallback_set_operation,
+             /* 97 */ oracle_unfreeze_operation
+            >;
 
    /**
     *  Appends required authorites to the result vector.  The authorities appended are not the

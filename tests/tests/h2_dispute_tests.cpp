@@ -286,7 +286,7 @@ BOOST_AUTO_TEST_CASE( h2_dispute_ops_are_refused_before_the_hardfork )
 
 BOOST_AUTO_TEST_CASE( challenge_posts_with_floor_memo_and_open_state )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -339,7 +339,7 @@ BOOST_AUTO_TEST_CASE( challenge_posts_with_floor_memo_and_open_state )
 
 BOOST_AUTO_TEST_CASE( blind_funded_challenge_is_rejected )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -397,7 +397,7 @@ BOOST_AUTO_TEST_CASE( blind_funded_challenge_is_rejected )
 
 BOOST_AUTO_TEST_CASE( dispute_rounds_double_and_cap_at_three )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -465,7 +465,7 @@ BOOST_AUTO_TEST_CASE( dispute_rounds_double_and_cap_at_three )
 
 BOOST_AUTO_TEST_CASE( missed_deadline_expires_frozen_without_votes )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -514,7 +514,7 @@ BOOST_AUTO_TEST_CASE( missed_deadline_expires_frozen_without_votes )
 
 BOOST_AUTO_TEST_CASE( same_authority_pairings_are_refused )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -612,7 +612,7 @@ BOOST_AUTO_TEST_CASE( same_authority_pairings_are_refused )
 
 BOOST_AUTO_TEST_CASE( fast_reject_forfeits_fully_with_exact_split )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -705,7 +705,7 @@ BOOST_AUTO_TEST_CASE( fast_reject_forfeits_fully_with_exact_split )
 
 BOOST_AUTO_TEST_CASE( cooldown_and_concurrency_are_enforced )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -759,10 +759,15 @@ BOOST_AUTO_TEST_CASE( cooldown_and_concurrency_are_enforced )
           *this, dave_id, dave_private_key, vid,
           H2D_ROUND1_RAW, H2D_FLOOR_USD_CENTS, h2d_evidence( "c3" ) );
     BOOST_CHECK_EQUAL( vid( db ).open_challenges, 2u );
-    // The cap-3 refusal branch is exercised by forcing the counter to the cap
-    // directly (the natural path above proves the counter tracks opens and
-    // sweeps; the forced state proves the guard refuses above the cap). The
-    // concurrency gate fires before the cooldown gate (capacity is the harder
+    // V-08 headroom coverage (not natural reach): the 24h-cooldown x 48h-window
+    // arithmetic above proves three natural opens can never be concurrent
+    // (24h spacing x 2 gaps lands the third past the 48h window), so the
+    // cap-3 refusal branch is exercised by forcing the counter to the cap
+    // directly. The natural path proves the counter tracks opens and sweeps;
+    // the forced state proves the guard refuses above the cap. Do NOT claim
+    // natural cap-3 coverage: this is headroom pinning only. A natural-reach
+    // variant would need a shortened test window (out of scope here).
+    // The concurrency gate fires before the cooldown gate (capacity is the harder
     // constraint), so the refusal names it. The counter is restored after.
     db.modify( vid( db ), []( vault_object& v ) {
        v.open_challenges = GRAPHENE_H2_MAX_CONCURRENT_PER_PAIR;
@@ -799,7 +804,7 @@ BOOST_AUTO_TEST_CASE( cooldown_and_concurrency_are_enforced )
 
 BOOST_AUTO_TEST_CASE( release_is_blocked_by_an_open_dispute )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -888,7 +893,7 @@ BOOST_AUTO_TEST_CASE( release_is_blocked_by_an_open_dispute )
 
 BOOST_AUTO_TEST_CASE( vault_register_rejects_non_bts_bond_assets )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -941,7 +946,7 @@ BOOST_AUTO_TEST_CASE( vault_register_rejects_non_bts_bond_assets )
 
 BOOST_AUTO_TEST_CASE( exonerate_forfeits_challenger_and_returns_defender )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -1017,7 +1022,7 @@ BOOST_AUTO_TEST_CASE( exonerate_forfeits_challenger_and_returns_defender )
 
 BOOST_AUTO_TEST_CASE( sustain_freezes_vault_and_returns_challenger )
 { try {
-   generate_blocks( HARDFORK_H2_BONDS_TIME );
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
    set_expiration( db, trx );
 
@@ -1076,6 +1081,193 @@ BOOST_AUTO_TEST_CASE( sustain_freezes_vault_and_returns_challenger )
    generate_blocks( late( db ).round_deadline + 2 * 86400 );
    generate_block();
    BOOST_CHECK_EQUAL( late( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+} FC_LOG_AND_RETHROW() }
+
+/// R-02: owner oracle_update MUST NOT clear `frozen` while the oracle has
+/// open disputes OR the freeze was challenge-set (sustain/expiry). The
+/// committee oracle_unfreeze op clears after resolution; slash stays
+/// flag-only (slashed=true, no seizure here — follow-on phase).
+BOOST_AUTO_TEST_CASE( owner_cannot_clear_sustain_freeze_committee_unfreezes )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "R02.USD", bts_ref, usd_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   // Bob disputes carol's print; the committee sustains: frozen, slashed flag.
+   const oracle_dispute_id_type did = h2d_post_dispute(
+         *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+         h2d_evidence( "r02-sustain" ) );
+   const uint64_t need = h2d_vote_threshold( *this );
+   for( uint64_t i = 0; i < need; ++i )
+      h2d_vote( *this, get_account( string( "init" ) + fc::to_string( i ) ).get_id(),
+                init_account_priv_key, object_id_type( did ),
+                GRAPHENE_H2_DISPUTE_SUSTAIN );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+
+   // Owner clear refused: challenge-set freeze (sustained terminal history).
+   {
+      oracle_update_operation uop;
+      uop.owner     = alice_id;
+      uop.oracle_id = oid;
+      oracle_options live = oid( db ).options;
+      live.frozen = false;
+      uop.new_options = live;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+      BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+   }
+
+   // Non-committee unfreeze refused.
+   {
+      oracle_unfreeze_operation uop;
+      uop.unfreezer = bob_id;
+      uop.oracle    = oid;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( bob_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+      BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+   }
+
+   // Committee path clears after resolution (open==0, sustained history present).
+   {
+      oracle_unfreeze_operation uop;
+      uop.unfreezer = alice_id;
+      uop.oracle    = oid;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+      BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+   }
+
+   // Slash stays flag-only: bond marked slashed, no seizure built here.
+   // (No bond was locked in this vector; the flag path is covered by the
+   // sustain resolution above. Seizure is an explicit follow-on phase.)
+} FC_LOG_AND_RETHROW() }
+
+/// R-02 expiry + open-dispute legs: owner clear refused with an open dispute
+/// and after an expiry freeze; committee unfreezes only after resolution.
+BOOST_AUTO_TEST_CASE( owner_cannot_clear_open_or_expiry_freeze )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "R02X.USD", bts_ref, usd_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   // Owner freezes first (Track A path, no disputes: allowed).
+   {
+      oracle_update_operation fop;
+      fop.owner     = alice_id;
+      fop.oracle_id = oid;
+      oracle_options frozen = oid( db ).options;
+      frozen.frozen = true;
+      fop.new_options = frozen;
+      signed_transaction tx; tx.operations.push_back( fop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+      BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   }
+
+   // Open dispute lands: owner clear now refused (open>0), committee
+   // unfreeze also refused until resolution.
+   const oracle_dispute_id_type did = h2d_post_dispute(
+         *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+         h2d_evidence( "r02-open" ) );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+   {
+      oracle_update_operation uop;
+      uop.owner     = alice_id;
+      uop.oracle_id = oid;
+      oracle_options live = oid( db ).options;
+      live.frozen = false;
+      uop.new_options = live;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+   {
+      oracle_unfreeze_operation uop;
+      uop.unfreezer = alice_id;
+      uop.oracle    = oid;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+
+   // Let it expire with no votes: EXPIRED_FROZEN, still frozen.
+   generate_blocks( did( db ).round_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+
+   // Owner still refused (challenge-set expiry history); committee clears.
+   {
+      oracle_update_operation uop;
+      uop.owner     = alice_id;
+      uop.oracle_id = oid;
+      oracle_options live = oid( db ).options;
+      live.frozen = false;
+      uop.new_options = live;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+   {
+      oracle_unfreeze_operation uop;
+      uop.unfreezer = alice_id;
+      uop.oracle    = oid;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+      BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+   }
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

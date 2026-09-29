@@ -28,19 +28,29 @@
 
 namespace graphene { namespace chain {
 
+bool h2_legs_ordered( const fc::time_point_sec& bonds,
+                      const fc::time_point_sec& gateway,
+                      const fc::time_point_sec& price )
+{
+   return bonds < gateway && gateway < price;
+}
+
 bool h2_legs_ordered( const fc::time_point_sec& gateway,
                       const fc::time_point_sec& price )
 {
-   return gateway < price;
+   return h2_legs_ordered( HARDFORK_H2_BONDS_TIME, gateway, price );
 }
 
 namespace detail {
-   /// The BSIP-1 section 6 invariant, checked first by every H2 gate so an
-   /// inverted schedule fails closed on all H2 paths at once.
+   /// The BSIP-1 section 6 invariant (E-03: BONDS < GATEWAY < PRICE), checked
+   /// first by every H2 gate so an inverted schedule fails closed on all H2
+   /// paths at once.
    void h2_require_leg_ordering()
    {
-      FC_ASSERT( h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME, HARDFORK_H2_PRICE_TIME ),
-                 "H2 gateway activation must strictly precede price activation "
+      FC_ASSERT( h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                  HARDFORK_H2_GATEWAY_TIME,
+                                  HARDFORK_H2_PRICE_TIME ),
+                 "H2 activations must order BONDS < GATEWAY < PRICE "
                  "(BSIP-1 section 6): inverted schedule refused" );
    }
 }
@@ -55,6 +65,10 @@ void h2_require_primitives( const fc::time_point_sec& now )
 void h2_require_gateway_leg( const fc::time_point_sec& now )
 {
    detail::h2_require_leg_ordering();
+   // E-03: gateway custody requires challenge machinery live first, so Dec
+   // 2029 vaults never form in an unchallengeable window.
+   FC_ASSERT( HARDFORK_H2_BONDS_PASSED( now ),
+              "Not allowed until the H2 bonds hardfork" );
    FC_ASSERT( HARDFORK_H2_GATEWAY_PASSED( now ),
               "Not allowed until the H2 gateway activation" );
 }

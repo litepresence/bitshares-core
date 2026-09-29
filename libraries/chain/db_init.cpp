@@ -181,6 +181,7 @@ void database::initialize_evaluators()
    register_evaluator<pair_freeze_evaluator>();
    register_evaluator<winddown_claim_evaluator>();
    register_evaluator<oracle_fallback_set_evaluator>();
+   register_evaluator<oracle_unfreeze_evaluator>();
 }
 
 void database::initialize_indexes()

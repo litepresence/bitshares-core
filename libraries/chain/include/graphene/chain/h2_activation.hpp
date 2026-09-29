@@ -36,30 +36,36 @@ class database;
  * @brief H2 activation legs (BSIP-1 section 6: gateway Track B before price
  * Track B, enforced as consensus-reject rules, never a sequencing promise).
  *
- * Three gates, one invariant:
- * - Primitives gate (`HARDFORK_H2_BONDS_TIME`): the shared bond/dispute/
- *   challenge primitives built once (vault_challenge, oracle_dispute,
- *   oracle_dispute_escalate, challenge_vote). Usable by both tracks.
- * - Gateway leg (`HARDFORK_H2_GATEWAY_TIME`): bonded custody formation and
- *   rotation (vault_register, vault_bond_lock, vault_bond_release,
- *   vault_rotate). The gateway window seasons custody before any price
- *   judgment exists.
- * - Price leg (`HARDFORK_H2_PRICE_TIME`): everything that values through
- *   bonded prices or judges through stake (oracle_bond_lock,
+ * Three gates, one invariant (E-03 audit-round-2: BONDS < GATEWAY < PRICE):
+ * - Primitives gate (`HARDFORK_H2_BONDS_TIME`, 2029-11-01): the shared
+ *   bond/dispute/challenge primitives built once (vault_challenge,
+ *   oracle_dispute, oracle_dispute_escalate, challenge_vote). Usable by both
+ *   tracks. Must precede gateway so custody never forms unchallengeable.
+ * - Gateway leg (`HARDFORK_H2_GATEWAY_TIME`, 2029-12-01): bonded custody
+ *   formation and rotation (vault_register, vault_bond_lock,
+ *   vault_bond_release, vault_rotate). Requires BONDS passed: the gateway
+ *   window seasons custody with challenge machinery live.
+ * - Price leg (`HARDFORK_H2_PRICE_TIME`, 2030-01-01): everything that values
+ *   through bonded prices or judges through stake (oracle_bond_lock,
  *   oracle_bond_release, vault_resolve, pair_freeze, winddown_claim,
- *   oracle_fallback_set).
+ *   oracle_fallback_set, oracle_unfreeze).
  *
  * Maintenance sweeps and observation hooks stay on the primitives gate: they
  * act only on state the leg-gated ops created, so they need no independent
  * activation (and lose none).
  *
- * The invariant -- gateway strictly before price -- is asserted by every
- * helper below, so an inverted schedule refuses ALL H2 paths fail-closed
- * (inversion refused, never silently staged).
+ * The invariant -- bonds strictly before gateway strictly before price -- is
+ * asserted by every helper below, so an inverted schedule refuses ALL H2
+ * paths fail-closed (inversion refused, never silently staged).
  */
 
-/// @return whether @p gateway strictly precedes @p price. Unit-testable;
-/// every gate helper asserts it over the configured heights.
+/// @return whether @p bonds strictly precedes @p gateway strictly precedes
+/// @p price. Unit-testable; every gate helper asserts it over the configured
+/// heights. The two-argument form covers gateway<price only (legacy); the
+/// three-argument form is authoritative (E-03: BONDS leg included).
+bool h2_legs_ordered( const fc::time_point_sec& bonds,
+                      const fc::time_point_sec& gateway,
+                      const fc::time_point_sec& price );
 bool h2_legs_ordered( const fc::time_point_sec& gateway,
                       const fc::time_point_sec& price );
 

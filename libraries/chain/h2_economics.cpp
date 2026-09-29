@@ -88,6 +88,34 @@ namespace {
       return itr == idx.end() ? nullptr : &*itr;
    }
 
+   /// Bonded-live gate (X-01): does @p oracle have a non-empty bonded live
+   /// set at @p now (unslashed producer bond + live submission + current
+   /// producer entry)? Extracted from the reward live-set computation below
+   /// so reads, the tripwire feed leg, and payouts share one definition.
+   /// H1-style oracles (live values, no bonds) report false: H2 reads fail
+   /// closed without bonded backing, never on unbonded medians.
+   bool h2_oracle_has_bonded_live_set( const database& d, const oracle_object& oracle,
+                                       time_point_sec now )
+   {
+      const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                .indices().get<by_oracle_producer>();
+      for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oracle_id_type( oracle.id ) ) );
+            bitr != bond_idx.end() && bitr->oracle == oracle.id; ++bitr )
+      {
+         if( bitr->slashed )
+            continue;
+         if( oracle.options.producers.find( bitr->producer )
+             == oracle.options.producers.end() )
+            continue;
+         const auto sitr = oracle.submissions.find( bitr->producer );
+         if( sitr == oracle.submissions.end()
+             || !oracle.is_submission_live( sitr->second.first, now ) )
+            continue;
+         return true;
+      }
+      return false;
+   }
+
    /// Interval-anchored window for @p now (H1 guard_epoch precedent).
    time_point_sec h2_rate_window( const database& d, time_point_sec now )
    {
@@ -187,6 +215,8 @@ namespace {
        const bool bound = ( vault != nullptr && vault->bound_oracle.valid() );
        // Feed leg: bound oracle's live raw aggregate (transparency continues
        // under freeze), else the single backup's, else pause (no data).
+       // X-01 bonded-only: a live value without a bonded live set is not a
+       // feed leg (H1-style oracles never move the tripwire).
        optional<protocol::oracle_value> feed;
        if( bound )
        {
@@ -199,7 +229,8 @@ namespace {
                 return optional<protocol::oracle_value>();
              return ( *o->current_value )[0];
           };
-          if( primary != nullptr )
+          if( primary != nullptr
+              && h2_oracle_has_bonded_live_set( d, *primary, now ) )
              feed = live_current( primary );
           if( !feed.valid() )
           {
@@ -207,7 +238,8 @@ namespace {
              if( guard != nullptr && guard->fallback.valid() )
              {
                 const oracle_object* backup = d.find( guard->fallback->oracle_id );
-                if( backup != nullptr )
+                if( backup != nullptr
+                    && h2_oracle_has_bonded_live_set( d, *backup, now ) )
                 {
                    const auto fb = live_current( backup );
                    if( fb.valid() && guard->fallback->series < backup->current_value->size() )
@@ -246,7 +278,13 @@ namespace {
        }
        else if( breach )
        {
-          if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS )
+          // X-05 atomic automatic door+debt halt: the first breach in a sweep
+          // applies door AND debt together (stage jumps past DEBT), so no
+          // block ever observes door-closed/debt-open. Redemptions stay the
+          // only lagging rung (manual pair_freeze was already atomic).
+          if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT )
+             stage_after = GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT;
+          else if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS )
              stage_after += 1;
           streak_after = 0;
        }
@@ -347,10 +385,24 @@ namespace {
             paid = paid + share;
          }
       }
+      // X-03 merge contract (H2-side half): record this sweep's H2 diversion
+      // (the oracle-leg routing share) on the shared 10000-bps denominator
+      // and assert it sits inside the 7000bps joint ceiling. The G1 merge
+      // reads h2_diversion_bps and asserts parity_bps + h2_diversion_bps <=
+      // 7000 in both routers; that sum assert lands with the merge, not here.
+      // No cross-branch writes: H2 writes, G1 reads.
       d.modify( pool, [&balance, &paid, &now]( reward_pool_object& p ) {
          p.balance = balance;
          p.paid_lifetime = p.paid_lifetime + paid;
          p.last_payout = now;
+         p.h2_diversion_bps = p.routing_oracle_bps;
+         FC_ASSERT( p.h2_diversion_bps <= GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS,
+                    "H2 diversion ${d}bps exceeds the joint ${c}bps ceiling",
+                    ("d", p.h2_diversion_bps)("c", GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS) );
+         FC_ASSERT( h2_routing_valid( p.routing_oracle_bps, p.routing_vault_bps,
+                                      p.routing_reserve_bps,
+                                      GRAPHENE_H2E_FEE_DIVERSION_CAP_BPS ),
+                    "H2 routing triple violates the joint-cap contract" );
       } );
    }
 
@@ -368,6 +420,10 @@ void h2_ensure_oracle_econ( database& d, oracle_id_type oracle )
          p.routing_oracle_bps = GRAPHENE_H2E_REWARD_ORACLE_BPS;
          p.routing_vault_bps = GRAPHENE_H2E_REWARD_VAULT_BPS;
          p.routing_reserve_bps = GRAPHENE_H2E_REWARD_RESERVE_BPS;
+         // X-03 merge contract: shell records the H2 diversion (oracle leg)
+         // at creation too, so a pool that never processes a sweep still
+         // advertises a valid joint-cap half.
+         p.h2_diversion_bps = GRAPHENE_H2E_REWARD_ORACLE_BPS;
       } );
    const auto& guard_idx = d.get_index_type<guard_state_index>()
                               .indices().get<by_guard_oracle>();
@@ -488,6 +544,12 @@ optional<protocol::oracle_value> h2_read_consumed_price(
    if( o == nullptr || o->options.frozen )
       return optional<protocol::oracle_value>();
    if( !o->consumed_value.valid() || series >= o->consumed_value->size() )
+      return optional<protocol::oracle_value>();
+   // X-01 bonded-only H2 reads: a live consumed value without a bonded live
+   // set (unslashed bond + live submission + current producer entry) is not
+   // an H2 price. H1-style oracles (quorum-live, never bonded) fail closed
+   // here, so unbonded inputs can never move bonded medians or debt taps.
+   if( !h2_oracle_has_bonded_live_set( d, *o, now ) )
       return optional<protocol::oracle_value>();
    // Read-time liveness counts from the sample's formation time (H1 rule: a
    // delayed value cannot outlive its data).
@@ -716,6 +778,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::reward_pool_object, (graphene::
                     (routing_vault_bps)
                     (routing_reserve_bps)
                     (last_payout)
+                    (h2_diversion_bps)
                   )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::guard_state_object, (graphene::db::object),

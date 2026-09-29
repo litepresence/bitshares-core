@@ -27,6 +27,8 @@
 #include <graphene/chain/bond_evaluator.hpp>
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/vault_object.hpp>
 
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
@@ -447,14 +449,40 @@ void_result oracle_unfreeze_evaluator::do_evaluate( const oracle_unfreeze_operat
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
    FC_ASSERT( member_idx.find( op.unfreezer ) != member_idx.end(),
               "Unfreezer ${a} is not a seated committee member", ("a", op.unfreezer) );
-   FC_ASSERT( _oracle->options.frozen,
-              "Oracle ${o} is not frozen; unfreeze is a no-op refused", ("o", op.oracle) );
-   // Clearing after resolution only: an open dispute must resolve (or expire)
-   // first, never mid-vote.
-   FC_ASSERT( _oracle->open_disputes == 0,
-              "Oracle carries open disputes; unfreeze refused until resolution" );
+    FC_ASSERT( _oracle->options.frozen,
+               "Oracle ${o} is not frozen; unfreeze is a no-op refused", ("o", op.oracle) );
+    // Clearing after resolution only: an open dispute must resolve (or expire)
+    // first, never mid-vote.
+    FC_ASSERT( _oracle->open_disputes == 0,
+               "Oracle carries open disputes; unfreeze refused until resolution" );
+    // R3-01 coherence (documented choice: REFUSE while the deviation ladder
+    // holds the pair). The frozen flag conflates two causes: guilty freezes
+    // (disputes) clear here, deviation halts (tripwire stage >= DEBT) clear
+    // only through tripwire reopen (two clean windows). Clearing the flag
+    // here mid-halt would split the state (oracle live while the door hold,
+    // debt halt, or redemptions latch still stand), so this op refuses until
+    // every bound pair's stage has cleared; the committee then unfreezes in
+    // a second step. Tripwire reopen, symmetrically, never clears a guilty
+    // oracle (see h2_reopen_tripwire): each cause clears through its own
+    // path, in either order. Rare-op scan (never a sweep): vaults bound to
+    // this oracle, each with at most one tripwire state.
+    const auto& vault_idx = d.get_index_type<vault_index>().indices();
+    const auto& tw_idx = d.get_index_type<tripwire_index>()
+                            .indices().get<by_tripwire_pair>();
+    for( auto vitr = vault_idx.begin(); vitr != vault_idx.end(); ++vitr )
+    {
+       if( !vitr->bound_oracle.valid() || *vitr->bound_oracle != op.oracle )
+          continue;
+       const auto titr = tw_idx.find( vitr->vault_pair );
+       FC_ASSERT( titr == tw_idx.end()
+                  || titr->halt_stage < GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT,
+                  "Pair ${p} sits at tripwire halt stage ${s}; committee unfreeze "
+                  "refused until the wire reopens (two clean windows clear the "
+                  "stage, then unfreeze)",
+                  ("p", vitr->vault_pair)("s", titr->halt_stage) );
+    }
 
-   return void_result();
+    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
 void_result oracle_unfreeze_evaluator::do_apply( const oracle_unfreeze_operation& op ) const

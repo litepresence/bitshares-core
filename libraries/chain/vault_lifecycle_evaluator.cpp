@@ -366,9 +366,15 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
    // H2 read, so they admit at the price height. Ordering asserted inside.
    h2_require_price_leg( d.head_block_time() );
 
-   _winddown = d.find( op.winddown );
-   FC_ASSERT( nullptr != _winddown, "Wind-down ${w} does not exist", ("w", op.winddown) );
-   FC_ASSERT( _winddown->state != GRAPHENE_H2_WINDDOWN_COMPLETE,
+    _winddown = d.find( op.winddown );
+    FC_ASSERT( nullptr != _winddown, "Wind-down ${w} does not exist", ("w", op.winddown) );
+    // E-08: winddown_claim is the SOLE wind-down exit path. BSIP-1 fences
+    // issuance as spec-only: no REVERT-vs-ABSORB transitions exist anywhere
+    // in-tree (that vocabulary appears in design prose only), so there is
+    // nothing to route here. The issuance phase will define REVERT vs ABSORB
+    // as new operations with their own state machine; until then this claim
+    // path is complete, not a placeholder. No behavior change.
+    FC_ASSERT( _winddown->state != GRAPHENE_H2_WINDDOWN_COMPLETE,
               "Wind-down ${w} is complete; no further claims",
               ("w", op.winddown) );
    // Tripwire redemptions latch (H2d): while the pair's wire holds

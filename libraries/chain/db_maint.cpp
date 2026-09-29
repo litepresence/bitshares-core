@@ -1597,7 +1597,24 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    // H2b fail-closed arbitration: open challenges/disputes past their vote
    // window expire into frozen targets at the first maintenance after the
    // deadline (inventory OQ-19 vehicle). Pre-fork this is a gated no-op.
-   process_expired_h2_challenges(*this);
+    // X-06 H2-side order pin (H2-internal, load-bearing): challenge-expiry
+    // first, then vault top-up/seizure, then oracle
+    // reward/guard/recovery/tripwire. Expiry must precede both consumers: a
+    // challenge expiring in this sweep freezes its target (vault or oracle)
+    // before the vault sweep reads coverage pins and before the tripwire
+    // reopen reads guilty history — otherwise one sweep could recover a
+    // vault or reopen a wire past a finding that landed in the same block.
+    // The vault sweep precedes the oracle sweep so coverage recovery respects
+    // the tripwire door hold it does not own (it never clears door-held
+    // freezes; only tripwire reopen does). Pinned by
+    // h2_maintenance_order_expiry_vault_tripwire_pinned (h2_oracle_tests).
+    // DESIGN-TODO (merge): the merged H1+H2+G1 order stays a merge task.
+    // Intended full order for the merge to implement against: H1 market and
+    // bitasset work above (process_bitassets, expired auths) unchanged first;
+    // then H2b expiry, H2c vault, H2d oracle/tripwire as pinned here; then
+    // the G1 stealth sweep; process_budget stays last (it needs the final
+    // next_maintenance_time).
+    process_expired_h2_challenges(*this);
    // H2c vault lifecycle: 150% coverage rule -> mint halt -> 36h top-up ->
    // auto wind-down + seizure (inventory OQ-09/OQ-19 vehicles). Pre-fork no-op.
    process_h2_vault_maintenance(*this);

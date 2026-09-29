@@ -29,17 +29,16 @@
 namespace graphene { namespace chain {
 
 bool h2_legs_ordered( const fc::time_point_sec& bonds,
-                      const fc::time_point_sec& gateway,
-                      const fc::time_point_sec& price )
+                       const fc::time_point_sec& gateway,
+                       const fc::time_point_sec& price )
 {
    return bonds < gateway && gateway < price;
 }
 
-bool h2_legs_ordered( const fc::time_point_sec& gateway,
-                      const fc::time_point_sec& price )
-{
-   return h2_legs_ordered( HARDFORK_H2_BONDS_TIME, gateway, price );
-}
+// R3-04: the legacy two-argument h2_legs_ordered(gateway, price) shim is
+// removed (was here): it pinned HARDFORK_H2_BONDS_TIME implicitly and let a
+// caller assert gateway<price while bypassing the BONDS leg entirely. All
+// in-tree callers use the three-argument authoritative form.
 
 namespace detail {
    /// The BSIP-1 section 6 invariant (E-03: BONDS < GATEWAY < PRICE), checked

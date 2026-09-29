@@ -784,6 +784,18 @@ processed_transaction database::_apply_transaction(const signed_transaction& trx
 operation_result database::apply_operation( transaction_evaluation_state& eval_state, const operation& op,
                                             bool is_virtual /* = true */ )
 { try {
+   // E-02: evaluator-only hardfork model (deliberate, not a gap). There is
+   // no central apply-time hardfork_visitor reject here: every new op's
+   // evaluator asserts its activation leg on head-block time first
+   // (h2_require_primitives / h2_require_gateway_leg / h2_require_price_leg,
+   // each also asserting the BONDS<GATEWAY<PRICE ordering), and proposals
+   // funnel through this same apply path, so a pre-fork H2 op fails at
+   // apply no matter how it arrived (mempool, proposal, or block). A
+   // witness that includes one produces an invalid block and self-punishes
+   // through fork choice — that economic consequence is the enforcement, and
+   // a central reject would only duplicate it. Follow-up (not consensus):
+   // a mempool smuggling fuzz proposing/executing/voting each new op 83-97
+   // pre-fork to pin the refusal at every entry point.
    int i_which = op.which();
    uint64_t u_which = uint64_t( i_which );
    FC_ASSERT( i_which >= 0, "Negative operation tag in operation ${op}", ("op",op) );

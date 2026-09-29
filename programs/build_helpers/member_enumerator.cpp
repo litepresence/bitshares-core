@@ -29,6 +29,25 @@
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/balance_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
+// E-05: H2 object headers for API-doc coverage. New OPERATIONS need no
+// registry update anywhere: the wallet prototype map iterates the operation
+// static_variant dynamically (wallet_api_impl::init_prototype_ops walks
+// op.count()/set_which, so tags 83-97 appear automatically), the JS binding
+// generator does the same (programs/js_operation_serializer/main.cpp:396-421
+// loops op.count()/set_which and serializer<static_variant>::init visits
+// every reflected op, so the UI serializer picks up tags 83-97 with no
+// registry edit), and this enumerator walks signed_block the same way
+// (process_class over the variant visits every reflected op). These object
+// includes keep the member walker able to descend into H2 state types
+// referenced by the new ops/objects exactly like the legacy chain objects
+// above. Stealth headers are intentionally absent: they live on the G1
+// branch (merge task), and no stealth op exists in this tree.
+#include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/challenge_object.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/vault_object.hpp>
+#include <graphene/chain/winddown_object.hpp>
 #include <iostream>
 
 using namespace graphene::chain;

@@ -311,6 +311,74 @@ void h2e_fast_reject_from_genesis( database_fixture& f, object_id_type target )
    }
 }
 
+/// Votes a sustain supermajority from the genesis seated set (BPS-constant
+/// threshold mirroring the evaluator's supermajority helper).
+void h2e_sustain_from_genesis( database_fixture& f, object_id_type target )
+{
+   const uint64_t n = f.db.get_index_type<committee_member_index>().indices().size();
+   BOOST_REQUIRE( n > 0 );
+   const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
+   for( uint64_t i = 0; i < need; ++i )
+   {
+      const auto& acct = f.get_account( string( "init" ) + fc::to_string( i ) );
+      if( f.db.get_balance( acct.get_id(), asset_id_type() ).amount < share_type( 1000000 ) )
+         f.fund( acct, asset( 1000000 ) );
+      h2e_vote( f, acct.get_id(), f.init_account_priv_key, target,
+                GRAPHENE_H2_DISPUTE_SUSTAIN );
+   }
+}
+
+/// Votes an exonerate supermajority from the genesis seated set.
+void h2e_exonerate_from_genesis( database_fixture& f, object_id_type target )
+{
+   const uint64_t n = f.db.get_index_type<committee_member_index>().indices().size();
+   BOOST_REQUIRE( n > 0 );
+   const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
+   for( uint64_t i = 0; i < need; ++i )
+   {
+      const auto& acct = f.get_account( string( "init" ) + fc::to_string( i ) );
+      if( f.db.get_balance( acct.get_id(), asset_id_type() ).amount < share_type( 1000000 ) )
+         f.fund( acct, asset( 1000000 ) );
+      h2e_vote( f, acct.get_id(), f.init_account_priv_key, target,
+                GRAPHENE_H2_DISPUTE_EXONERATE );
+   }
+}
+
+/// Committee oracle_unfreeze through the price-leg op (throws on refusal).
+void h2e_committee_unfreeze(
+      database_fixture& f, account_id_type unfreezer, const fc::ecc::private_key& key,
+      oracle_id_type oid )
+{
+   oracle_unfreeze_operation uop;
+   uop.unfreezer = unfreezer;
+   uop.oracle    = oid;
+   signed_transaction tx;
+   tx.operations.push_back( uop );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+/// Owner frozen-flag update through oracle_update (throws on refusal).
+void h2e_owner_set_frozen(
+      database_fixture& f, account_id_type owner, const fc::ecc::private_key& key,
+      oracle_id_type oid, bool frozen )
+{
+   oracle_update_operation uop;
+   uop.owner     = owner;
+   uop.oracle_id = oid;
+   oracle_options opts = oid( f.db ).options;
+   opts.frozen = frozen;
+   uop.new_options = opts;
+   signed_transaction tx;
+   tx.operations.push_back( uop );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
 void h2e_freeze(
       database_fixture& f, account_id_type freezer, const fc::ecc::private_key& key,
       vault_id_type vault, oracle_id_type oracle )
@@ -1622,6 +1690,441 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
    PUSH_TX( db, htx2 );
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount
                 == carol_before + share_type( 1000000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// R3-01: tripwire reopen never clears a guilty oracle; committee unfreeze
+/// refuses while the deviation ladder holds the pair (documented coherence
+/// choice: refuse, never split oracle-live/door-shut), then clears after the
+/// wire reopens. Two producers — bob accused and sustained, carol bonded and
+/// live — so the feed leg survives the sustain slash and clean windows can
+/// actually evaluate.
+BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committee_clears )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(sam) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( sam, asset( 4000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   const asset_id_type pairp = h2e_create_uia( *this, alice_id, alice_private_key, "R301" );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2e_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS,
+         pairp );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "R301.USD", bts_ref, usd_ref, opts );
+   const auto vbb = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, oid, vbb, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   const auto vbc = h2e_make_cdd_vesting( *this, carol_id, carol_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, carol_id, carol_private_key, oid, vbc, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   // Canonical binding pinned, then unfrozen for the test (binding persists).
+   h2e_freeze( *this, alice_id, alice_private_key, vid, oid );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   const asset_id_type s1 = h2e_create_uia( *this, sam_id, sam_private_key, "R3S1" );
+   const asset_id_type s2 = h2e_create_uia( *this, sam_id, sam_private_key, "R3S2" );
+   const liquidity_pool_id_type pool1_id = create_liquidity_pool(
+         sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
+   const liquidity_pool_id_type pool2_id = create_liquidity_pool(
+         sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   deposit_to_liquidity_pool( sam_id, pool1_id,
+                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+   deposit_to_liquidity_pool( sam_id, pool2_id,
+                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+   auto trade_both = [&]( int64_t sell_p, int64_t tweak )
+   {
+      exchange_with_liquidity_pool( sam_id, pool1_id,
+                                    asset( sell_p + tweak, pairp ),
+                                    asset( 1, asset_id_type() ) );
+      exchange_with_liquidity_pool( sam_id, pool2_id,
+                                    asset( sell_p - tweak, pairp ),
+                                    asset( 1, asset_id_type() ) );
+   };
+   auto pass_window = [&]()
+   {
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+      generate_block();
+   };
+
+   // Accused print, then sustain: guilty freeze with zero open disputes.
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+   const oracle_dispute_id_type did = h2e_post_dispute(
+         *this, sam_id, sam_private_key, oid, bob_id, accused, 0,
+         h2e_evidence( "r301-sustain" ) );
+   h2e_sustain_from_genesis( *this, object_id_type( did ) );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+   // Fresh block before the window phase: identical republish txs in one
+   // block would trip duplicate_transaction, never the gate under test.
+   generate_block();
+
+   // Window 1: aligned market on the surviving carol feed — clean, no halt,
+   // and the guilty freeze is untouched by the clean wire.
+   h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
+   trade_both( 2000000, 1 );
+   pass_window();
+   BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage, 0u );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // Window 2: dislocate to 200 vs feed 100 -> breach -> DEBT halt.
+   for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
+   {
+      const liquidity_pool_object& pool = pid( db );
+      const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
+      withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
+      deposit_to_liquidity_pool( sam_id, pid,
+                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+   }
+   h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
+   trade_both( 100000000, 5 );
+   pass_window();
+   BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
+                        GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
+   BOOST_REQUIRE_EQUAL( vid( db ).tripwire_door_hold, true );
+
+   // Committee unfreeze REFUSED while the ladder holds the pair (coherence:
+   // refuse, never split oracle-live/door-shut).
+   try {
+      h2e_committee_unfreeze( *this, alice_id, alice_private_key, oid );
+      BOOST_FAIL( "committee unfreeze cleared a tripwire-held oracle" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK( e.to_detail_string().find( "tripwire" ) != std::string::npos );
+   }
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+   // Owner path stays refused on the guilty history (R-02 pin, unchanged).
+   BOOST_CHECK_THROW( h2e_owner_set_frozen( *this, alice_id, alice_private_key, oid, false ),
+                      fc::exception );
+
+   // Windows 3-4: the feed tells the truth again (tracks pool marginals, so
+   // restoration is exact by construction — the ladder-test pattern) -> two
+   // clean windows reopen the STAGE while the GUILTY oracle stays frozen:
+   // the pre-R3-01 bypass (open_disputes == 0 alone) would have cleared it
+   // here.
+   for( int w = 0; w < 2; ++w )
+   {
+      const liquidity_pool_object& p1 = pool1_id( db );
+      h2e_publish( *this, oid, carol_id, carol_private_key,
+                   p1.balance_a.value, p1.balance_b.value );
+      trade_both( 100000000, 21 + w );
+      pass_window();
+   }
+   const tripwire_state_object* tw = h2e_find_tripwire( *this, pairp );
+   BOOST_REQUIRE( tw != nullptr );
+   BOOST_CHECK_EQUAL( tw->halt_stage, 0u );
+   BOOST_CHECK_EQUAL( tw->redemptions_halted, false );
+   BOOST_CHECK_EQUAL( vid( db ).tripwire_door_hold, false );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false ); // healthy, no open challenges
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true ); // R3-01: guilty stays
+
+   // Window 5: a third clean window with no committee action changes nothing.
+   {
+      const liquidity_pool_object& p1 = pool1_id( db );
+      h2e_publish( *this, oid, carol_id, carol_private_key,
+                   p1.balance_a.value, p1.balance_b.value );
+      trade_both( 100000000, 25 );
+      pass_window();
+   }
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // Committee unfreeze clears now that the stage has cleared.
+   h2e_committee_unfreeze( *this, alice_id, alice_private_key, oid );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+} FC_LOG_AND_RETHROW() }
+
+/// R3-01 owner-lockout pin: an EXONERATED past is not guilty history, so a
+/// Track A owner freeze still clears through oracle_update (resolution-
+/// scoped check, never whole-history; dispute objects persist but do not
+/// permanently lock owners out).
+BOOST_AUTO_TEST_CASE( exonerated_oracle_remains_owner_updatable )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "R301X.USD", bts_ref, usd_ref, opts );
+   h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   const oracle_dispute_id_type did = h2e_post_dispute(
+         *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+         h2e_evidence( "r301-exonerate" ) );
+   h2e_exonerate_from_genesis( *this, object_id_type( did ) );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXONERATED );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, false );
+
+   // Track A owner freeze, then owner clear: allowed despite the terminal
+   // EXONERATED history standing in the (never-erased) dispute index.
+   h2e_owner_set_frozen( *this, alice_id, alice_private_key, oid, true );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   h2e_owner_set_frozen( *this, alice_id, alice_private_key, oid, false );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+
+   // Owner policy control is intact too (producer-set update succeeds).
+   {
+      oracle_update_operation uop;
+      uop.owner     = alice_id;
+      uop.oracle_id = oid;
+      oracle_options live = oid( db ).options;
+      live.producers[bob_id] = oracle_producer_entry( 1 );
+      uop.new_options = live;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+      BOOST_CHECK( oid( db ).options.producers.find( bob_id )
+                   != oid( db ).options.producers.end() );
+   }
+} FC_LOG_AND_RETHROW() }
+
+/// R3-02 adversarial: a bonded live producer with weight 0 backs nothing —
+/// the H2 gate fails closed on it. Production reality: oracle_options
+/// validate refuses weight 0 at create AND update (oracle.cpp:146 — "remove
+/// the producer instead"), so no consensus op can place such an entry; the
+/// gate's weight>0 check is the second layer, pinned here by forcing the
+/// state white-box (V-08 headroom precedent), never by weakening a gate.
+BOOST_AUTO_TEST_CASE( weight_zero_bonded_producer_does_not_satisfy_gate )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   // First layer pins: weight 0 is refused at create (and update, same
+   // validate), so the forced state below is unreachable by consensus ops.
+   {
+      oracle_options zero_opts;
+      zero_opts.producers[bob_id] = oracle_producer_entry( 0 );
+      oracle_create_operation cop;
+      cop.owner   = alice_id;
+      cop.name    = "R302Z.USD";
+      cop.base    = bts_ref;
+      cop.quote   = usd_ref;
+      cop.series  = { oracle_series( oracle_series_kind::mid,
+                                     oracle_series_rounding::unspecified ) };
+      cop.options = zero_opts;
+      signed_transaction tx;
+      tx.operations.push_back( cop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "R302.USD", bts_ref, usd_ref, opts );
+   const auto vb = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, oid, vb, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   // Control: bonded weight-1 live producer satisfies the H2 read.
+   BOOST_REQUIRE( oid( db ).consumed_value.valid() );
+   BOOST_REQUIRE( h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+
+   // Adversarial state, forced white-box: the bonded live producer's weight
+   // drops to 0 (same bond, same live submission, same producer entry).
+   db.modify( oid( db ), [&]( oracle_object& o ) {
+      o.options.producers[bob_id].weight = 0;
+   } );
+   // H1 liveness is untouched (aggregation already ran; weight is not
+   // re-read until the next publish)...
+   BOOST_REQUIRE( oid( db ).consumed_value.valid() );
+   // ...but the H2 gate refuses: weight 0 backs nothing.
+   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+
+   // Restoring the weight restores the read (the refusal is the weight,
+   // not the bond or the submission).
+   db.modify( oid( db ), [&]( oracle_object& o ) {
+      o.options.producers[bob_id].weight = 1;
+   } );
+   BOOST_CHECK( h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+} FC_LOG_AND_RETHROW() }
+
+/// X-06 H2-side order pin: expiry -> vault top-up -> tripwire reopen, pinned
+/// through joint outcomes (db_maint.cpp). Phase A: the vault sweep respects
+/// a tripwire door hold it does not own (paused wire, healthy coverage:
+/// vault stays frozen); only tripwire reopen clears it. Phase B: an expiry
+/// freeze lands before the reopen read, so clean windows keep an
+/// expiry-frozen oracle frozen until committee unfreeze.
+BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(sam) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( sam, asset( 4000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   const asset_id_type pairp = h2e_create_uia( *this, alice_id, alice_private_key, "X06" );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2e_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS,
+         pairp );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "X06.USD", bts_ref, usd_ref, opts );
+   const auto vb = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, oid, vb, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   h2e_freeze( *this, alice_id, alice_private_key, vid, oid );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   const asset_id_type s1 = h2e_create_uia( *this, sam_id, sam_private_key, "X6S1" );
+   const asset_id_type s2 = h2e_create_uia( *this, sam_id, sam_private_key, "X6S2" );
+   const liquidity_pool_id_type pool1_id = create_liquidity_pool(
+         sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
+   const liquidity_pool_id_type pool2_id = create_liquidity_pool(
+         sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   deposit_to_liquidity_pool( sam_id, pool1_id,
+                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+   deposit_to_liquidity_pool( sam_id, pool2_id,
+                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+   auto trade_both = [&]( int64_t sell_p, int64_t tweak )
+   {
+      exchange_with_liquidity_pool( sam_id, pool1_id,
+                                    asset( sell_p + tweak, pairp ),
+                                    asset( 1, asset_id_type() ) );
+      exchange_with_liquidity_pool( sam_id, pool2_id,
+                                    asset( sell_p - tweak, pairp ),
+                                    asset( 1, asset_id_type() ) );
+   };
+   auto pass_window = [&]()
+   {
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+      generate_block();
+   };
+
+   // Phase A: halt at DEBT through dislocation (two windows: fill, then
+   // breach on the combined median, mirroring the ladder test).
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   trade_both( 2000000, 1 );
+   pass_window();
+   for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
+   {
+      const liquidity_pool_object& pool = pid( db );
+      const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
+      withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
+      deposit_to_liquidity_pool( sam_id, pid,
+                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+   }
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   trade_both( 100000000, 5 );
+   pass_window();
+   BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
+                        GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
+   BOOST_REQUIRE_EQUAL( vid( db ).tripwire_door_hold, true );
+
+   // A paused sweep (no new samples, no feed advance): the vault sweep runs
+   // over healthy coverage but must NOT clear the door-held freeze — the
+   // tripwire owns that door, and only its reopen clears it.
+   pass_window();
+   BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
+                        GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
+   BOOST_CHECK_EQUAL( vid( db ).tripwire_door_hold, true );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // Two clean windows reopen everything (no guilty history anywhere).
+   // The paused sweep above rotated the ring to empty, so three truthful
+   // windows are needed: the first refills (pause), the next two build the
+   // reopen streak (coincident-test precedent).
+   for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
+   {
+      const liquidity_pool_object& pool = pid( db );
+      const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
+      withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
+      deposit_to_liquidity_pool( sam_id, pid,
+                                 asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+   }
+   for( int w = 0; w < 3; ++w )
+   {
+      h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+      trade_both( 2000000, 31 + w );
+      pass_window();
+   }
+   BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage, 0u );
+   BOOST_CHECK_EQUAL( vid( db ).tripwire_door_hold, false );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+
+   // Phase B: an open dispute expires in-sweep ahead of the tripwire read.
+   // Keep the wire clean and the feed live throughout.
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+   const oracle_dispute_id_type did = h2e_post_dispute(
+         *this, sam_id, sam_private_key, oid, bob_id, accused, 0,
+         h2e_evidence( "x06-expiry" ) );
+   trade_both( 2000000, 41 );
+   generate_blocks( did( db ).round_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+
+   // Two clean windows after expiry: the stage logic runs (nothing held —
+   // Phase A cleared it) but the expiry freeze persists past the reopen
+   // read, pinning expiry-before-reopen. Committee unfreeze then clears.
+   for( int w = 0; w < 2; ++w )
+   {
+      h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+      trade_both( 2000000, 51 + w );
+      pass_window();
+   }
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+   h2e_committee_unfreeze( *this, alice_id, alice_private_key, oid );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

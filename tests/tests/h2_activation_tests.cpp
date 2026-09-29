@@ -173,22 +173,29 @@ BOOST_FIXTURE_TEST_SUITE( h2_activation_tests, database_fixture )
 /// PRICE with distinct heights. Inversion (and equality) is refused by the
 /// predicate every H2 gate helper asserts, so a mis-scheduled configuration
 /// can never stage custody before judgment machinery or price judgment
-/// before bonded custody.
+/// before bonded custody. R3-04: the two-argument shim is removed, so even
+/// this pin goes through the full three-leg form.
 BOOST_AUTO_TEST_CASE( gateway_activation_precedes_price_by_rule )
 {
    // Authoritative three-leg ordering (E-03: BONDS leg included).
    BOOST_CHECK( h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
                                  HARDFORK_H2_GATEWAY_TIME,
                                  HARDFORK_H2_PRICE_TIME ) );
-   // Legacy two-leg form still holds gateway<price.
-   BOOST_CHECK( h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME, HARDFORK_H2_PRICE_TIME ) );
-   BOOST_CHECK( !h2_legs_ordered( HARDFORK_H2_PRICE_TIME, HARDFORK_H2_GATEWAY_TIME ) );
-   BOOST_CHECK( !h2_legs_ordered( HARDFORK_H2_GATEWAY_TIME, HARDFORK_H2_GATEWAY_TIME ) );
+   // Gateway/price inversion and collapse refuse through the full form.
+   BOOST_CHECK( !h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                  HARDFORK_H2_PRICE_TIME,
+                                  HARDFORK_H2_GATEWAY_TIME ) );
+   BOOST_CHECK( !h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                  HARDFORK_H2_GATEWAY_TIME,
+                                  HARDFORK_H2_GATEWAY_TIME ) );
 }
 
-/// E-03 ordering matrix: every inversion or collapse of BONDS<GATEWAY<PRICE
-/// is refused by the three-leg predicate, so all H2 gates fail closed
-/// together (never silently staged).
+/// E-03 ordering matrix (R3-04 completed): every inversion or collapse of
+/// BONDS<GATEWAY<PRICE is refused by the three-leg predicate, so all H2
+/// gates fail closed together (never silently staged). Real heights cover
+/// all six distinct permutations; synthetic times pin every equality shape
+/// (first-two, last-two, first==last, all-equal) since B==P-style collapses
+/// are inexpressible with the distinct configured heights.
 BOOST_AUTO_TEST_CASE( h2_bonds_gateway_price_ordering_matrix )
 {
    const auto B = HARDFORK_H2_BONDS_TIME;
@@ -198,14 +205,39 @@ BOOST_AUTO_TEST_CASE( h2_bonds_gateway_price_ordering_matrix )
    BOOST_CHECK( B < G );
    BOOST_CHECK( G < P );
    BOOST_CHECK( h2_legs_ordered( B, G, P ) );
-   // Inversions and collapses all refuse.
+   // All five inversions refuse, including the R3-04 additions (G,P,B) and
+   // (P,B,G).
    BOOST_CHECK( !h2_legs_ordered( G, B, P ) );
    BOOST_CHECK( !h2_legs_ordered( B, P, G ) );
    BOOST_CHECK( !h2_legs_ordered( P, G, B ) );
+   BOOST_CHECK( !h2_legs_ordered( G, P, B ) );
+   BOOST_CHECK( !h2_legs_ordered( P, B, G ) );
+   // Collapses over real heights refuse.
    BOOST_CHECK( !h2_legs_ordered( B, B, P ) );
    BOOST_CHECK( !h2_legs_ordered( B, G, G ) );
    BOOST_CHECK( !h2_legs_ordered( B, B, B ) );
    BOOST_CHECK( !h2_legs_ordered( G, G, P ) );
+   BOOST_CHECK( !h2_legs_ordered( G, G, G ) );
+   BOOST_CHECK( !h2_legs_ordered( P, P, P ) );
+   BOOST_CHECK( !h2_legs_ordered( B, B, G ) );
+   BOOST_CHECK( !h2_legs_ordered( G, P, P ) );
+   // Synthetic strictness pins (x<y && y<z, exactly): every equality shape
+   // refuses — B==P<G (t1,t2,t1), B==P>G (t1,t0,t1), B<G==P (t0,t1,t1) and
+   // the G<P collapse variants (t0,t0,t1), (t1,t1,t2) — as do first==last
+   // straddles and the all-equal point.
+   const auto t0 = fc::time_point_sec( 1000000 );
+   const auto t1 = fc::time_point_sec( 2000000 );
+   const auto t2 = fc::time_point_sec( 3000000 );
+   BOOST_CHECK( h2_legs_ordered( t0, t1, t2 ) );
+   BOOST_CHECK( !h2_legs_ordered( t1, t2, t1 ) ); // B==P<G shape
+   BOOST_CHECK( !h2_legs_ordered( t1, t0, t1 ) ); // B==P>G shape
+   BOOST_CHECK( !h2_legs_ordered( t0, t1, t1 ) ); // B<G==P shape
+   BOOST_CHECK( !h2_legs_ordered( t0, t0, t1 ) ); // B==G<P shape
+   BOOST_CHECK( !h2_legs_ordered( t1, t1, t2 ) ); // G<P collapse variant
+   BOOST_CHECK( !h2_legs_ordered( t1, t2, t2 ) ); // G<P collapse variant
+   BOOST_CHECK( !h2_legs_ordered( t0, t2, t0 ) ); // first==last straddle
+   BOOST_CHECK( !h2_legs_ordered( t2, t0, t2 ) ); // first==last straddle
+   BOOST_CHECK( !h2_legs_ordered( t1, t1, t1 ) ); // all-equal
 }
 
 /// One op per gate is refused before any leg activates: vault_register

@@ -61,13 +61,12 @@ class database;
 
 /// @return whether @p bonds strictly precedes @p gateway strictly precedes
 /// @p price. Unit-testable; every gate helper asserts it over the configured
-/// heights. The two-argument form covers gateway<price only (legacy); the
-/// three-argument form is authoritative (E-03: BONDS leg included).
+/// heights. R3-04: the legacy two-argument form is removed — no caller may
+/// assert gateway<price while bypassing the BONDS leg; the three-argument
+/// form is the only ordering predicate (E-03: BONDS leg included).
 bool h2_legs_ordered( const fc::time_point_sec& bonds,
-                      const fc::time_point_sec& gateway,
-                      const fc::time_point_sec& price );
-bool h2_legs_ordered( const fc::time_point_sec& gateway,
-                      const fc::time_point_sec& price );
+                       const fc::time_point_sec& gateway,
+                       const fc::time_point_sec& price );
 
 /// Shared primitives gate + ordering invariant.
 void h2_require_primitives( const fc::time_point_sec& now );

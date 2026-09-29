@@ -3179,6 +3179,49 @@ BOOST_AUTO_TEST_CASE( t8e_legacy_feed_path_is_untouched )
                 == GRAPHENE_DEFAULT_MAINTENANCE_COLLATERAL_RATIO );
 } FC_LOG_AND_RETHROW() }
 
+/// V-02 (audit-round-2): bounded oracle state has attack-input coverage. The 65th
+/// subscriber bind is refused (asset_evaluator.cpp:914); the delay queue needs no
+/// refusal path by design — it self-trims to GRAPHENE_ORACLE_GUARD_MAX_PENDING
+/// with time-bucketed sampling — so the test pins the bound instead.
+BOOST_AUTO_TEST_CASE( t8f_subscriber_cap_refuses_and_pending_queue_bounded )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(carol) );
+   fund( alice ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   opts.guard_delay         = true;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CAP", opts, usd_ref );
+
+   // 64 subscribers bind cleanly; the 65th is refused and the set stays at 64.
+   for( int i = 0; i < 64; ++i )
+   {
+      const auto mia_id = make_mapped_mia( "CAP" + std::to_string( i ),
+                                           alice_id, alice_private_key, usd_ref );
+      bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0 );
+   }
+   BOOST_REQUIRE_EQUAL( oid(db).subscribers.size(), 64u );
+   const auto over_id = make_mapped_mia( "CAPOVER", alice_id, alice_private_key, usd_ref );
+   BOOST_CHECK_THROW( bind_explicit( over_id(db), alice_id, alice_private_key, oid, 0 ),
+                      fc::exception );
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 64u );
+
+   // 20 publishes across 20 time buckets: the queue never exceeds its bound.
+   for( int i = 0; i < 20; ++i )
+   {
+      guard_publish( oid, carol_id, carol_private_key, 100 + i );
+      generate_blocks( db.head_block_time() + 300 );
+   }
+   BOOST_CHECK( oid(db).pending_queue.size() <= 16u );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE( oracle_guard_wire_tests )

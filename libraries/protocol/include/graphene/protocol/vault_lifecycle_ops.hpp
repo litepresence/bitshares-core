@@ -79,14 +79,14 @@ namespace graphene { namespace protocol {
        account_id_type rotator;       ///< Pays the fee; must sit in the old authority
        vault_id_type   vault;         ///< Target vault; must exist
        authority       new_authority; ///< Replaces vault_authority in full
-       optional<string> memo;         ///< Rotation rationale carrier; never authorizes mint
-       extensions_type extensions;    ///< Appended-last rule
-       /// Old-set co-signers (H2d full-threshold check, appended after
-       /// extensions per the oracle_options precedent: pre-existing wire
-       /// positions are unchanged). Each named account's active authority is
-       /// signature-required; the evaluator sums rotator + co-signer weights
-       /// against the old threshold.
-       flat_set<account_id_type> co_signers;
+        optional<string> memo;         ///< Rotation rationale carrier; never authorizes mint
+        /// Old-set co-signers (E-04 audit-round-2: moved before extensions so the
+        /// append-last rule holds; pre-activation wire change, unactivated tags
+        /// shift freely). Each named account's active authority is
+        /// signature-required; the evaluator sums rotator + co-signer weights
+        /// against the old threshold.
+        flat_set<account_id_type> co_signers;
+        extensions_type extensions;    ///< Appended-last rule
 
        account_id_type fee_payer()const { return rotator; }
        void            validate()const;
@@ -203,7 +203,7 @@ FC_REFLECT( graphene::protocol::pair_freeze_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::winddown_claim_operation::fee_params_t, (fee) )
 
 FC_REFLECT( graphene::protocol::vault_rotate_operation,
-            (fee)(rotator)(vault)(new_authority)(memo)(extensions)(co_signers) )
+             (fee)(rotator)(vault)(new_authority)(memo)(co_signers)(extensions) )
 FC_REFLECT( graphene::protocol::vault_bond_release_operation,
             (fee)(owner)(bond)(extensions) )
 FC_REFLECT( graphene::protocol::vault_resolve_operation,

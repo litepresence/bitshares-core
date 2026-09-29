@@ -261,6 +261,43 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.extensions.value.oracle_guard_delay_sec.valid(),
                    "Unable to set the oracle guard delay before the oracle hardfork");
       }
+      // E-01 (audit-round-2): H2 fee-schedule votes are gated by leg, mirroring the
+      // execution pre-checks below (primitives/BONDS, gateway, price). Without this,
+      // a committee could price H2 fees before the code activates.
+      if (!HARDFORK_H2_BONDS_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_challenge_operation>(),
+                   "Unable to define fees for vault challenges prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_dispute_operation>(),
+                   "Unable to define fees for oracle disputes prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_dispute_escalate_operation>(),
+                   "Unable to define fees for dispute escalation prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<challenge_vote_operation>(),
+                   "Unable to define fees for challenge votes prior to the H2 bonds hardfork");
+      }
+      if (!HARDFORK_H2_GATEWAY_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_register_operation>(),
+                   "Unable to define fees for vault registration prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_bond_lock_operation>(),
+                   "Unable to define fees for vault bond locks prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_rotate_operation>(),
+                   "Unable to define fees for vault rotation prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_bond_release_operation>(),
+                   "Unable to define fees for vault bond release prior to the H2 gateway hardfork");
+      }
+      if (!HARDFORK_H2_PRICE_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_bond_lock_operation>(),
+                   "Unable to define fees for oracle bond locks prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_bond_release_operation>(),
+                   "Unable to define fees for oracle bond release prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_resolve_operation>(),
+                   "Unable to define fees for vault resolution prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pair_freeze_operation>(),
+                   "Unable to define fees for pair freeze prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<winddown_claim_operation>(),
+                   "Unable to define fees for wind-down claims prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_fallback_set_operation>(),
+                   "Unable to define fees for oracle fallback prior to the H2 price hardfork");
+      }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
       FC_ASSERT( block_time >= HARDFORK_CORE_1468_TIME, "Not allowed until hardfork 1468" );

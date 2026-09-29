@@ -35,6 +35,7 @@
 
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/protocol/stealth.hpp>
+#include <graphene/protocol/transfer.hpp>
 
 #include <graphene/chain/stealth_proof.hpp>
 #include <graphene/chain/stealth_object.hpp>
@@ -704,7 +705,69 @@ std::vector<char> T_bp_prove( const fc::ecc::commitment_type& C,
 
 } // anonymous namespace
 
+// G1c parity economics (BSIP-2 §2): pre-parity (G1b-era) cases price blind
+// fee schedules at zero and pay zero fees, so every blind op carries a full
+// cost-anchor gap (1M CORE per transfer_to_blind output under the pinned
+// anchor). Seeding the per-asset parity pool to `need` (top-up style, so
+// exact sizing is unnecessary) keeps those cases on the subsidized path —
+// they exercise their cryptographic assertions instead of floating to cost.
+// The float rule itself is covered by the parity_* cases below. Seeding is
+// supply-neutral (fee legs mirror pay_market_fees exactly: the nominal never
+// moves inside pay_market_fees, so only the fee amount leaves the payer).
+static void g1c_seed_pool( database& db, account_id_type payer,
+                           const asset_object& core, int64_t need )
+{
+   const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+   auto itr = st.parity_pool.find( core.get_id() );
+   share_type have = ( itr == st.parity_pool.end() ) ? share_type( 0 ) : itr->second;
+   if( have.value >= need )
+      return;
+   int64_t fee = ( need - have.value ) * 20; // 5% routes to the pool, exact
+   db.adjust_balance( payer, core.amount( -fee ) );
+   db.pay_market_fees( nullptr, core, core.amount( fee ), true, core.amount( fee ) );
+}
+
 BOOST_FIXTURE_TEST_SUITE( g1_stealth_tests, database_fixture )
+
+/// V-03 (audit-round-2): every stealth operation must be refused before the
+/// hardfork, or a node running this code could produce a block that a node
+/// running the previous release cannot validate. The shape below passes
+/// validate() (11 distinct members, 33-byte image, well-sized sig, V1 output
+/// with proof), so the refusal proves the consensus gate in do_evaluate fires
+/// first (stealth_evaluator.cpp:324), not a shape check.
+BOOST_AUTO_TEST_CASE( stealth_ops_are_refused_before_the_hardfork )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+
+   stealth_transfer_operation op;
+   op.fee = core.amount( 0 );
+   op.asset_id = core.get_id();
+   op.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   stealth_ring_input in;
+   for( int i = 0; i < 11; ++i )
+   {
+      std::vector<unsigned char> raw( 33, 0 );
+      raw[32] = char( i + 1 );
+      in.ring.push_back( T_commitment( raw ) );
+   }
+   in.key_image.assign( 33, 0 );
+   in.key_image[0] = 2;
+   in.ring_sig.assign( 32 + 96 * 11, 0 );
+   op.inputs = { in };
+   stealth_blind_output out;
+   out.commitment = T_commitment( std::vector<unsigned char>( 33, 1 ) );
+   out.range_proof.assign( 64, 0 );
+   out.owner = authority( 1, dan_id, 1 );
+   op.outputs = { out };
+   BOOST_CHECK_NO_THROW( op.validate() );
+
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   set_expiration( db, tx );
+   // No signatures: temp fee payer (threshold 0) + ring authorization.
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+} FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( ring_vectors_11_and_16 )
 { try {
@@ -830,7 +893,17 @@ BOOST_AUTO_TEST_CASE( negative_mint_rejected )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 100000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 200000000 ) );
+   // G1c parity economics (BSIP-2 §2): schedules are zero, so the forgery
+   // setup below carries a full cost-anchor gap; seed the pool so the
+   // range-proof check (not the float rule) is what rejects the forgery.
+   // NOTE: the funding transfer above opens a pending-tx undo session, so
+   // seal it first — direct db modifications made while pushed transactions
+   // are pending are rolled back by the next generate_block (which rewinds
+   // to head and replays). Everything below follows the same
+   // seal-then-modify discipline.
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 5000000 );
 
    // Forgery with BALANCED sums but MISMATCHED range proofs: in 1000,
    // outs 600 + 400 (sums cancel mod n, so validate()'s verify_sum passes),
@@ -912,7 +985,13 @@ BOOST_AUTO_TEST_CASE( legacy_range_proof_enforced )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 100000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 200000000 ) );
+   // G1c parity economics (BSIP-2 §2): seed the pool so the honest setup and
+   // the tampered-proof rejection below both run past the float rule — the
+   // sound-proof check stays the deciding assertion. Sealed first: direct
+   // modifies are lost if pushed transactions are still pending (see above).
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 5000000 );
    // Honest flow with REAL proofs keeps working post-fork (no regression).
    transfer_to_blind_operation to_blind;
    to_blind.amount = core.amount( 1000 );
@@ -980,8 +1059,17 @@ BOOST_AUTO_TEST_CASE( decoy_rules_enforced )
    // the floor on transfer_to_blind, which the header never gated.
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 100000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 200000000 ) );
    BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 0u );
+   // G1c parity economics (BSIP-2 §2): seed the parity pool (fee accounting,
+   // not decoy depth — the depth assertion above is unaffected) so the
+   // deposit below proves "deposits always allowed" on the subsidized path
+   // and the thin spend still throws on the pool FLOOR (funded pool covers
+   // its gap, so the floor — not the float rule — rejects it). Sealed first
+   // (see the seal-then-modify note in negative_mint_rejected): the seed
+   // must survive the deposit's replay at block production.
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 5000000 );
    transfer_to_blind_operation ttb;
    ttb.amount = core.amount( 500 );
    ttb.from = dan.id;
@@ -1036,7 +1124,12 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 10000000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
+   // G1c parity economics (BSIP-2 §2): 11 deposits (1M gap each) + the ring
+   // spend (1.5M) run subsidized; seed once so the kernel assertions hold.
+   // Sealed first (see note above).
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 15000000 );
    // Fund 11 post-fork outputs (4/4/3) spread over three 100-block windows
    // so the 40%-skew rule is satisfiable; then age them 25h in one jump.
    std::vector<fc::sha256> blinds;
@@ -1188,7 +1281,13 @@ BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 10000000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 500000000 ) );
+   // G1c parity economics (BSIP-2 §2): 11 deposits (1M gap each) + 3 kernel
+   // attempts (1.5M each) run subsidized; seed once so the kernel/binding
+   // checks (not the float rule) decide every attempt. Sealed first (see
+   // the seal-then-modify note in negative_mint_rejected).
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 20000000 );
    // Fund 11 post-fork outputs (4/4/3 over three skew windows), age 25h.
    std::vector<fc::sha256> blinds;
    std::vector<fc::ecc::commitment_type> commits;
@@ -1378,7 +1477,11 @@ BOOST_AUTO_TEST_CASE( per_block_cap_enforced )
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK, 100u );
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 100000000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 200000000 ) );
+   // G1c cost path (BSIP-2 §2): 100+ deposits in ONE block exceed the
+   // 50-subsidy cap, so pay the pinned cost anchor (5 + 5*1 BTS = 1M CORE)
+   // per deposit from transparent funds — no pool, no subsidy-cap units,
+   // and the 100-op blind budget still binds at the 101st exactly as before.
    // Pre-fill a deep pool first (11 honest blinds, sealed per block so the
    // cap under test never trips during setup).
    for( int i = 0; i < 11; ++i )
@@ -1389,6 +1492,7 @@ BOOST_AUTO_TEST_CASE( per_block_cap_enforced )
       auto k = fc::ecc::private_key::generate();
       blind_output o;
       o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      ttb.fee = core.amount( 1000000 ); // G1c cost path (pinned anchor, n=1)
       auto B = T_secret( "g1b-prefill-b|" + std::to_string( i ) );
       auto N = T_secret( "g1b-prefill-n|" + std::to_string( i ) );
       o.commitment = fc::ecc::blind( B, 100 );
@@ -1410,8 +1514,9 @@ BOOST_AUTO_TEST_CASE( per_block_cap_enforced )
       ttb.from = dan.id;
       auto k = fc::ecc::private_key::generate();
       blind_output o;
-      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
-      auto B = T_secret( "g1b-cap-b|" + std::to_string( i ) );
+         o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+         ttb.fee = core.amount( 1000000 ); // G1c cost path (pinned anchor, n=1)
+         auto B = T_secret( "g1b-cap-b|" + std::to_string( i ) );
       auto N = T_secret( "g1b-cap-n|" + std::to_string( i ) );
       o.commitment = fc::ecc::blind( B, 100 );
       o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
@@ -1434,6 +1539,7 @@ BOOST_AUTO_TEST_CASE( per_block_cap_enforced )
    o.commitment = fc::ecc::blind( B, 100 );
    o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
    over.blinding_factor = B;
+   over.fee = core.amount( 1000000 ); // G1c cost path: budget (not float) rejects
    over.outputs = { o };
    trx.operations = { over };
    sign( trx, dan_private_key );
@@ -1448,7 +1554,14 @@ BOOST_AUTO_TEST_CASE( tripwire_fires_on_divergence )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 100000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
+   // G1c parity economics (BSIP-2 §2): seed the pool so the 11 honest blinds
+   // run subsidized; the halted-op rejection below still throws on the blind
+   // gate (checked before any fee logic), and teardown supply math counts
+   // the pool exactly. Sealed first (see the seal-then-modify note in
+   // negative_mint_rejected).
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 15000000 );
    for( int i = 0; i < 11; ++i )
    {
       transfer_to_blind_operation ttb;
@@ -1594,7 +1707,12 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
    BOOST_CHECK( stealth_turnstile_g2_time( db ) == stealth_v1_sunset_time( db ) );
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 100000 ) );
+   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
+   // G1c parity economics (BSIP-2 §2): 11 deposits (1M gap each) + the
+   // turnstile migration (1M gap, fee-10 conservation-bound) run subsidized.
+   // Sealed first (see the seal-then-modify note in negative_mint_rejected).
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 15000000 );
    // Fund V1 blind balances pre-sunset (11 for the pool floor).
    auto k = fc::ecc::private_key::generate();
    authority own( 1, public_key_type( k.get_public_key() ), 1 );
@@ -1631,6 +1749,28 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
    generate_blocks( stealth_v1_sunset_time( db ) + 10 );
    generate_block();
    set_expiration( db, trx );
+   // G1c parity economics (BSIP-2 §2): the ~1-year jump lapses the 6-month
+   // parity review, so subsidies float to cost by rule. A single-member
+   // committee review re-arms the pool-funded path the migration below
+   // exercises (missed quarterly reports halt funding only — the pre-seeded
+   // pool keeps paying). The legacy-spend rejection above needs no subsidy:
+   // the sunset gate throws before any fee logic.
+   ACTORS( (alice) );
+   upgrade_to_lifetime_member( alice );
+   create_committee_member( alice );
+   generate_block();
+   {
+      parity_review_operation r;
+      r.voter = alice.id;
+      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      r.note = "parity review ahead of turnstile migration window";
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, alice_private_key );
+      PUSH_TX( db, tx );
+   }
+   set_expiration( db, trx );
    // Legacy V1 spend past sunset is spend-only-via-turnstile.
    {
       transfer_from_blind_operation x;
@@ -1639,7 +1779,9 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
       x.fee = core.amount( 10 );
       blind_input bi; bi.commitment = target_c; bi.owner = own;
       x.inputs = { bi };
-      x.blinding_factor = T_secret( "g1b-turn-x" );
+      // The TRUE input blind: conservation passes validate, so the V1
+      // sunset gate (not conservation) is what rejects this spend.
+      x.blinding_factor = T_blind_secret( "g1b-turn-b|0" );
       trx.operations = { x };
       sign( trx, k );
       BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
@@ -1770,7 +1912,685 @@ BOOST_AUTO_TEST_CASE( bp_plus_vectors_and_budget )
       // green: WARN keeps the target visible on every run with numbers.
       BOOST_WARN_MESSAGE( us <= 750000, "verifier budget: " << us << "us > 750000us" );
       BN_free( bs ); BN_free( bprime ); BN_free( bx ); BN_free( by ); BN_free( be );
+    }
+    // REPAIR-03 (audit-round-1 G1-06): ring-11 full-block loop alongside ring-16.
+    // Same worst-case model (100 blind txs, serial witness validation, 25%-of-3s
+    // envelope) at the floor ring size, so the WARN below covers both ends of the
+    // [11,32] shape range instead of only the top.
+    {
+       const size_t n = 11;
+       std::vector<std::vector<unsigned char>> Q;
+       for( size_t i = 0; i < n; ++i )
+          Q.push_back( T_commit( T_scalar( "g1b-bench11-b|" + std::to_string( i ) ), 500 + i ) );
+       size_t s = 4;
+       BIGNUM* bs = T_scalar( "g1b-bench11-b|4" );
+       BIGNUM* bprime = T_scalar( "g1b3-bench11-bp" );
+       std::string ms( "g1b-bench11-msg-0123456789abcde", 32 );
+       stealth_ring_input rin = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
+          Q, s, bs, 504, bprime, ms );
+       BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ) );
+       BIGNUM* bx = T_scalar( "g1b3-bench11-ex" );
+       BIGNUM* by = T_scalar( "g1b3-bench11-ey" );
+       auto Pxv = T_commit( bx, 1000 ), Cyv = T_commit( by, 990 );
+       fc::ecc::commitment_type Px = T_commitment( Pxv ), Cy = T_commitment( Cyv );
+       BIGNUM* be = BN_new();
+       BN_mod_sub( be, bx, by, T_order(), T_ctx() );
+       unsigned char beb[32]; BN_bn2binpad( be, beb, 32 );
+       fc::sha256 bex; std::copy( beb, beb + 32, (char*)bex.data() );
+       BOOST_REQUIRE( stealth_verify_excess( { Px }, { Cy }, 10, bex, err ) );
+       fc::time_point start = fc::time_point::now();
+       for( int i = 0; i < 100; ++i )
+       {
+          BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ) );
+          BOOST_REQUIRE( stealth_verify_bp_plus( 1, proof, { Cc }, err ) );
+          BOOST_REQUIRE( stealth_verify_excess( { Px }, { Cy }, 10, bex, err ) );
+       }
+       auto us = ( fc::time_point::now() - start ).count();
+       BOOST_TEST_MESSAGE( "G1b worst-case full block: 100x(bound-ring-11 + BP+1 + excess) = "
+                           << us << "us" );
+       BOOST_WARN_MESSAGE( us <= 750000, "verifier budget ring-11: " << us << "us > 750000us" );
+       BN_free( bs ); BN_free( bprime ); BN_free( bx ); BN_free( by ); BN_free( be );
+    }
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 40000000 ) );
+   // Seal-then-modify (see negative_mint_rejected): the routing legs below
+   // are direct db modifications and must survive block-production replay.
+   generate_block();
+
+   // --- fee-share routing through the single choke point (market + ---
+   // --- settlement fees both land in database::pay_market_fees)      ---
+   {
+      share_type acc0 = core.dynamic_asset_data_id( db ).accumulated_fees;
+      // Mirror the skimmed-proceeds leg so supply verification still
+      // balances: only the FEE leaves dan's balance (pay_market_fees never
+      // moves the nominal — the caller pays the seller separately).
+      db.adjust_balance( dan_id, core.amount( -1000000 ) );
+      asset got = db.pay_market_fees( nullptr, core, core.amount( 10000000 ),
+                                      true, core.amount( 1000000 ) );
+      BOOST_CHECK_EQUAL( got.amount.value, 1000000 );
+      // 5% of the 1M fee routes to the pool; the remainder accumulates.
+      BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, 500u );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto pitr = st.parity_pool.find( core_id );
+      BOOST_REQUIRE( pitr != st.parity_pool.end() );
+      BOOST_CHECK_EQUAL( pitr->second.value, 50000 );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                         ( acc0 + 950000 ).value );
+      auto ritr = st.interval_routed.find( core_id );
+      BOOST_REQUIRE( ritr != st.interval_routed.end() );
+      BOOST_CHECK_EQUAL( ritr->second.value, 50000 );
    }
+   verify_asset_supplies( db );
+
+   // --- cost-anchor math (test genesis zeroes fees: pinned governs) ---
+   {
+      BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 0 ).value,
+                         (int64_t)( 5 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+      BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 1 ).value,
+                         (int64_t)( 10 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+      BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 0 ) ).value,
+                         stealth_cost_anchor_core( db, 0 ).value );
+      BOOST_CHECK_EQUAL(
+         stealth_parity_gap_core( db, 0, stealth_cost_anchor_core( db, 0 ) ).value, 0 );
+   }
+
+   // --- deposits (cost path: pool is short by design, so the pinned ---
+   // --- anchor is paid and the pool assertions below stay exact)      ---
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   // Returns the commitment AND its blinding factor: transfer_from_blind
+   // conservation is checked at validate time as
+   //   sum(inputs) - blind(blinding_factor, amount+fee) == 0,
+   // so a withdrawal must present the INPUT's blind (not a fresh one).
+   auto deposit = [&]( const std::string& tag, int64_t amt )
+      -> std::pair<fc::ecc::commitment_type, fc::sha256> {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( amt );
+      ttb.from = dan.id;
+      blind_output o;
+      o.owner = own;
+      // G1c cost path: the pool (50k) cannot cover the 1M gap, so deposits
+      // pay the pinned anchor (n=1) from transparent funds — pool untouched.
+      ttb.fee = core.amount( 1000000 );
+      auto B = T_blind_secret( "g1c-float-b|" + tag );
+      auto N = T_secret( "g1c-float-n|" + tag );
+      o.commitment = fc::ecc::blind( B, amt );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, amt );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      return { o.commitment, B };
+   };
+   // transfer_from_blind conservation is exact at validate time (input
+   // commitment == amount + fee), so each leg below funds the precise input
+   // its withdrawal spends: A covers amount+cost (500900), B and C cover
+   // amount+parity (900). That keeps conservation green so the FEE rule —
+   // not conservation — decides every leg.
+   auto cA = deposit( "a", 500900 );
+   auto cB = deposit( "b", 900 );
+   auto cC = deposit( "c", 900 );
+   generate_block();
+
+   // Withdrawals carry no blind outputs (n = 0): gap is the full anchor
+   // (500000) against the zeroed schedule. The pool holds 50000 — short.
+   auto withdraw = [&]( const std::pair<fc::ecc::commitment_type, fc::sha256>& in,
+                        int64_t amt, int64_t fee, bool expect_ok ) {
+      transfer_from_blind_operation x;
+      x.to = dan.id;
+      x.amount = core.amount( amt );
+      x.fee = core.amount( fee );
+      blind_input bi; bi.commitment = in.first; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = in.second;
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      if( expect_ok )
+      {
+         db.push_transaction( precomputable_transaction( trx ), database::skip_nothing );
+         verify_asset_supplies( db );
+      }
+      else
+         BOOST_CHECK_THROW(
+            db.push_transaction( precomputable_transaction( trx ), database::skip_nothing ),
+            fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   };
+   // Pool-empty floats to cost by rule: the parity-level fee (0) rejects...
+   withdraw( cB, 900, 0, false );
+   // ...while the cost-anchor fee clears (cost path consumes nothing).
+   withdraw( cA, 900, 500000, true );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto pitr = st.parity_pool.find( core_id );
+      BOOST_REQUIRE( pitr != st.parity_pool.end() );
+      BOOST_CHECK_EQUAL( pitr->second.value, 50000 ); // cost path: pool untouched
+   }
+   // Fund exact coverage (pool 550000), then the parity fee clears and the
+   // pool debits exactly the gap. Sealed first: the cost withdrawal above is
+   // still pending, and the routing legs below are direct (see
+   // seal-then-modify note) — they must survive block-production replay so
+   // the parity withdrawal replays against the funded pool.
+   generate_block();
+   db.adjust_balance( dan_id, core.amount( -10000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 10000000 ),
+                       true, core.amount( 10000000 ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE_EQUAL( st.parity_pool.find( core_id )->second.value, 550000 );
+   }
+   withdraw( cC, 900, 0, true );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 50000 );
+      auto gitr = st.interval_granted.find( core_id );
+      BOOST_REQUIRE( gitr != st.interval_granted.end() );
+      BOOST_CHECK_EQUAL( gitr->second.value, 500000 );
+      BOOST_CHECK_EQUAL( st.parity_subsidized_count, 1u );
+   }
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK, 50u );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 300000000 ) );
+   // Seal-then-modify (see negative_mint_rejected): fee-schedule and pool
+   // writes below are direct and must survive block-production replay.
+   generate_block();
+   // Price parity just under the pinned anchor: gap 1000 per withdrawal.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fee_params = p.parameters.get_mutable_fees().parameters;
+      auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
+      itr->get<transfer_from_blind_operation::fee_params_t>().fee = 499000;
+   } );
+   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 499000 ) ).value, 1000 );
+   // Seed exactly 50 subsidies: route 1M nominal (5% = 50000).
+   db.adjust_balance( dan_id, core.amount( -1000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
+
+   // 52 deposits (cost path, sealed in one block): 51 inputs worth
+   // amount+parity (499900) for the subsidized legs, one worth amount+cost
+   // (500900) for the cost leg. Conservation is exact at validate time, so
+   // the CAP rule — not conservation — decides the 51st withdrawal.
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   vector<fc::ecc::commitment_type> cs;
+   vector<fc::sha256> bs; // input blinding factors (from_blind needs them)
+   for( int i = 0; i < 52; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      int64_t dep = ( i == 51 ) ? 500900 : 499900;
+      ttb.amount = core.amount( dep );
+      ttb.from = dan.id;
+      blind_output o; o.owner = own;
+      // G1c cost path (BSIP-2 §2): deposits pay the pinned anchor (n=1, 1M)
+      // from transparent funds — the 50k pool is reserved for the withdrawal
+      // subsidies under test, and cost-path ops consume no cap units.
+      ttb.fee = core.amount( 1000000 );
+      auto B = T_blind_secret( "g1c-cap-b|" + std::to_string( i ) );
+      auto N = T_secret( "g1c-cap-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, dep );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, dep );
+      ttb.blinding_factor = B; ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      cs.push_back( o.commitment );
+      bs.push_back( B );
+   }
+   generate_block();
+
+   // 50 subsidized withdrawals in one pending block (fee = parity 499000).
+   for( int i = 0; i < 50; ++i )
+   {
+      transfer_from_blind_operation x;
+      x.to = dan.id; x.amount = core.amount( 900 ); x.fee = core.amount( 499000 );
+      blind_input bi; bi.commitment = cs[i]; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = bs[i];
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      db.push_transaction( precomputable_transaction( trx ), database::skip_nothing );
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   verify_asset_supplies( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      // Exact drain: zero entries are removed, not left at zero.
+      BOOST_CHECK( st.parity_pool.find( core_id ) == st.parity_pool.end() );
+      BOOST_CHECK_EQUAL( st.parity_subsidized_count, 50u );
+      auto gitr = st.interval_granted.find( core_id );
+      BOOST_REQUIRE( gitr != st.interval_granted.end() );
+      BOOST_CHECK_EQUAL( gitr->second.value, 50000 );
+   }
+   // 51st withdrawal: subsidy cap exhausted floats it to cost...
+   auto last = [&]( size_t ci, int64_t fee, bool expect_ok ) {
+      transfer_from_blind_operation x;
+      x.to = dan.id; x.amount = core.amount( 900 ); x.fee = core.amount( fee );
+      blind_input bi; bi.commitment = cs[ci]; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = bs[ci];
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      if( expect_ok )
+         db.push_transaction( precomputable_transaction( trx ), database::skip_nothing );
+      else
+         BOOST_CHECK_THROW(
+            db.push_transaction( precomputable_transaction( trx ), database::skip_nothing ),
+            fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   };
+   last( 50, 499000, false );
+   last( 51, 500000, true ); // cost level clears even with an empty pool
+   verify_asset_supplies( db );
+
+   // Reserved transparent space: top this block's blind budget up to 100.
+   {
+      uint32_t have = stealth_blind_count_this_block( db );
+      BOOST_REQUIRE_LE( have, 100u );
+      for( uint32_t i = have; i < 100; ++i )
+      {
+         transfer_to_blind_operation ttb;
+         ttb.amount = core.amount( 100 );
+         ttb.from = dan.id;
+         auto kk = fc::ecc::private_key::generate();
+         blind_output o;
+         o.owner = authority( 1, public_key_type( kk.get_public_key() ), 1 );
+         ttb.fee = core.amount( 1000000 ); // G1c cost path: pool is drained
+         auto B = T_secret( "g1c-rsv-b|" + std::to_string( i ) );
+         auto N = T_secret( "g1c-rsv-n|" + std::to_string( i ) );
+         o.commitment = fc::ecc::blind( B, 100 );
+         o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
+         ttb.blinding_factor = B; ttb.outputs = { o };
+         set_expiration( db, trx );
+         trx.operations = { ttb };
+         sign( trx, dan_private_key );
+         PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      }
+      BOOST_CHECK_EQUAL( stealth_blind_count_this_block( db ), 100u );
+      // 101st blind op trips the budget...
+      transfer_to_blind_operation over;
+      over.amount = core.amount( 100 );
+      over.from = dan.id;
+      auto kk = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( kk.get_public_key() ), 1 );
+      auto B = T_secret( "g1c-rsv-b|over" );
+      auto N = T_secret( "g1c-rsv-n|over" );
+      o.commitment = fc::ecc::blind( B, 100 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
+      over.blinding_factor = B;
+      over.fee = core.amount( 1000000 ); // G1c cost path: budget (not float) rejects
+      over.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { over };
+      sign( trx, dan_private_key );
+      BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+      // ...while transparent transfers still clear (reserved space rides
+      // outside the blind budget: the gate only counts blind ops).
+      transfer_operation t;
+      t.from = dan.id; t.to = dan.id; t.amount = core.amount( 1 );
+      trx.operations = { t };
+      db.current_fee_schedule().set_fee( trx.operations.back() );
+      sign( trx, dan_private_key );
+      BOOST_CHECK_NO_THROW(
+         db.push_transaction( precomputable_transaction( trx ), database::skip_nothing ) );
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_PARITY_REVIEW_INTERVAL_SEC, 15552000u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC, 7776000u );
+   ACTORS( (alice)(bob)(dan) );
+   upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
+   create_committee_member( alice ); create_committee_member( bob );
+   generate_block();
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 40000000 ) );
+   // Seal-then-modify (see negative_mint_rejected).
+   generate_block();
+   // Gap 10000 per withdrawal (parity 490000 vs 500000 anchor).
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fee_params = p.parameters.get_mutable_fees().parameters;
+      auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
+      itr->get<transfer_from_blind_operation::fee_params_t>().fee = 490000;
+   } );
+   // Seed the pool BEFORE the clock jumps (funding works while current).
+   db.adjust_balance( dan_id, core.amount( -1000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE_EQUAL( st.parity_pool.find( core_id )->second.value, 50000 );
+   }
+
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   vector<fc::ecc::commitment_type> cs;
+   vector<fc::sha256> bs; // input blinding factors (from_blind needs them)
+   // Exact-conservation deposits (see routing test): cs[0] covers
+   // amount+parity (490900) for the float-reject leg, cs[1] covers
+   // amount+cost (500900) for the cost leg, cs[2] covers amount+parity for
+   // the post-review subsidy leg.
+   const int64_t rev_deps[3] = { 490900, 500900, 490900 };
+   for( int i = 0; i < 3; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( rev_deps[i] );
+      ttb.from = dan.id;
+      blind_output o; o.owner = own;
+      // G1c cost path: the 50k pool is reserved for the withdrawal subsidies
+      // under test, so deposits pay the pinned anchor (n=1, 1M).
+      ttb.fee = core.amount( 1000000 );
+      auto B = T_blind_secret( "g1c-rev-b|" + std::to_string( i ) );
+      auto N = T_secret( "g1c-rev-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, rev_deps[i] );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, rev_deps[i] );
+      ttb.blinding_factor = B; ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      cs.push_back( o.commitment );
+      bs.push_back( B );
+   }
+   generate_block();
+   BOOST_CHECK( stealth_parity_available( db, core_id, share_type( 10000 ) ) );
+
+   // Jump 7 months: 1 missed 6-month review + 2 missed quarterly reports.
+   generate_blocks( HARDFORK_STEALTH_TIME + 7 * 30 * 86400 );
+   generate_block();
+   set_expiration( db, trx );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.missed_parity_reviews, 1u );
+      BOOST_CHECK_EQUAL( st.missed_set_reports, 2u );
+      BOOST_CHECK( st.parity_funding_halted );
+   }
+   auto withdraw = [&]( size_t ci, int64_t fee, bool expect_ok ) {
+      transfer_from_blind_operation x;
+      x.to = dan.id; x.amount = core.amount( 900 ); x.fee = core.amount( fee );
+      blind_input bi; bi.commitment = cs[ci]; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = bs[ci];
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      if( expect_ok )
+      {
+         db.push_transaction( precomputable_transaction( trx ), database::skip_nothing );
+         verify_asset_supplies( db );
+      }
+      else
+         BOOST_CHECK_THROW(
+            db.push_transaction( precomputable_transaction( trx ), database::skip_nothing ),
+            fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   };
+   // Cost-mode with a FUNDED pool: the missed review alone floats to cost.
+   withdraw( 0, 490000, false );
+   withdraw( 1, 500000, true );
+   // Record the parity review (single-member attestation re-arms subsidies).
+   {
+      parity_review_operation r;
+      r.voter = alice.id;
+      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      r.note = "6-month parity review: schedules reaffirmed";
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, alice_private_key );
+      PUSH_TX( db, tx );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.missed_parity_reviews, 0u );
+   }
+   withdraw( 2, 490000, true );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 40000 );
+   }
+   // Funding still halted (reports still missed): routing books zero.
+   {
+      share_type acc0 = core.dynamic_asset_data_id( db ).accumulated_fees;
+      db.adjust_balance( dan_id, core.amount( -100000 ) );
+      db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 100000 ) );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 40000 );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                         ( acc0 + 100000 ).value );
+   }
+   verify_asset_supplies( db );
+   // Record the set report: funding resumes.
+   {
+      parity_review_operation r;
+      r.voter = bob.id;
+      r.kind = GRAPHENE_STEALTH_REVIEW_SET_REPORT;
+      r.note = "quarterly anonymity-set report published";
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, bob_private_key );
+      PUSH_TX( db, tx );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( !st.parity_funding_halted );
+      BOOST_CHECK_EQUAL( st.missed_set_reports, 0u );
+   }
+   {
+      db.adjust_balance( dan_id, core.amount( -100000 ) );
+      db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 100000 ) );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 45000 );
+   }
+   verify_asset_supplies( db );
+   // Non-member attestations never count; bad kinds reject at validate.
+   {
+      parity_review_operation r;
+      r.voter = dan.id; r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, dan_private_key );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+      trx.clear();
+      parity_review_operation bad;
+      bad.voter = alice.id; bad.kind = 7;
+      BOOST_CHECK_THROW( bad.validate(), fc::exception );
+   }
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_alarms_computed_and_queryable )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (alice)(dan) );
+   upgrade_to_lifetime_member( alice );
+   create_committee_member( alice );
+   generate_block();
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 40000000 ) );
+
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   vector<fc::ecc::commitment_type> cs;
+   vector<fc::sha256> bs; // input blinding factors (from_blind needs them)
+   // Exact-conservation deposits (see routing test): withdrawals spend
+   // amount+fee = 900+0, so each input commits to exactly 900.
+   for( int i = 0; i < 3; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 900 );
+      ttb.from = dan.id;
+      blind_output o; o.owner = own;
+      // G1c cost path: deposits pay the pinned anchor (n=1, 1M) so the
+      // routed pool funds only the withdrawal subsidies the alarms measure.
+      ttb.fee = core.amount( 1000000 );
+      auto B = T_blind_secret( "g1c-alm-b|" + std::to_string( i ) );
+      auto N = T_secret( "g1c-alm-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, 900 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 900 );
+      ttb.blinding_factor = B; ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      cs.push_back( o.commitment );
+      bs.push_back( B );
+   }
+   generate_block();
+   auto withdraw = [&]( size_t ci ) {
+      transfer_from_blind_operation x;
+      x.to = dan.id; x.amount = core.amount( 900 ); x.fee = core.amount( 0 );
+      blind_input bi; bi.commitment = cs[ci]; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = bs[ci];
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      db.push_transaction( precomputable_transaction( trx ), database::skip_nothing );
+      trx.clear_signatures(); trx.operations.clear();
+   };
+   // Route 20M nominal (pool +1M), grant one 500000 subsidy (zeroed schedule).
+   db.adjust_balance( dan_id, core.amount( -20000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 20000000 ), true, core.amount( 20000000 ) );
+   withdraw( 0 );
+   verify_asset_supplies( db );
+   stealth_parity_maintenance( db );
+   {
+      // Queryable through the status object (the same object get_object serves).
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto eitr = st.alarms.effective_set.find( core_id );
+      BOOST_REQUIRE( eitr != st.alarms.effective_set.end() );
+      BOOST_CHECK_EQUAL( eitr->second, 2u ); // 3 created - 1 spent
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 50u ); // 500000/1000000
+      BOOST_CHECK( st.alarms.burn_warn );
+      BOOST_CHECK( !st.alarms.burn_critical );
+      BOOST_CHECK( st.alarms.decoy_skew_warn ); // young chain: pool is all-new
+      BOOST_CHECK( !st.alarms.mass_exit_warn );
+      BOOST_CHECK( !st.alarms.joint_cap_breach );
+      BOOST_CHECK( st.interval_routed.empty() );
+      BOOST_CHECK( st.interval_granted.empty() );
+   }
+   // Grants with no routed inflow burn 100%: critical fires.
+   withdraw( 1 );
+   verify_asset_supplies( db );
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 100u );
+      BOOST_CHECK( st.alarms.burn_warn );
+      BOOST_CHECK( st.alarms.burn_critical );
+   }
+   // Inflow with no grants burns 0%: both clear.
+   db.adjust_balance( dan_id, core.amount( -1000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
+   verify_asset_supplies( db );
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 0u );
+      BOOST_CHECK( !st.alarms.burn_warn );
+      BOOST_CHECK( !st.alarms.burn_critical );
+   }
+   // A live freeze vote (below quorum) arms the mass-exit warning.
+   {
+      freeze_blind_operation fz;
+      fz.voter = alice.id; fz.freeze = true; fz.reason = "drill";
+      signed_transaction tx; tx.operations.push_back( fz );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, alice_private_key );
+      PUSH_TX( db, tx );
+   }
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( stealth_current_alarms( db ).mass_exit_warn );
+   // Stale votes (48h expiry) stop warning.
+   generate_blocks( db.head_block_time() + 3 * 86400 );
+   generate_block();
+   set_expiration( db, trx );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( !stealth_current_alarms( db ).mass_exit_warn );
+   // Age the pool past the 100-block window: skew clears (block numbers,
+   // not time, advance the window — 150 real blocks).
+   for( int i = 0; i < 150; ++i ) generate_block();
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( !stealth_current_alarms( db ).decoy_skew_warn );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_joint_cap_with_h2 )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), dan, core.amount( 1000000 ) );
+   // Pure accounting (BSIP-1 §7b: <=70% shared denominator, proposals).
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS, 7000u );
+   BOOST_CHECK( stealth_joint_fee_within_cap( GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, 0 ) );
+   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 2000 ) ); // H2 diverts 20%
+   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 6500 ) ); // boundary holds
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 6501 ) ); // breach
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 7000 ) );
+   // Recorded H2 diversion surfaces as an alarm, never as a market-fee throw.
+   auto set_h2 = [&]( uint32_t bps ) {
+      db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+                 [&]( stealth_status_object& s ) { s.h2_diversion_bps = bps; } );
+   };
+   set_h2( 6500 );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( !stealth_current_alarms( db ).joint_cap_breach );
+   set_h2( 6501 );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( stealth_current_alarms( db ).joint_cap_breach );
+   {
+      // Routing still books while breached (signal, not halt): mirror the
+      // pay_market_fees legs exactly (offset + accumulate the remainder).
+      db.adjust_balance( dan_id, core.amount( -100000 ) );
+      share_type inc = 100000;
+      share_type routed = stealth_parity_route_fee( db, core.get_id(), inc );
+      BOOST_CHECK_EQUAL( routed.value, 5000 );
+      BOOST_CHECK_EQUAL( inc.value, 95000 );
+      db.modify( core.dynamic_asset_data_id( db ), [&]( asset_dynamic_data_object& d ) {
+         d.accumulated_fees += inc;
+      } );
+   }
+   verify_asset_supplies( db );
+   set_h2( 0 );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( !stealth_current_alarms( db ).joint_cap_breach );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

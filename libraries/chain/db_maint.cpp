@@ -1599,6 +1599,11 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    stealth_maybe_record_activation( *this );
    stealth_reconcile_supplies( *this );
 
+   // G1c parity economics (BSIP-2 §2): review/report defaults, burn-ratio
+   // alarms, skew histogram prune, snapshot refresh. Internally gated
+   // post-STEALTH (no-op pre-fork).
+   stealth_parity_maintenance( *this );
+
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time
    process_budget();

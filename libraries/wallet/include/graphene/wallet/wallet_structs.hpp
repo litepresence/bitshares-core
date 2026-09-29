@@ -319,7 +319,37 @@ struct account_history_operation_detail {
    vector<operation_detail_ex>  details;
 };
 
+/**
+ * @brief Blind-by-default wallet settings (BSIP-2 §2, G1c).
+ *
+ * Reference (cli) wallet creates blinded change and defaults new transfers
+ * to blind, with one-tap transparent opt-out. Network hygiene (decoy-fetch
+ * batching, minimum broadcast delay, RPC rules) is required behavior with
+ * conformance tests — see BLIND_DEFAULTS_CONTRACT.md, which is the
+ * browser-wallet (separate repo) binding spec for the same values.
+ */
+struct blind_transfer_defaults
+{
+   /// New transfers default to blind (transfer_default routes blind unless
+   /// the caller passes transparent_opt_out).
+   bool     blind_by_default = true;
+   /// Decoy/confirmation fetches are batched in chunks of this size: one
+   /// RPC round-trip per chunk, never one per decoy (timing-link defense).
+   uint32_t decoy_fetch_batch_size = 32;
+   /// Seconds to wait after signing before broadcasting a blind transfer
+   /// (propagation-timing defense against few DPOS producers). Applies only
+   /// when broadcast=true; 0 disables (explicit, logged choice).
+   uint32_t min_broadcast_delay_sec = 3;
+   /// Optional N-block holding before a received blind output is spent
+   /// (cheap heuristic defense; consensus does not require it). 0 = off.
+   uint32_t min_mix_blocks = 0;
+};
+
 }} // namespace graphene::wallet
+
+FC_REFLECT( graphene::wallet::blind_transfer_defaults,
+            (blind_by_default)(decoy_fetch_batch_size)
+            (min_broadcast_delay_sec)(min_mix_blocks) )
 
 FC_REFLECT( graphene::wallet::key_label, (label)(key) )
 FC_REFLECT( graphene::wallet::blind_balance, (amount)(from)(to)(one_time_key)(blinding_factor)(commitment)(used) )

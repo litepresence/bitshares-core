@@ -267,6 +267,8 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for freeze blind operations prior to the stealth hardfork");
          FC_ASSERT(!op.new_parameters.current_fees->exists<turnstile_reproof_operation>(),
                    "Unable to define fees for turnstile re-proof operations prior to the stealth hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<parity_review_operation>(),
+                   "Unable to define fees for parity review operations prior to the stealth hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
@@ -381,6 +383,9 @@ struct proposal_operation_hardfork_visitor
       FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
    }
    void operator()(const graphene::chain::turnstile_reproof_operation&) const {
+      FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
+   }
+   void operator()(const graphene::chain::parity_review_operation&) const {
       FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
    }
 

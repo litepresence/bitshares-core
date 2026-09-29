@@ -54,6 +54,11 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "No new V1 blind balances past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
+      // G1c parity float rule (BSIP-2 §2): same skip guard as the schedule
+      // check — no fee paid, no subsidy consumed.
+      stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                                 o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                 calculate_fee_for_operation( operation( o ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -86,6 +91,11 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
    // Pool floor counter: post-STEALTH creates carry metadata (counted);
    // pre-fork creates are grandfathered (helper no-ops pre-fork anyway).
    stealth_pool_count_add( db(), o.amount.asset_id, (int32_t)o.outputs.size() );
+   // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
+   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                   o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+   stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -117,6 +127,10 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       stealth_check_blind_gate( d );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
+      // G1c parity float rule: withdrawals carry no blind outputs (n = 0).
+      stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                                 o.fee.asset_id, 0,
+                                 calculate_fee_for_operation( operation( o ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -143,6 +157,10 @@ void_result transfer_from_blind_evaluator::do_apply( const transfer_from_blind_o
    });
    stealth_shadow_add( db(), o.amount.asset_id, share_type( -( o.amount.amount + o.fee.amount ).value ) );
    stealth_pool_count_add( db(), o.amount.asset_id, -spent_counted );
+   // G1c: parity subsidy settlement (withdrawals carry no new outputs).
+   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                   o.fee.asset_id, 0,
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
    stealth_count_blind_op( db() );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -183,6 +201,10 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
+      // G1c parity float rule (same skip guard).
+      stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                                 o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                 calculate_fee_for_operation( operation( o ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -223,6 +245,11 @@ void_result blind_transfer_evaluator::do_apply( const blind_transfer_operation& 
    stealth_shadow_add( db(), o.fee.asset_id, share_type( -o.fee.amount.value ) );
    stealth_pool_count_add( db(), o.fee.asset_id, -spent_counted );
    stealth_pool_count_add( db(), o.fee.asset_id, (int32_t)o.outputs.size() );
+   // G1c: parity subsidy settlement + skew histogram.
+   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                   o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+   stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
 
    return void_result();

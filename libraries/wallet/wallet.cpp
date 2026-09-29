@@ -1514,17 +1514,34 @@ vector<asset>   wallet_api::get_blind_balances( const string& key_or_label )cons
    auto& to_asset_used_idx = my->_wallet.blind_receipts.get<by_to_asset_used>();
    auto start = to_asset_used_idx.lower_bound( std::make_tuple(pub_key,asset_id_type(0),false)  );
    auto end = to_asset_used_idx.lower_bound( std::make_tuple(pub_key,asset_id_type(uint32_t(0xffffffff)),true)  );
-   while( start != end )
+   // G1c decoy-fetch batching (BSIP-2 §1): collect candidate commitments,
+   // then one RPC round-trip per chunk — never one per decoy (timing-link
+   // defense: per-decoy fetch timing fingerprints the wallet's set).
+   vector<commitment_type> candidates;
+   for( auto itr = start; itr != end; ++itr )
+      if( !itr->used )
+         candidates.push_back( itr->commitment() );
+   uint32_t batch = my->_blind_defaults.decoy_fetch_batch_size;
+   if( batch == 0 ) batch = 1;
+   flat_set<commitment_type> live;
+   for( size_t off = 0; off < candidates.size(); off += batch )
    {
-      if( !start->used  )
-      {
-         auto answer = my->_remote_db->get_blinded_balances( {start->commitment()} );
-         if( answer.size() )
-            balances[start->amount.asset_id] += start->amount.amount;
-         else
-            used.push_back( start->commitment() );
-      }
-      ++start;
+      flat_set<commitment_type> chunk;
+      for( size_t k = off; k < candidates.size() && k < off + batch; ++k )
+         chunk.insert( candidates[k] );
+      auto answer = my->_remote_db->get_blinded_balances( chunk );
+      for( const auto& bal : answer )
+         live.insert( bal.commitment );
+   }
+   for( const auto& c : candidates )
+   {
+      auto itr = my->_wallet.blind_receipts.get<by_commitment>().find( c );
+      if( itr == my->_wallet.blind_receipts.get<by_commitment>().end() )
+         continue;
+      if( live.find( c ) != live.end() )
+         balances[itr->amount.asset_id] += itr->amount.amount;
+      else
+         used.push_back( c );
    }
    for( const auto& u : used )
    {
@@ -1573,6 +1590,8 @@ blind_confirmation wallet_api::transfer_from_blind( const string& from_blind_acc
    conf.trx.validate();
 
    ilog( "about to broadcast" );
+   if( broadcast )
+      blind_broadcast_delay(); // G1c timing defense (BSIP-2 §1)
    conf.trx = sign_transaction( conf.trx, broadcast );
 
    if( broadcast && conf.outputs.size() == 2 ) {
@@ -1764,6 +1783,8 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    confirm.trx.operations.emplace_back( std::move(blind_tr) );
    ilog( "validate before" );
    confirm.trx.validate();
+   if( broadcast )
+      blind_broadcast_delay(); // G1c timing defense (BSIP-2 §1)
    confirm.trx = sign_transaction(confirm.trx, broadcast);
 
    if( broadcast )
@@ -1855,6 +1876,8 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
    confirm.trx.operations.push_back( bop );
    my->set_operation_fees( confirm.trx, my->_remote_db->get_global_properties().parameters.get_current_fees());
    confirm.trx.validate();
+   if( broadcast )
+      blind_broadcast_delay(); // G1c timing defense (BSIP-2 §1)
    confirm.trx = sign_transaction(confirm.trx, broadcast);
 
    if( broadcast )
@@ -1970,6 +1993,81 @@ order_book wallet_api::get_order_book( const string& base, const string& quote, 
 {
    return( my->_remote_db->get_order_book( base, quote, limit ) );
 }
+
+// ---------------------------------------------------------------------------
+// G1c blind-by-default + network hygiene (BSIP-2 §2).
+//
+// Behavior contract (binding spec for the browser wallet lives in
+// libraries/wallet/BLIND_DEFAULTS_CONTRACT.md):
+// - blind_by_default routes transfer_default to the blind leg;
+// - decoy-fetch batching: one RPC round-trip per chunk, never per decoy;
+// - minimum broadcast delay on blind paths when broadcast=true;
+// - fail-closed addressing: blind routing never silently falls back.
+// ---------------------------------------------------------------------------
+
+blind_transfer_defaults wallet_api::get_blind_defaults()const
+{
+   return my->_blind_defaults;
+}
+
+void wallet_api::set_blind_by_default( bool blind_by_default )const
+{
+   my->_blind_defaults.blind_by_default = blind_by_default;
+}
+
+void wallet_api::set_blind_defaults( const blind_transfer_defaults& defaults )const
+{
+   FC_ASSERT( defaults.decoy_fetch_batch_size > 0,
+              "decoy fetch batch size must be positive" );
+   my->_blind_defaults = defaults;
+}
+
+void wallet_api::blind_broadcast_delay()const
+{
+   uint32_t secs = my->_blind_defaults.min_broadcast_delay_sec;
+   if( secs == 0 )
+   {
+      wlog( "blind broadcast delay disabled by explicit wallet setting" );
+      return;
+   }
+   ilog( "blind broadcast delay: waiting ${s}s before broadcast (timing defense)",
+         ("s", secs) );
+   fc::usleep( fc::seconds( secs ) );
+}
+
+signed_transaction wallet_api::transfer_default( const string& from,
+                                                 const string& to_key_or_account,
+                                                 const string& amount,
+                                                 const string& asset_symbol,
+                                                 const string& memo,
+                                                 bool transparent_opt_out,
+                                                 bool broadcast )const
+{ try {
+   FC_ASSERT( !is_locked() );
+   if( !transparent_opt_out && my->_blind_defaults.blind_by_default )
+   {
+      FC_ASSERT( memo.empty(),
+                 "blind legs carry no memo: clear the memo or pass transparent_opt_out=true" );
+      // Fail closed: a public account name as recipient is never blind-routed
+      // (the output would link to a known account key at the sender's sole
+      // discretion). Blind routing needs a blind key or label.
+      bool is_account = true;
+      try { get_account_id( to_key_or_account ); } catch ( ... ) { is_account = false; }
+      FC_ASSERT( !is_account,
+                 "recipient '${r}' is a public account: blind routing needs a blind key "
+                 "or label — pass transparent_opt_out=true for the compliant path",
+                 ("r", to_key_or_account) );
+      public_key_type to_key = get_public_key( to_key_or_account );
+      FC_ASSERT( to_key != public_key_type(),
+                 "unknown blind recipient '${r}': register the blind key/label first, "
+                 "or pass transparent_opt_out=true", ("r", to_key_or_account) );
+      blind_confirmation conf = transfer_to_blind( from, asset_symbol,
+                                                   {{ to_key_or_account, amount }},
+                                                   broadcast );
+      return conf.trx;
+   }
+   return transfer( from, to_key_or_account, amount, asset_symbol, memo, broadcast );
+} FC_CAPTURE_AND_RETHROW( (from)(to_key_or_account)(amount)(asset_symbol)(transparent_opt_out)(broadcast) ) }
 
 // custom operations
 signed_transaction wallet_api::account_store_map( const string& account, const string& catalog, bool is_to_remove,

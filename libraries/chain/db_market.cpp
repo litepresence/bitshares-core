@@ -28,6 +28,7 @@
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/market_object.hpp>
+#include <graphene/chain/stealth_evaluator.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 
 #include <fc/uint128.hpp>
@@ -2683,8 +2684,16 @@ asset database::pay_market_fees(const account_object* seller, const asset_object
       if( issuer_fees.amount > reward.amount )
       {
          const auto& recv_dyn_data = recv_asset.dynamic_asset_data_id(*this);
-         modify( recv_dyn_data, [&issuer_fees, &reward]( asset_dynamic_data_object& obj ){
-            obj.accumulated_fees += issuer_fees.amount - reward.amount;
+         share_type increment = issuer_fees.amount - reward.amount;
+         // G1c parity routing (BSIP-2 §2): a fixed share of the market /
+         // settlement fee increment funds the per-asset parity pool; the
+         // remainder lands in accumulated_fees exactly as before. Redirects,
+         // never mints: totals preserved. Pre-fork and funding-halted are
+         // no-ops inside (increment untouched).
+         share_type routed = stealth_parity_route_fee( *this, recv_asset.get_id(), increment );
+         (void)routed; // accounted in the pool + interval flow; remainder below
+         modify( recv_dyn_data, [&increment]( asset_dynamic_data_object& obj ){
+            obj.accumulated_fees += increment;
          });
       }
    }

@@ -75,7 +75,8 @@ struct hardfork_visitor {
                                            protocol::reference_asset_create_operation >;
    using stealth_ops = fc::typelist::list< protocol::stealth_transfer_operation,
                                            protocol::freeze_blind_operation,
-                                           protocol::turnstile_reproof_operation >;
+                                           protocol::turnstile_reproof_operation,
+                                           protocol::parity_review_operation >;
 
    fc::time_point_sec now;
 

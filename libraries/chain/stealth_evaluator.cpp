@@ -20,6 +20,7 @@
 #include <graphene/protocol/stealth.hpp>
 
 #include <fc/crypto/elliptic.hpp>
+#include <fc/uint128.hpp>
 
 #include <map>
 
@@ -29,11 +30,22 @@ using protocol::GRAPHENE_STEALTH_BLIND_POOL_FLOOR;
 using protocol::GRAPHENE_STEALTH_DECOY_MIN_AGE_SEC;
 using protocol::GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC;
 using protocol::GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED;
+using protocol::GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS;
 using protocol::GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK;
+using protocol::GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT;
+using protocol::GRAPHENE_STEALTH_PARITY_BURN_WARN_PCT;
+using protocol::GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS;
+using protocol::GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK;
+using protocol::GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC;
+using protocol::GRAPHENE_STEALTH_PARITY_REVIEW_INTERVAL_SEC;
 using protocol::GRAPHENE_STEALTH_PROOF_V1;
 using protocol::GRAPHENE_STEALTH_PROOF_V2;
+using protocol::GRAPHENE_STEALTH_REVIEW_PARITY;
+using protocol::GRAPHENE_STEALTH_REVIEW_SET_REPORT;
 using protocol::GRAPHENE_STEALTH_RING_MAX;
 using protocol::GRAPHENE_STEALTH_RING_MIN;
+using protocol::GRAPHENE_STEALTH_SKEW_WINDOW_BLOCKS;
+using protocol::GRAPHENE_STEALTH_SKEW_WINDOWS_KEPT;
 using protocol::GRAPHENE_STEALTH_V1_LIFETIME_SEC;
 
 namespace {
@@ -164,11 +176,17 @@ void stealth_maybe_record_activation( database& db )
       if( dyn.confidential_supply.value != 0 )
          seed[ a.get_id() ] = dyn.confidential_supply;
    }
+   // G1c: snapshot the transfer_to_blind fee schedule once — the true
+   // pre-parity levels feeding the cost anchor's max().
+   const auto& k39 = db.current_fee_schedule()
+      .get<protocol::transfer_to_blind_operation>();
    db.modify( s, [&]( stealth_status_object& o ) {
       o.stealth_activated_time = activated;
       o.v1_sunset_time = sunset;
       o.turnstile_g2_time = sunset;
       o.blinded_supply_shadow = seed;
+      o.activation_k39_fee = k39.fee;
+      o.activation_k39_ppo = k39.price_per_output;
    } );
 }
 
@@ -312,6 +330,13 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
               o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Unknown proof version" );
+   // G1c parity float rule (BSIP-2 §2): pool-empty / cap-hit /
+   // review-missed floats the required fee to the cost anchor. Skipped
+   // exactly when the fee-schedule check is skipped (no fee paid, no subsidy
+   // consumed — same context as genesis/test/generator paths).
+   stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                              o.fee.asset_id, (uint32_t)o.outputs.size(),
+                              calculate_fee_for_operation( operation( o ) ) );
    FC_ASSERT( !o.inputs.empty() && o.inputs.size() <= 8, "Input count out of bounds" );
    FC_ASSERT( !o.outputs.empty() && o.outputs.size() <= 8, "Output count out of bounds" );
 
@@ -475,6 +500,12 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
    // outputs (created with metadata below) join it.
    stealth_pool_count_add( db(), o.asset_id, -(int32_t)o.inputs.size() );
    stealth_pool_count_add( db(), o.asset_id, (int32_t)o.outputs.size() );
+   // G1c: settle the parity subsidy (pool debit + issuer credit + cap unit),
+   // and count the new outputs in the skew histogram window.
+   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                   o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+   stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -542,6 +573,10 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( o.fee.amount >= 0 );
    FC_ASSERT( o.new_proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Turnstile migrates to V2 (the surviving system)" );
+   // G1c parity float rule (one new blind output; same skip guard).
+   stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                              o.fee.asset_id, 1,
+                              calculate_fee_for_operation( operation( o ) ) );
    FC_ASSERT( !o.new_output.range_proof.empty(), "Migrated output must carry a range proof" );
    for( const auto& a : o.owner.account_auths )
       a.first( d );
@@ -665,6 +700,11 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    if( had_metadata )
       stealth_pool_count_add( db(), o.asset_id, -1 );
    stealth_pool_count_add( db(), o.asset_id, 1 );
+   // G1c: parity subsidy settlement + skew histogram (one new output).
+   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                   o.fee.asset_id, 1,
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+   stealth_window_count_add( db(), 1 );
    stealth_count_blind_op( db() );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -673,5 +713,396 @@ void turnstile_reproof_evaluator::pay_fee()
 {
    generic_evaluator::pay_fee();
 }
+
+// ---------------------------------------------------------------------------
+// G1c parity economics (BSIP-2 §2)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+uint32_t elapsed_intervals( fc::time_point_sec now, fc::time_point_sec since,
+                            uint32_t interval_sec )
+{
+   if( interval_sec == 0 || now <= since )
+      return 0;
+   uint64_t elapsed = (uint64_t)now.sec_since_epoch() - (uint64_t)since.sec_since_epoch();
+   uint64_t n = elapsed / interval_sec;
+   return ( n > (uint64_t)0xFFFFFFFFu ) ? 0xFFFFFFFFu : (uint32_t)n;
+}
+
+uint32_t parity_subsidized_this_block( const database& db )
+{
+   const auto* s = find_stealth_status( db );
+   if( !s ) return 0;
+   if( s->parity_block_num != db.head_block_num() + 1 )
+      return 0;
+   return s->parity_subsidized_count;
+}
+
+/// Live missed-report count (head-block time only; maintenance persists it).
+uint32_t live_missed_reports( const database& db, const stealth_status_object& s )
+{
+   if( s.last_set_report_time == fc::time_point_sec() )
+      return 0; // seeded at activation before any check can run
+   return elapsed_intervals( db.head_block_time(), s.last_set_report_time,
+                             GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC );
+}
+
+bool live_review_current( const database& db, const stealth_status_object& s )
+{
+   if( s.last_parity_review_time == fc::time_point_sec() )
+      return true; // seeded at activation; only false after a real interval
+   return elapsed_intervals( db.head_block_time(), s.last_parity_review_time,
+                             GRAPHENE_STEALTH_PARITY_REVIEW_INTERVAL_SEC ) == 0;
+}
+
+} // anonymous namespace
+
+share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs )
+{
+   const auto& k39 = db.current_fee_schedule()
+      .get<protocol::transfer_to_blind_operation>();
+   fc::uint128_t current( k39.fee );
+   current += fc::uint128_t( k39.price_per_output ) * n_blind_outputs;
+   fc::uint128_t pinned( protocol::GRAPHENE_STEALTH_ANCHOR_BASE_FEE );
+   pinned += fc::uint128_t( protocol::GRAPHENE_STEALTH_ANCHOR_PRICE_PER_OUTPUT )
+             * n_blind_outputs;
+   fc::uint128_t anchored = current;
+   if( pinned > anchored )
+      anchored = pinned;
+   // Activation snapshot of the same schedule (0 when the schedule was
+   // zeroed at activation, e.g. test genesis — then pinned/current govern).
+   const auto* s = find_stealth_status( db );
+   if( s != nullptr )
+   {
+      fc::uint128_t snap( s->activation_k39_fee );
+      snap += fc::uint128_t( s->activation_k39_ppo ) * n_blind_outputs;
+      if( snap > anchored )
+         anchored = snap;
+   }
+   FC_ASSERT( anchored <= GRAPHENE_MAX_SHARE_SUPPLY, "Stealth cost anchor overflow" );
+   return share_type( static_cast<int64_t>( anchored ) );
+}
+
+share_type stealth_parity_gap_core( const database& db, uint32_t n_blind_outputs,
+                                    share_type parity_core )
+{
+   share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
+   if( cost <= parity_core )
+      return share_type( 0 );
+   return cost - parity_core;
+}
+
+share_type stealth_gap_to_asset( const database& db, asset_id_type fee_asset,
+                                 share_type gap_core )
+{
+   if( gap_core.value == 0 )
+      return share_type( 0 );
+   if( fee_asset == asset_id_type() )
+      return gap_core;
+   const auto& cer = fee_asset( db ).options.core_exchange_rate;
+   FC_ASSERT( cer.quote.amount.value > 0, "Stealth gap conversion needs a valid CER" );
+   // X = ceil(gap_core * base / quote): the pool never under-debits.
+   // Integer only (no floats); 128-bit headroom for supply-scale amounts.
+   fc::uint128_t r( (uint64_t)gap_core.value );
+   r *= (uint64_t)cer.base.amount.value;
+   r += (uint64_t)cer.quote.amount.value - 1;
+   r /= (uint64_t)cer.quote.amount.value;
+   FC_ASSERT( r <= GRAPHENE_MAX_SHARE_SUPPLY, "Stealth gap conversion overflow" );
+   return share_type( static_cast<int64_t>( r ) );
+}
+
+bool stealth_parity_available( const database& db, asset_id_type fee_asset,
+                               share_type gap_core )
+{
+   if( !stealth_passed( db ) )
+      return false;
+   if( gap_core.value <= 0 )
+      return false; // no discount granted: nothing to subsidize
+   const auto* s = find_stealth_status( db );
+   if( !s )
+      return false;
+   if( s->blind_halted )
+      return false;
+   // R-05 (audit-round-2): 80% burn-critical halts NEW subsidies by rule —
+   // was signal-only, so a drain proceeded while the alarm watched. Existing
+   // grants keep paying until empty; only new subsidy availability gates here.
+   if( s->alarms.burn_critical )
+      return false;
+   if( !live_review_current( db, *s ) )
+      return false; // missed 6-month review: cost-mode by rule
+   // Missed quarterly reports halt FUNDING (routing) only — the pool keeps
+   // paying until empty (BSIP-2 §2). Subsidies must NOT gate on reports:
+   // otherwise a funded pool could never serve its purpose while reporting
+   // lapses, and no single-member parity review could re-arm it. The
+   // funding halt lives in stealth_parity_route_fee + parity_funding_halted.
+   if( parity_subsidized_this_block( db ) >= GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK )
+      return false;
+   share_type gap_asset = stealth_gap_to_asset( db, fee_asset, gap_core );
+   auto itr = s->parity_pool.find( fee_asset );
+   share_type balance = ( itr == s->parity_pool.end() ) ? share_type( 0 ) : itr->second;
+   return balance >= gap_asset;
+}
+
+void stealth_require_blind_fee( const database& db, share_type core_fee_paid,
+                                bool fees_enforced, asset_id_type fee_asset,
+                                uint32_t n_blind_outputs, share_type parity_core )
+{
+   if( !stealth_passed( db ) || !fees_enforced )
+      return;
+   share_type gap = stealth_parity_gap_core( db, n_blind_outputs, parity_core );
+   if( stealth_parity_available( db, fee_asset, gap ) )
+      return; // subsidized: the central schedule check enforces parity level
+   // Pool-empty / cap-hit / review-missed: blind fees float to cost.
+   // Deterministic rule from the public schedule — no committee action here.
+   share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
+   FC_ASSERT( core_fee_paid >= cost,
+              "Blind fee below cost level (parity pool cannot subsidize: "
+              "pool empty, subsidy cap hit, or review/report missed)" );
+}
+
+void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
+                                     asset_id_type fee_asset,
+                                     uint32_t n_blind_outputs,
+                                     share_type parity_core,
+                                     share_type core_fee_paid )
+{
+   if( !stealth_passed( db ) || !fees_enforced )
+      return;
+   share_type gap = stealth_parity_gap_core( db, n_blind_outputs, parity_core );
+   if( gap.value <= 0 )
+      return;
+   share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
+   if( core_fee_paid >= cost )
+      return; // cost path: user paid the anchor level, no discount granted
+   // Parity path: the discount MUST be covered now (fail-closed: a cap unit
+   // filled between do_evaluate and do_apply turns this into a throw —
+   // the op underpaid the cost level it now falls under).
+   FC_ASSERT( stealth_parity_available( db, fee_asset, gap ),
+              "Parity subsidy no longer available at apply time" );
+   share_type gap_asset = stealth_gap_to_asset( db, fee_asset, gap );
+   const auto& dyn = fee_asset( db ).dynamic_asset_data_id( db );
+   db.modify( dyn, [&]( asset_dynamic_data_object& o ) {
+      o.accumulated_fees += gap_asset;
+   } );
+   const auto& s = get_or_create_stealth_status( db );
+   uint32_t pending = db.head_block_num() + 1;
+   db.modify( s, [&]( stealth_status_object& o ) {
+      auto itr = o.parity_pool.find( fee_asset );
+      FC_ASSERT( itr != o.parity_pool.end() && itr->second >= gap_asset,
+                 "Parity pool underflow at apply time" );
+      itr->second -= gap_asset;
+      if( itr->second == share_type( 0 ) )
+         o.parity_pool.erase( fee_asset );
+      auto gitr = o.interval_granted.find( fee_asset );
+      if( gitr == o.interval_granted.end() )
+         o.interval_granted[ fee_asset ] = gap_asset;
+      else
+         gitr->second += gap_asset;
+      if( o.parity_block_num != pending )
+      {
+         o.parity_block_num = pending;
+         o.parity_subsidized_count = 0;
+      }
+      ++o.parity_subsidized_count;
+   } );
+}
+
+share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
+                                     share_type& inout_increment )
+{
+   if( !stealth_passed( db ) )
+      return share_type( 0 );
+   if( inout_increment.value <= 0 )
+      return share_type( 0 );
+   // The routed share of any single fee trivially fits the joint ceiling at
+   // the proposal share (500bps << 7000bps); the assert pins that bound so a
+   // future constant change that breaks it fails loudly, not silently.
+   {
+      fc::uint128_t cap_bound( (uint64_t)inout_increment.value );
+      cap_bound *= GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS;
+      cap_bound /= 10000;
+      fc::uint128_t share( (uint64_t)inout_increment.value );
+      share *= GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS;
+      share /= 10000;
+      FC_ASSERT( share <= cap_bound, "Parity fee share exceeds joint ceiling" );
+   }
+   const auto& s = get_or_create_stealth_status( db );
+   if( live_missed_reports( db, s ) >= 2 )
+      return share_type( 0 ); // funding halted until reporting resumes
+   fc::uint128_t r( (uint64_t)inout_increment.value );
+   r *= GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS;
+   r /= 10000;
+   FC_ASSERT( r <= GRAPHENE_MAX_SHARE_SUPPLY );
+   share_type routed( static_cast<int64_t>( r ) );
+   if( routed.value == 0 )
+      return routed; // dust: don't dirty undo state
+   db.modify( s, [&]( stealth_status_object& o ) {
+      auto itr = o.parity_pool.find( recv_asset );
+      if( itr == o.parity_pool.end() )
+         o.parity_pool[ recv_asset ] = routed;
+      else
+         itr->second += routed;
+      auto ritr = o.interval_routed.find( recv_asset );
+      if( ritr == o.interval_routed.end() )
+         o.interval_routed[ recv_asset ] = routed;
+      else
+         ritr->second += routed;
+   } );
+   inout_increment -= routed;
+   return routed;
+}
+
+bool stealth_joint_fee_within_cap( uint32_t parity_share_bps, uint32_t h2_diversion_bps )
+{
+   uint64_t joint = (uint64_t)parity_share_bps + (uint64_t)h2_diversion_bps;
+   return joint <= (uint64_t)GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS;
+}
+
+void stealth_window_count_add( database& db, uint32_t n )
+{
+   if( !stealth_passed( db ) || n == 0 )
+      return;
+   const auto& s = get_or_create_stealth_status( db );
+   uint32_t window = ( db.head_block_num() + 1 ) / GRAPHENE_STEALTH_SKEW_WINDOW_BLOCKS;
+   db.modify( s, [&]( stealth_status_object& o ) {
+      auto itr = o.blind_window_counts.find( window );
+      if( itr == o.blind_window_counts.end() )
+         o.blind_window_counts[ window ] = n;
+      else
+         itr->second += n;
+   } );
+}
+
+void stealth_parity_maintenance( database& db )
+{
+   if( !stealth_passed( db ) )
+      return;
+   stealth_maybe_record_activation( db );
+   const auto& s = get_or_create_stealth_status( db );
+   fc::time_point_sec now = db.head_block_time();
+   fc::time_point_sec activated = ( s.stealth_activated_time == fc::time_point_sec() )
+      ? HARDFORK_STEALTH_TIME : s.stealth_activated_time;
+   db.modify( s, [&]( stealth_status_object& o ) {
+      if( o.last_parity_review_time == fc::time_point_sec() )
+         o.last_parity_review_time = activated;
+      if( o.last_set_report_time == fc::time_point_sec() )
+         o.last_set_report_time = activated;
+      // Missed counts recomputed as whole elapsed intervals (replay-safe).
+      o.missed_parity_reviews = elapsed_intervals( now, o.last_parity_review_time,
+            GRAPHENE_STEALTH_PARITY_REVIEW_INTERVAL_SEC );
+      o.missed_set_reports = elapsed_intervals( now, o.last_set_report_time,
+            GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC );
+      o.parity_funding_halted = ( o.missed_set_reports >= 2 );
+      // Burn ratio: worst per-asset interval grant/route percent.
+      uint32_t worst = 0;
+      for( const auto& kv : o.interval_granted )
+      {
+         share_type granted = kv.second;
+         if( granted.value <= 0 )
+            continue;
+         auto ritr = o.interval_routed.find( kv.first );
+         share_type routed = ( ritr == o.interval_routed.end() )
+                             ? share_type( 0 ) : ritr->second;
+         uint32_t pct;
+         if( routed.value <= 0 )
+            pct = 100;
+         else
+         {
+            fc::uint128_t p( (uint64_t)granted.value );
+            p *= 100;
+            p /= (uint64_t)routed.value;
+            pct = ( p > 0xFFFFFFFFu ) ? 0xFFFFFFFFu : (uint32_t)p;
+         }
+         if( pct > worst )
+            worst = pct;
+      }
+      o.interval_routed.clear();
+      o.interval_granted.clear();
+      o.alarms.burn_rate_pct = worst;
+      o.alarms.burn_warn = ( worst >= GRAPHENE_STEALTH_PARITY_BURN_WARN_PCT );
+      o.alarms.burn_critical = ( worst >= GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT );
+      // Skew: prune to the newest 301 windows, then compare the youngest
+      // window's share against the 40% tolerance (integer math, no floats).
+      uint32_t cur = db.head_block_num() / GRAPHENE_STEALTH_SKEW_WINDOW_BLOCKS;
+      while( o.blind_window_counts.size() > GRAPHENE_STEALTH_SKEW_WINDOWS_KEPT )
+         o.blind_window_counts.erase( o.blind_window_counts.begin() );
+      uint64_t total = 0;
+      for( const auto& kv : o.blind_window_counts )
+         total += kv.second;
+      uint64_t young = 0;
+      {
+         auto yitr = o.blind_window_counts.find( cur );
+         if( yitr != o.blind_window_counts.end() )
+            young = yitr->second;
+      }
+      o.alarms.decoy_skew_warn = ( total > 0 && young * 100 > total * 40 );
+      // Effective set: live copy of the decoy-candidate counters.
+      o.alarms.effective_set = o.unspent_blind_count;
+      // Mass exit: halted, or any fresh freeze vote live (no mutation here).
+      bool exit_warn = o.blind_halted;
+      if( !exit_warn )
+         for( const auto& kv : o.freeze_votes )
+            if( stealth_vote_fresh( now, kv.second.voted_at ) )
+            {
+               exit_warn = true;
+               break;
+            }
+      o.alarms.mass_exit_warn = exit_warn;
+      // Joint ceiling: parity share + recorded H2 diversion on the shared
+      // denominator. Signal only (routing must never brick on H2's numbers).
+      o.alarms.joint_cap_breach = !stealth_joint_fee_within_cap(
+            GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, o.h2_diversion_bps );
+   } );
+}
+
+void stealth_record_parity_review( database& db, uint8_t kind )
+{
+   if( !stealth_passed( db ) )
+      return;
+   const auto& s = get_or_create_stealth_status( db );
+   fc::time_point_sec now = db.head_block_time();
+   db.modify( s, [&]( stealth_status_object& o ) {
+      if( kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT )
+      {
+         o.last_set_report_time = now;
+         o.missed_set_reports = 0;
+         o.parity_funding_halted = false;
+      }
+      else
+      {
+         o.last_parity_review_time = now;
+         o.missed_parity_reviews = 0;
+      }
+   } );
+}
+
+stealth_alarm_snapshot stealth_current_alarms( const database& db )
+{
+   const auto* s = find_stealth_status( db );
+   if( !s )
+      return stealth_alarm_snapshot();
+   return s->alarms;
+}
+
+// ---------------------------------------------------------------------------
+// parity_review (committee heartbeat for reviews/reports; works while halted)
+// ---------------------------------------------------------------------------
+
+void_result parity_review_evaluator::do_evaluate( const parity_review_operation& o )
+{ try {
+   const database& d = db();
+   FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
+              "Parity reviews are not allowed until the stealth hardfork" );
+   const auto& cidx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   FC_ASSERT( cidx.find( o.voter ) != cidx.end(), "Parity review voter is not a committee member" );
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (o) ) }
+
+void_result parity_review_evaluator::do_apply( const parity_review_operation& o )
+{ try {
+   stealth_record_parity_review( db(), o.kind );
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (o) ) }
 
 } } // graphene::chain

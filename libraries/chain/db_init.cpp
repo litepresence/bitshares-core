@@ -162,6 +162,7 @@ void database::initialize_evaluators()
    register_evaluator<stealth_transfer_evaluator>();
    register_evaluator<freeze_blind_evaluator>();
    register_evaluator<turnstile_reproof_evaluator>();
+   register_evaluator<parity_review_evaluator>();
 }
 
 void database::initialize_indexes()

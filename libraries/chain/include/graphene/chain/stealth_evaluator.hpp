@@ -5,6 +5,7 @@
  */
 #pragma once
 #include <graphene/chain/evaluator.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/types.hpp>
 
 namespace graphene { namespace chain {
@@ -38,6 +39,15 @@ class turnstile_reproof_evaluator : public evaluator<turnstile_reproof_evaluator
       void_result do_apply( const turnstile_reproof_operation& o );
 
       virtual void pay_fee() override;
+};
+
+class parity_review_evaluator : public evaluator<parity_review_evaluator>
+{
+   public:
+      typedef parity_review_operation operation_type;
+
+      void_result do_evaluate( const parity_review_operation& o );
+      void_result do_apply( const parity_review_operation& o );
 };
 
 // ---------------------------------------------------------------------------
@@ -88,6 +98,122 @@ void stealth_reconcile_supplies( database& db );
  * maintenance (idempotent). Called from perform_chain_maintenance.
  */
 void stealth_maybe_record_activation( database& db );
+
+// ---------------------------------------------------------------------------
+// G1c parity economics (BSIP-2 §2): pool, float-to-cost, reviews, alarms
+// ---------------------------------------------------------------------------
+
+/**
+ * Cost anchor for one blind op in CORE units: max(activation snapshot of the
+ * transfer_to_blind schedule, pinned upstream defaults, current schedule),
+ * mapped onto n blind outputs (fee + n*price_per_output).
+ * The committee owns fee LEVELS (it parity-prices blind ops by lowering
+ * their schedules); consensus owns the SELECTION between the parity level
+ * (the op's own schedule) and this anchor by pool state. That split is
+ * what "floats by rule, not by surprise" means: no committee action happens
+ * at float time, and the float level is computable from public inputs.
+ */
+share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs );
+
+/**
+ * Discount actually granted, CORE units: max(0, anchor - parity), where
+ * parity is the op's own scheduled fee. Zero when the committee never priced
+ * below the anchor (no discount, no debit — the pool then only accumulates).
+ */
+share_type stealth_parity_gap_core( const database& db, uint32_t n_blind_outputs,
+                                    share_type parity_core );
+
+/**
+ * True when a gap of gap_core (CORE units) payable in fee_asset can be
+ * subsidized now: post-STEALTH, not halted, parity review current (6mo),
+ * pool balance covers the gap converted to fee_asset units (round UP,
+ * pool-favoring), and the per-block subsidy cap is not exhausted. Missed
+ * quarterly reports do NOT gate subsidies — they halt funding (routing)
+ * only; the pool keeps paying until empty. Pure check (evaluate +
+ * apply paths); the cap increment happens in do_apply only.
+ */
+bool stealth_parity_available( const database& db, asset_id_type fee_asset,
+                               share_type gap_core );
+
+/**
+ * Convert a CORE-denominated gap to fee_asset units, rounding UP (the pool
+ * never under-debits). CORE identity when fee_asset is CORE. Uses the same
+ * core_exchange_rate the fee path uses, inverted with 128-bit math —
+ * integer only, no floats.
+ */
+share_type stealth_gap_to_asset( const database& db, asset_id_type fee_asset,
+                                 share_type gap_core );
+
+/**
+ * Enforce the float rule in do_evaluate (post-STEALTH only, fee-economics
+ * path only — skipped exactly when the fee-schedule check is skipped, i.e.
+ * genesis/test/generator context where no fee is paid and no subsidy may be
+ * consumed). When subsidized, the central schedule check already enforces
+ * the parity level, so this only binds on the cost path:
+ * core_fee_paid >= cost_anchor.
+ */
+void stealth_require_blind_fee( const database& db, share_type core_fee_paid,
+                                bool fees_enforced, asset_id_type fee_asset,
+                                uint32_t n_blind_outputs, share_type parity_core );
+
+/**
+ * Consume the subsidy in do_apply (same skip guard as the check): the op's
+ * paid level decides the path — at/above the cost anchor it is a cost-path
+ * op (no discount granted, nothing consumed, even if the pool could cover);
+ * below it, it MUST have been a subsidized parity-path op (fail-closed
+ * assert + debit the pool by the gap in fee_asset units, credit the SAME
+ * amount to the fee asset's accumulated_fees for supply-neutrality, record
+ * interval flow, consume one per-block subsidy unit). All-or-nothing:
+ * partial gaps are never split (deterministic, no dust games).
+ */
+void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
+                                     asset_id_type fee_asset,
+                                     uint32_t n_blind_outputs,
+                                     share_type parity_core,
+                                     share_type core_fee_paid );
+
+/**
+ * Fee-share routing (called from database::pay_market_fees, the single
+ * choke point for market + settlement fees): post-STEALTH and while funding
+ * is not halted, move inout_increment * PARITY_FEE_SHARE_BPS / 10000 into
+ * parity_pool[recv_asset] (128-bit integer math) and reduce inout_increment
+ * to the remainder for accumulated_fees. Totals preserved exactly.
+ * Returns the routed amount (0 pre-fork, while halted, or on dust).
+ */
+share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
+                                     share_type& inout_increment );
+
+/**
+ * Joint-ceiling accounting (BSIP-1 §7b): pure function. The parity share and
+ * the recorded H2-side diversion on the shared denominator must jointly fit
+ * under 70%. Recorded, not thrown, at runtime (see alarms.joint_cap_breach):
+ * routing must never brick market fees on H2's numbers.
+ */
+bool stealth_joint_fee_within_cap( uint32_t parity_share_bps, uint32_t h2_diversion_bps );
+
+/**
+ * Per-interval maintenance (called from perform_chain_maintenance,
+ * post-STEALTH only): seed review heartbeats at activation; recompute missed
+ * review/report counts as whole elapsed intervals; derive funding-halted;
+ * compute the burn ratio per asset from interval flow and reset the flow;
+ * prune the creation histogram (newest 301 windows); refresh the alarm
+ * snapshot (effective set, burn flags, skew flag, mass-exit flag, joint flag).
+ */
+void stealth_parity_maintenance( database& db );
+
+/**
+ * Record a committee attestation (called by parity_review_evaluator):
+ * kind 0 resets the parity-review clock, kind 1 resets the set-report clock
+ * (clearing funding-halted). head-block time only.
+ */
+void stealth_record_parity_review( database& db, uint8_t kind );
+
+/// Read the last computed alarm snapshot (queryable via the status object).
+stealth_alarm_snapshot stealth_current_alarms( const database& db );
+
+/// Post-STEALTH only (pre-fork no-op): count n newly created decoy-eligible
+/// blind outputs in the current 100-block window (bounded histogram input).
+void stealth_window_count_add( database& db, uint32_t n );
 
 /**
  * Shared pre-check for every blind op (legacy 39/40/41 + new 83/85):

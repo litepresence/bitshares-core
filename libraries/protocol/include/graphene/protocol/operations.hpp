@@ -140,7 +140,8 @@ namespace graphene { namespace protocol {
             /* 82 */ reference_asset_create_operation,
             /* 83 */ stealth_transfer_operation,   // G1 BSIP-2 (STEALTH hardfork-gated)
             /* 84 */ freeze_blind_operation,       // G1 BSIP-2 (STEALTH hardfork-gated)
-            /* 85 */ turnstile_reproof_operation   // G1 BSIP-2 (STEALTH hardfork-gated)
+            /* 85 */ turnstile_reproof_operation,  // G1 BSIP-2 (STEALTH hardfork-gated)
+            /* 86 */ parity_review_operation       // G1c BSIP-2 §2 (STEALTH hardfork-gated)
           >;
 
    /**

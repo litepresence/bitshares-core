@@ -980,6 +980,49 @@ class wallet_api
                                          const string& symbol_or_id,
                                          bool broadcast = false )const;
 
+      /**
+       * Query the blind-by-default settings (BSIP-2 §2, G1c). Conformance
+       * hook: tests and the browser-wallet contract assert these values.
+       */
+      blind_transfer_defaults get_blind_defaults()const;
+
+      /**
+       * Flip the default-blind switch (session-local). false = new
+       * transfer_default calls route transparent unless asked otherwise.
+       */
+      void set_blind_by_default( bool blind_by_default )const;
+
+      /**
+       * Replace the full blind-defaults struct (batching, broadcast delay,
+       * mix hold). Session-local; see BLIND_DEFAULTS_CONTRACT.md.
+       */
+      void set_blind_defaults( const blind_transfer_defaults& defaults )const;
+
+      /**
+       * Network-hygiene hook: sleep min_broadcast_delay_sec before a blind
+       * broadcast (timing defense). Called by every blind-sending path when
+       * broadcast=true. Not remote-callable (no FC_API entry by design).
+       */
+      void blind_broadcast_delay()const;
+
+      /**
+       * Default-routed transfer (BSIP-2 §2, G1c): blind unless the caller
+       * opts out. Blind routing needs the recipient's blind key or label
+       * (same addressing as transfer_to_blind) and carries no memo — a
+       * non-empty memo or an unresolvable blind recipient fails CLOSED
+       * (never silently falls back to transparent; pass
+       * transparent_opt_out=true explicitly for the compliant path).
+       * @param transparent_opt_out one-tap transparent path (compliance,
+       * exchange deposits)
+       */
+      signed_transaction transfer_default( const string& from,
+                                           const string& to_key_or_account,
+                                           const string& amount,
+                                           const string& asset_symbol,
+                                           const string& memo,
+                                           bool transparent_opt_out,
+                                           bool broadcast = false )const;
+
       /** Place a limit order attempting to sell one asset for another.
        *
        * Buying and selling are the same operation on BitShares. If you want to buy BTS
@@ -2073,6 +2116,10 @@ FC_API( graphene::wallet::wallet_api,
         (transfer_to_blind)
         (transfer_from_blind)
         (blind_transfer)
+        (get_blind_defaults)
+        (set_blind_by_default)
+        (set_blind_defaults)
+        (transfer_default)
         (blind_history)
         (receive_blind_transfer)
         (get_order_book)

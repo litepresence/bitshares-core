@@ -424,6 +424,10 @@ struct get_impacted_account_visitor
       add_authority_accounts( _impacted, op.owner );
       add_authority_accounts( _impacted, op.new_output.owner );
    }
+   void operator()( const parity_review_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // voter
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

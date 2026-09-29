@@ -46,6 +46,42 @@ using stealth_nullifier_multi_idx = multi_index_container<
 using stealth_nullifier_index = generic_index<stealth_nullifier_object, stealth_nullifier_multi_idx>;
 
 /**
+ * @brief Per-interval alarm snapshot (BSIP-2 §1-§2, G1c).
+ * @ingroup object
+ *
+ * Recomputed every maintenance interval by stealth_parity_maintenance from
+ * consensus state only (no floats, no wall-clock: head-block time and
+ * integer ratios). Queryable like any implementation object (get_object on
+ * the stealth status singleton). Alarms are block-speed signals; monthly
+ * stats and quarterly reports remain the governance instruments.
+ */
+struct stealth_alarm_snapshot
+{
+   /// Known-spend-adjusted effective set per asset: unspent decoy-candidate
+   /// blinded balances (spent-but-retained outputs are already excluded by
+   /// the counter, grandfathered ones never counted).
+   flat_map<asset_id_type, uint32_t> effective_set;
+   /// Worst per-asset interval grant/route ratio, percent (100 when grants
+   /// exist with no routed inflow; 0 when neither moved).
+   uint32_t              burn_rate_pct = 0;
+   bool                  burn_warn = false;     ///< worst >= 50% (proposal)
+   bool                  burn_critical = false; ///< worst >= 80% (proposal)
+   /// True when the youngest 100-block creation window holds more than 40%
+   /// of the retained decoy-eligible pool: new rings WILL skew young, so
+   /// availability (the pool floor) is about to bind harder. Heuristic over
+   /// the bounded creation histogram (spent outputs stay retained as decoys,
+   /// so the histogram counts created-eligible, not unspent — documented
+   /// approximation; the floor gate, not this flag, enforces).
+   bool                  decoy_skew_warn = false;
+   /// True while any fresh committee freeze vote is live or blind ops are
+   /// halted: exits through the transparent legs may crowd (BSIP-2 §1).
+   bool                  mass_exit_warn = false;
+   /// True when parity_share + recorded H2 diversion exceeds the 70% joint
+   /// ceiling (BSIP-1 §7b): signal, not halt — governance must rebalance.
+   bool                  joint_cap_breach = false;
+};
+
+/**
  * @brief A committee freeze vote (up to one live vote per member).
  * @ingroup object
  */
@@ -104,6 +140,51 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// value). Grandfathered (pre-fork, metadata absent) balances never
       /// count. Zero entries are removed; flat_map is ORDERED.
       flat_map<asset_id_type, uint32_t> unspent_blind_count;
+      // --- G1c parity pool (BSIP-2 §2). All appended-last. ---
+      /// Per-asset parity pool balances (fee-share inflow minus granted
+      /// subsidies). Zero entries removed; ORDERED flat_map. Part of supply
+      /// accounting (see verify_asset_supplies): inflow redirects the
+      /// accumulated_fees increment, outflow credits accumulated_fees, so
+      /// every movement preserves asset totals exactly.
+      flat_map<asset_id_type, share_type> parity_pool;
+      /// Per-block subsidized-op counter for the cap (block_num, count).
+      uint32_t              parity_block_num = 0;
+      uint32_t              parity_subsidized_count = 0;
+      /// Review/report heartbeats (0 = never; seeded to activation on the
+      /// first post-STEALTH maintenance). Missed counts are RECOMPUTED each
+      /// maintenance as whole elapsed intervals (deterministic under replay
+      /// and time jumps; no incremental state to corrupt).
+      fc::time_point_sec    last_parity_review_time;
+      fc::time_point_sec    last_set_report_time;
+      uint32_t              missed_parity_reviews = 0;
+      uint32_t              missed_set_reports = 0;
+      /// True once two consecutive quarterly reports are missed: fee-share
+      /// routing stops until a report is attested. The pool keeps paying
+      /// until empty (halt is on funding, not on granted subsidies).
+      bool                  parity_funding_halted = false;
+      /// H2-side diversion on the shared joint denominator, basis points
+      /// (0 until the hybrid program lands and its writer records it here).
+      /// The joint ceiling is enforced as accounting + alarm, never as a
+      /// market-fee throw (routing must not brick on H2's numbers).
+      uint32_t              h2_diversion_bps = 0;
+      /// Per-interval routed/granted flow per asset (reset every
+      /// maintenance after the burn ratio is computed). Flow stats, not
+      /// balances: never part of supply accounting. Zero entries removed.
+      flat_map<asset_id_type, share_type> interval_routed;
+      flat_map<asset_id_type, share_type> interval_granted;
+      /// Decoy-eligible blind outputs created per 100-block window
+      /// (window index = block_num / 100, global across assets). Pruned to
+      /// the newest 301 windows every maintenance: bounded by construction.
+      flat_map<uint32_t, uint32_t> blind_window_counts;
+      /// Activation snapshot of the transfer_to_blind fee schedule
+      /// (base + per-output): the TRUE pre-parity levels, captured once at
+      /// the first post-STEALTH maintenance. Feeds the cost anchor's max()
+      /// so committee cuts below activation levels open a subsidy gap while
+      /// committee raises move the anchor with them.
+      uint64_t              activation_k39_fee = 0;
+      uint32_t              activation_k39_ppo = 0;
+      /// Last computed alarm snapshot (see stealth_alarm_snapshot).
+      stealth_alarm_snapshot alarms;
 };
 
 using stealth_status_multi_idx = multi_index_container<
@@ -126,3 +207,6 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::stealth_nullifier_obje
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::stealth_status_object )
 
 FC_REFLECT( graphene::chain::stealth_freeze_vote, (voter)(freeze)(voted_at) )
+FC_REFLECT( graphene::chain::stealth_alarm_snapshot,
+            (effective_set)(burn_rate_pct)(burn_warn)(burn_critical)
+            (decoy_skew_warn)(mass_exit_warn)(joint_cap_breach) )

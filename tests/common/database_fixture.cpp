@@ -37,6 +37,7 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/market_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -675,6 +676,16 @@ void database_fixture_base::verify_asset_supplies( const database& db )
    for( auto itr = htlc_idx.begin(); itr != htlc_idx.end(); ++itr )
    {
       total_balances[itr->transfer.asset_id] += itr->transfer.amount;
+   }
+
+   // G1c parity pool (BSIP-2 §2): pool balances are redirected fee income
+   // (routing splits the accumulated_fees increment; subsidies credit it
+   // back), so they belong in supply accounting like fee_pool does.
+   {
+      const auto& sidx = db.get_index_type<stealth_status_index>().indices();
+      for( const auto& s : sidx )
+         for( const auto& kv : s.parity_pool )
+            total_balances[kv.first] += kv.second;
    }
 
    for( const asset_object& asset_obj : db.get_index_type<asset_index>().indices() )

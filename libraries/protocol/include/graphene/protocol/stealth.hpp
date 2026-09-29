@@ -102,6 +102,70 @@ constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC = 172800;
 #define GRAPHENE_STEALTH_J1_SEED "BitShares-G1-J1-secp256k1-v1"
 #define GRAPHENE_STEALTH_J2_SEED "BitShares-G1-J2-secp256k1-v1"
 
+/**
+ * @defgroup g1_stealth_parity G1 parity economics (BSIP-2 §2)
+ * @brief Fee-parity pool, float-to-cost rule, review defaults, joint cap.
+ *
+ * All numeric constants below are PROPOSALS per BSIP-2 Discussion (and
+ * BSIP-1 §7b for the joint cap): auditors may raise them, never lower them;
+ * auditor deadlock falls back to these floor values after 90 days.
+ * Consensus law: integer (basis-point/second) math only, no floats;
+ * head-block time only; bounded state (per-asset maps prune zero entries).
+ * @{
+ */
+
+/// Fixed share of each market/settlement fee routed to the per-asset parity
+/// pool (basis points of the issuer-fee increment, 500 = 5%). Redirects —
+/// never mints: accumulated_fees receives the remainder, so the fee totals
+/// are preserved exactly. Enforced at the single choke point
+/// (database::pay_market_fees, which also serves force-settlement).
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS = 500;
+/// Per-block cap on SUBSIDIZED blind ops (proposal: 50). Tighter than the
+/// blind-op budget (100), so a fully subsidized block still leaves reserved
+/// space for transparent/market operations. Each subsidized op consumes one
+/// unit; beyond the cap (or with an empty pool) blind fees float to cost.
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK = 50;
+/// Parity-pricing review cadence (proposal: 6 months = 180 days). Past one
+/// full interval with no recorded review, subsidies stop (cost-mode):
+/// blind fees float to cost by rule, never by surprise. Recording is an
+/// explicit committee attestation (parity_review_operation), never silence.
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_REVIEW_INTERVAL_SEC = 15552000;
+/// Anonymity-set report cadence (proposal: quarterly = 90 days). Two
+/// consecutive missed reports halt parity FUNDING (routing stops; the pool
+/// keeps paying until empty) until reporting resumes.
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC = 7776000;
+/// Joint fee-diversion ceiling shared with the hybrid program (BSIP-1 §7b,
+/// proposal: <=70% of conversion fees on one shared denominator, reviewed
+/// yearly). The parity share above (5%) is statically below it; the running
+/// H2-side diversion is recorded on-chain (stealth_status_object) so the
+/// joint accounting is enforced here, not assumed.
+constexpr uint32_t GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS = 7000;
+/// Burn-rate alarm thresholds on the per-interval grant/route ratio
+/// (proposals): 50% warn, 80% critical. Alarms are block-speed signals;
+/// monthly stats and quarterly reports remain the governance instruments.
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_BURN_WARN_PCT = 50;
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT = 80;
+/// 100-block creation windows retained for the decoy-skew alarm (matches the
+/// skew rule window; bounds the histogram: <= 301 entries, pruned oldest).
+constexpr uint32_t GRAPHENE_STEALTH_SKEW_WINDOW_BLOCKS = 100;
+constexpr uint32_t GRAPHENE_STEALTH_SKEW_WINDOWS_KEPT = 301;
+
+/// Pinned pre-parity blind-cost anchor (proposal): the upstream
+/// transfer_to_blind defaults (base + per-output), kept as code constants so
+/// the float-to-cost level never depends on committee silence. The live
+/// anchor is max(snapshot at activation, pinned here, current schedule):
+/// committee cuts below it open a subsidy gap; committee raises move the
+/// anchor with them (no windfall subsidy on repricing); the central schedule
+/// check always enforces current levels underneath.
+constexpr uint64_t GRAPHENE_STEALTH_ANCHOR_BASE_FEE = 5 * GRAPHENE_BLOCKCHAIN_PRECISION;
+constexpr uint32_t GRAPHENE_STEALTH_ANCHOR_PRICE_PER_OUTPUT = 5 * GRAPHENE_BLOCKCHAIN_PRECISION;
+
+/// Attestation kinds for parity_review_operation.
+constexpr uint8_t GRAPHENE_STEALTH_REVIEW_PARITY = 0;     ///< 6-month parity-pricing review
+constexpr uint8_t GRAPHENE_STEALTH_REVIEW_SET_REPORT = 1; ///< quarterly anonymity-set report
+
+/** @} endgroup g1_stealth_parity */
+
 /** @} endgroup g1_stealth */
 
 /**
@@ -260,6 +324,32 @@ struct turnstile_reproof_operation : public base_operation
    }
 };
 
+/**
+ * @brief Committee attestation of a parity review or set report (BSIP-2 §2).
+ * @ingroup g1_stealth_parity
+ *
+ * Single-member attestation (any elected committee member): the heartbeat
+ * only PERMITS parity to continue, so a false attestation buys nothing but
+ * continued subsidies — unlike freeze_blind, which halts the subsystem and
+ * therefore needs a quorum. Lying to governance is vote-punishable, not
+ * consensus-punishable. Reviews (kind 0) reset the 6-month cost-mode clock;
+ * set reports (kind 1) reset the missed-quarterly counter and resume funding.
+ */
+struct parity_review_operation : public base_operation
+{
+   struct fee_params_t { uint64_t fee = 0; };
+
+   asset                 fee;
+   account_id_type       voter; ///< must hold a committee_member_object
+   uint8_t               kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+   string                note;
+
+   extensions_type       extensions; ///< appended-last
+
+   account_id_type fee_payer()const { return voter; }
+   void            validate()const;
+};
+
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::stealth_ring_input,
@@ -273,13 +363,18 @@ FC_REFLECT( graphene::protocol::freeze_blind_operation,
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation,
             (fee)(asset_id)(old_commitment)(owner)(old_blind)(new_blind)
             (new_output)(new_proof_version)(extensions) )
+FC_REFLECT( graphene::protocol::parity_review_operation,
+            (fee)(voter)(kind)(note)(extensions) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation::fee_params_t, (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation::fee_params_t, (fee)(price_per_output) )
+FC_REFLECT( graphene::protocol::parity_review_operation::fee_params_t, (fee) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation )

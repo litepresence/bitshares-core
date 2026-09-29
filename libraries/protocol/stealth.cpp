@@ -109,11 +109,23 @@ share_type turnstile_reproof_operation::calculate_fee( const fee_params_t& k )co
    return k.fee + k.price_per_output;
 }
 
+void parity_review_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0 );
+   FC_ASSERT( voter != account_id_type(), "voter required" );
+   FC_ASSERT( kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
+              kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
+              "unknown review kind" );
+   FC_ASSERT( note.size() <= 256, "note too long" );
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation )

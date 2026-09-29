@@ -107,7 +107,14 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::stealth_nullifier_object, (grap
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::stealth_status_object, (graphene::db::object),
                                 (blind_halted)(tripwire_fire_block)(blind_block_num)(blind_block_count)
                                 (stealth_activated_time)(v1_sunset_time)(turnstile_g2_time)
-                                (freeze_votes)(blinded_supply_shadow)(unspent_blind_count) )
+                                (freeze_votes)(blinded_supply_shadow)(unspent_blind_count)
+                                (parity_pool)(parity_block_num)(parity_subsidized_count)
+                                (last_parity_review_time)(last_set_report_time)
+                                (missed_parity_reviews)(missed_set_reports)
+                                (parity_funding_halted)(h2_diversion_bps)
+                                (interval_routed)(interval_granted)
+                                (blind_window_counts)
+                                (activation_k39_fee)(activation_k39_ppo)(alarms) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::dynamic_global_property_object, (graphene::db::object),
                     (head_block_number)

@@ -475,9 +475,16 @@ namespace graphene { namespace protocol {
     *
     * Refused while anything on chain still references it.
     */
-   struct oracle_delete_operation : public base_operation
-   {
-      struct fee_params_t { uint64_t fee = 0; };
+    struct oracle_delete_operation : public base_operation
+    {
+       // Zero by design (R7C-H2 fee-floor review): owner-only cleanup, refused
+       // while anything references the oracle, and each deletable oracle cost
+       // 500 BTS to create -- delete-spam is bounded by creation (1k deletes
+       // cost 500k BTS in creations), so a fee would only tax hygiene. Matches
+       // the chain-wide delete/cancel precedent (pool/fund/permission/offer
+       // deletes, order cancels are all zero-fee). No rate-limit: the creation
+       // cost dominates any flood the free delete could carry.
+       struct fee_params_t { uint64_t fee = 0; };
 
       asset            fee;
       account_id_type  owner;

@@ -39,6 +39,8 @@ namespace graphene { namespace chain {
 // this TU otherwise only sees graphene::chain.
 using protocol::GRAPHENE_STEALTH_RING_MIN;
 using protocol::GRAPHENE_STEALTH_RING_MAX;
+using protocol::GRAPHENE_STEALTH_RING_TARGET;
+using protocol::GRAPHENE_STEALTH_THIN_POOL_DEPTH;
 using protocol::GRAPHENE_STEALTH_PROOF_V1;
 using protocol::GRAPHENE_STEALTH_PROOF_V2;
 using protocol::GRAPHENE_STEALTH_DECOY_MIN_AGE_SEC;
@@ -1008,15 +1010,22 @@ bool stealth_verify_bp_plus( uint8_t m,
 // ---------------------------------------------------------------------------
 
 bool stealth_check_decoy_policy( const std::vector<uint32_t>& heights,
-                                 const std::vector<fc::time_point_sec>& times,
-                                 fc::time_point_sec now,
-                                 uint32_t head_block,
-                                 std::string& err )
+                                  const std::vector<fc::time_point_sec>& times,
+                                  fc::time_point_sec now,
+                                  uint32_t head_block,
+                                  std::string& err,
+                                  uint32_t pool_depth )
 {
    const size_t n = heights.size();
-   if( n != times.size() || n < GRAPHENE_STEALTH_RING_MIN ||
+   // R-04 thin-pool tightening: a shallow unspent pool is Sybil-floodable
+   // (BSIP-2 admits the $1 attack), so thin rings must be target-sized with
+   // a tighter age spread. Bounds stay exact integer math, no floats.
+   const bool thin = ( pool_depth < GRAPHENE_STEALTH_THIN_POOL_DEPTH );
+   const size_t min_n = thin ? GRAPHENE_STEALTH_RING_TARGET
+                             : GRAPHENE_STEALTH_RING_MIN;
+   if( n != times.size() || n < min_n ||
        n > GRAPHENE_STEALTH_RING_MAX )
-      { err = "decoy set size out of bounds"; return false; }
+      { err = thin ? "thin-pool ring below target size" : "decoy set size out of bounds"; return false; }
    for( size_t i = 0; i < n; ++i )
    {
       if( heights[i] == 0 || heights[i] > head_block )
@@ -1028,7 +1037,11 @@ bool stealth_check_decoy_policy( const std::vector<uint32_t>& heights,
          { err = "decoy under minimum age"; return false; }
    }
    // skew: bucket heights into 100-block windows; no window may hold more
-   // than 40% of members. Bounded: n <= 32, windows <= 32.
+   // than 40% of members (25% when thin, R-04). Bounded: n <= 32,
+   // windows <= 32. Exact integer math: count/n <= p/100 <=> count*100 <=
+   // n*p would overflow nothing here (count,n <= 32) but the legacy
+   // factored forms are kept (40%: count*5 <= 2*n; 25%: count*4 <= n) so
+   // the boundary (exactly 40%/25%) passes identically.
    for( size_t i = 0; i < n; ++i )
    {
       uint32_t w = heights[i] / GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS;
@@ -1036,8 +1049,13 @@ bool stealth_check_decoy_policy( const std::vector<uint32_t>& heights,
       for( size_t j = 0; j < n; ++j )
          if( heights[j] / GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS == w )
             ++count;
-      // count/n <= 40/100  <=>  count*5 <= 2*n  (exact integer math)
-      if( count * 5 > 2 * n )
+      if( thin )
+      {
+         // count/n <= 25/100  <=>  count*4 <= n
+         if( count * 4 > n )
+            { err = "thin-pool decoy age-skew violation"; return false; }
+      }
+      else if( count * 5 > 2 * n )
          { err = "decoy age-skew violation"; return false; }
    }
    return true;

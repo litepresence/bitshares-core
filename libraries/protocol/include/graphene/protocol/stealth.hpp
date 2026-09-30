@@ -74,6 +74,15 @@ constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_MAX_PCT = 40;
 /// Availability yields to privacy, explicitly (thin-pool rings are worse
 /// than no rings: they mark the spender as one of few).
 constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
+/// Thin-pool decoy tightening (R-04, proposal): while the per-asset unspent
+/// pool is below this depth, rings must meet the TARGET size (16, not the
+/// 11 floor) and no 100-block window may contribute more than 25% (not
+/// 40%). Rationale: a $1 Sybil floods a thin pool cheaply (BSIP-2 admits
+/// the attack); small rings over attacker-majority windows are markings,
+/// not anonymity. Above this depth the floor/40% rules apply.
+/// Auditors may raise any of these; the pre-G1 audit owns the final values.
+constexpr uint32_t GRAPHENE_STEALTH_THIN_POOL_DEPTH = 64;
+constexpr uint32_t GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT = 25;
 
 /// Proof versions. V1 = Borromean range proofs via the fc backend (legacy
 /// proofs verify forever; no forced migration of existing blind balances).

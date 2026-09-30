@@ -420,8 +420,12 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
       }
       {
          std::string err;
+         // R-04: the caller owns the pool-depth context the pure policy
+         // function lacks — pass this asset's unspent depth so thin pools
+         // (< 64) enforce target-size rings with the tighter skew ceiling.
          FC_ASSERT( stealth_check_decoy_policy( heights, times, d.head_block_time(),
-                                                d.head_block_num(), err ),
+                                                d.head_block_num(), err,
+                                                stealth_pool_depth( d, o.asset_id ) ),
                     "Decoy policy violation: ${e}", ("e", err) );
       }
       // Double-spend: same image twice rejects at insert; check here for a
@@ -760,10 +764,22 @@ bool live_review_current( const database& db, const stealth_status_object& s )
 
 share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs )
 {
-   const auto& k39 = db.current_fee_schedule()
-      .get<protocol::transfer_to_blind_operation>();
-   fc::uint128_t current( k39.fee );
-   current += fc::uint128_t( k39.price_per_output ) * n_blind_outputs;
+   // G3-01: the current-schedule leg is derived through
+   // fee_schedule.calculate_fee on a synthetic transfer_to_blind leg with
+   // the same output count, so the committee scale factor applies here
+   // exactly as it does to parity_core (which reaches the float rule via
+   // calculate_fee_for_operation). Reading raw k39.fee/ppo ignored scale
+   // and let the two legs diverge under repricing. The pinned and snapshot
+   // legs stay unscaled by design: they are historical/constant floors on
+   // the anchor, while live scale moves current + parity together; max()
+   // keeps the higher. (Snapshot edge: a non-100% scale AT activation is
+   // not captured in the stored raw params, understating the floor — the
+   // fail-closed direction for subsidies.)
+   protocol::transfer_to_blind_operation synth;
+   synth.outputs.resize( n_blind_outputs );
+   share_type current_leg =
+      db.current_fee_schedule().calculate_fee( protocol::operation( synth ) ).amount;
+   fc::uint128_t current( current_leg.value );
    fc::uint128_t pinned( protocol::GRAPHENE_STEALTH_ANCHOR_BASE_FEE );
    pinned += fc::uint128_t( protocol::GRAPHENE_STEALTH_ANCHOR_PRICE_PER_OUTPUT )
              * n_blind_outputs;
@@ -824,11 +840,23 @@ bool stealth_parity_available( const database& db, asset_id_type fee_asset,
       return false;
    if( s->blind_halted )
       return false;
-   // R-05 (audit-round-2): 80% burn-critical halts NEW subsidies by rule —
-   // was signal-only, so a drain proceeded while the alarm watched. Existing
-   // grants keep paying until empty; only new subsidy availability gates here.
-   if( s->alarms.burn_critical )
-      return false;
+    // R-05 (audit-round-2) + G3-03: 80% burn-critical halts NEW subsidies
+    // by rule — was signal-only, so a drain proceeded while the alarm
+    // watched. Existing grants keep paying until empty; only new subsidy
+    // availability gates here.
+    //
+    // G3-03 lag window (honest scope): burn_critical is recomputed ONLY in
+    // stealth_parity_maintenance from the per-interval routed/granted flow
+    // (snapshot semantics between maintenances). Inside one interval the
+    // drain proceeds unhalted at up to
+    // GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK (50) subsidized ops
+    // per block — the per-block cap, not this flag, bounds the intra-window
+    // burn. The flag then refuses new subsidies until a later maintenance
+    // recomputes worst below 80% (auto-clear with fresh routed/granted
+    // flow); the cost-anchor path always clears, so the halt never bricks
+    // blind traffic, only its subsidy.
+    if( s->alarms.burn_critical )
+       return false;
    if( !live_review_current( db, *s ) )
       return false; // missed 6-month review: cost-mode by rule
    // Missed quarterly reports halt FUNDING (routing) only — the pool keeps
@@ -1058,6 +1086,13 @@ void stealth_parity_maintenance( database& db )
 
 void stealth_record_parity_review( database& db, uint8_t kind )
 {
+   // G3-04: unknown kinds must never be recorded as parity (the old
+   // else-branch did exactly that, with only relay-side validate() gating).
+   // Consensus asserts 0/1 here AND in parity_review_evaluator::do_apply so
+   // a proposal-embedded op 86 with a bad kind fails closed at apply time.
+   FC_ASSERT( kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
+              kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
+              "Unknown parity review kind" );
    if( !stealth_passed( db ) )
       return;
    const auto& s = get_or_create_stealth_status( db );
@@ -1101,6 +1136,11 @@ void_result parity_review_evaluator::do_evaluate( const parity_review_operation&
 
 void_result parity_review_evaluator::do_apply( const parity_review_operation& o )
 { try {
+   // G3-04: kind gate in consensus (validate() runs on relays and is not
+   // the consensus boundary for proposal-embedded ops).
+   FC_ASSERT( o.kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
+              o.kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
+              "Unknown parity review kind" );
    stealth_record_parity_review( db(), o.kind );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }

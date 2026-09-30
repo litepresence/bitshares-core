@@ -39,6 +39,21 @@ BlockstreamResearch/secp256k1-zkp @ `8e1f96c20e16bf960be6caec7f3c94acb360cdf2`.
    is SUPERSEDED for the new proof path by `../stealth_proof.cpp`; the legacy
    blind path (ops 39-41, V1 proofs) keeps using fc's `verify_range` untouched.
 
+## S-02: the `fc @ bd067945` snapshot is legacy-blind-only
+
+The secp256k1-zkp snapshot vendored inside `libraries/fc` (commit
+`bd067945`, Borromean era) predates the upstream `src/modules/`
+rangeproof/bulletproofs work (S2 above, 2023). Its consensus role is
+narrow and frozen: it verifies legacy V1 Borromean proofs for ops 39-41
+(`transfer_to_blind`, `blind_transfer`, `transfer_from_blind`) via fc's
+`verify_range`/`range_proof_sign`, and NOTHING else. It is never a
+dependency of the new G1 path: `../stealth_proof.cpp` (rings, BP+,
+conservation kernel) links OpenSSL + fc's secp256k1 EC primitives only,
+and the CMake guard in `libraries/chain/CMakeLists.txt` (S-02) fails the
+configure if any `stealth/vendor/` file ever enters a consensus target.
+Any future proof upgrade vendors its lineage here with fresh pins — the
+`fc` snapshot is not upgraded in place for G1 purposes.
+
 ## SHA256 of vendored files (measured at vendor time)
 
 monero-ringct/:

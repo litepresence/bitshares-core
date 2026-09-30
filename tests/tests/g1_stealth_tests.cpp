@@ -40,6 +40,7 @@
 #include <graphene/chain/stealth_proof.hpp>
 #include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/stealth_evaluator.hpp>
+#include <graphene/chain/transaction_evaluation_state.hpp>
 #include <graphene/wallet/wallet.hpp>
 
 #include <fc/crypto/digest.hpp>
@@ -2440,7 +2441,10 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
       BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 45000 );
    }
    verify_asset_supplies( db );
-   // Non-member attestations never count; bad kinds reject at validate.
+   // Non-member attestations never count; bad kinds reject at validate AND
+   // at create time (G4-02: the do_evaluate kind gate fails fast at
+   // mempool/proposal-create instead of a late block failure — the direct
+   // dispatch below bypasses relay-side validate to pin the consensus gate).
    {
       parity_review_operation r;
       r.voter = dan.id; r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
@@ -2453,6 +2457,49 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
       parity_review_operation bad;
       bad.voter = alice.id; bad.kind = 7;
       BOOST_CHECK_THROW( bad.validate(), fc::exception );
+      // Create-time refusal: a committee member's bad-kind review never
+      // reaches a block (fails at push, not at apply).
+      {
+         signed_transaction btx; btx.operations.push_back( bad );
+         db.current_fee_schedule().set_fee( btx.operations.back() );
+         set_expiration( db, btx );
+         sign( btx, alice_private_key );
+         BOOST_CHECK_THROW( PUSH_TX( db, btx ), fc::exception );
+      }
+      // Consensus gate (validate bypassed): do_evaluate itself rejects the
+      // kind with the consensus message, so a block-producer smuggling a
+      // non-validated bad-kind op fails closed at evaluation, not late.
+      {
+         transaction_evaluation_state es( &db );
+         try
+         {
+            db.apply_operation( es, operation( bad ) );
+            BOOST_FAIL( "bad-kind review must fail closed in do_evaluate" );
+         }
+         catch( const fc::exception& e )
+         {
+            BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Unknown parity review kind" )
+                                 != std::string::npos, e.to_detail_string() );
+         }
+      }
+      // The valid-kind control still dispatches past the kind gate to the
+      // committee gate (non-member dan): proves the gate above is kind-only
+      // and registration dispatches op 86 to this evaluator.
+      {
+         parity_review_operation good;
+         good.voter = dan.id; good.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+         transaction_evaluation_state es( &db );
+         try
+         {
+            db.apply_operation( es, operation( good ) );
+            BOOST_FAIL( "non-member review must reject at the committee gate" );
+         }
+         catch( const fc::exception& e )
+         {
+            BOOST_CHECK_MESSAGE( e.to_detail_string().find( "committee member" )
+                                 != std::string::npos, e.to_detail_string() );
+         }
+      }
    }
    generate_block();
 } FC_CAPTURE_AND_RETHROW() }
@@ -2925,6 +2972,113 @@ BOOST_AUTO_TEST_CASE( parity_uia_cer_gap_bound )
    generate_block();
 } FC_CAPTURE_AND_RETHROW() }
 
+BOOST_AUTO_TEST_CASE( gap_cer_edge_guards )
+{ try {
+   // G4-01: the CER + gap guards in stealth_gap_to_asset fail closed.
+   // price::validate pins both CER legs at issue/update time, but consensus
+   // must not trust stored state (direct db.modify bypasses validate — the
+   // same way a replayed/corrupt CER would arrive). Zero base without the
+   // fix converts every gap to 0 (free subsidy: pool never debited); a
+   // negative gap without the fix passes the CORE fast path ungated while
+   // the UIA path wraps to uint64 and trips overflow. Both pinned with
+   // exact-message asserts; the CER is restored after each leg so
+   // verify_asset_supplies still balances (CER is not supply state).
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 10000000 ) );
+   const asset_object& uia = create_user_issued_asset( "TESTUIA" );
+   const asset_id_type uia_id = uia.get_id();
+   issue_uia( dan, uia.amount( 1000000 ) );
+   generate_block(); // seal-then-modify: CER writes below are direct
+   db.modify( uia, [&]( asset_object& a ) {
+      a.options.core_exchange_rate = price( core.amount( 3 ), asset( 2, uia_id ) );
+   } );
+   // Sanity: the 3:2 CER still converts (ceil(1001*3/2) = 1502).
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, uia_id, share_type( 1001 ) ).value, 1502 );
+   // Zero gap fast path (both legs): 0 in, 0 out, no throw.
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, core_id, share_type( 0 ) ).value, 0 );
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, uia_id, share_type( 0 ) ).value, 0 );
+   // Negative gap fails closed on BOTH legs with the consensus message.
+   for( auto aid : { core_id, uia_id } )
+   {
+      try
+      {
+         stealth_gap_to_asset( db, aid, share_type( -1 ) );
+         BOOST_FAIL( "negative gap must fail closed" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "non-negative gap" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      try
+      {
+         stealth_gap_to_asset( db, aid, share_type( -1000000 ) );
+         BOOST_FAIL( "negative gap must fail closed" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "non-negative gap" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+   }
+   // Zero CER base fails closed (would otherwise convert every gap to 0).
+   db.modify( uia, [&]( asset_object& a ) {
+      a.options.core_exchange_rate = price( core.amount( 0 ), asset( 2, uia_id ) );
+   } );
+   try
+   {
+      stealth_gap_to_asset( db, uia_id, share_type( 100 ) );
+      BOOST_FAIL( "zero CER base must fail closed" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "valid CER" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   // Zero CER quote still fails closed (pre-existing gate, pinned here).
+   db.modify( uia, [&]( asset_object& a ) {
+      a.options.core_exchange_rate = price( core.amount( 3 ), asset( 0, uia_id ) );
+   } );
+   try
+   {
+      stealth_gap_to_asset( db, uia_id, share_type( 100 ) );
+      BOOST_FAIL( "zero CER quote must fail closed" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "valid CER" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   // Overflow CER fails closed: gap 1000 at base 1e15 / quote 1 needs
+   // 1000*1e15 = 1e18 units > GRAPHENE_MAX_SHARE_SUPPLY (1e15).
+   db.modify( uia, [&]( asset_object& a ) {
+      a.options.core_exchange_rate = price( core.amount( GRAPHENE_MAX_SHARE_SUPPLY ),
+                                            asset( 1, uia_id ) );
+   } );
+   try
+   {
+      stealth_gap_to_asset( db, uia_id, share_type( 1000 ) );
+      BOOST_FAIL( "overflowing CER conversion must fail closed" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "overflow" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   // Restore the valid CER: conversion + availability work again.
+   db.modify( uia, [&]( asset_object& a ) {
+      a.options.core_exchange_rate = price( core.amount( 3 ), asset( 2, uia_id ) );
+   } );
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, uia_id, share_type( 1000 ) ).value, 1500 );
+   verify_asset_supplies( db );
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
 { try {
    // G3-06 + G3-01: (a) dust routing returns zero and dirties no state;
@@ -3055,6 +3209,73 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
       sign( tx, dan_private_key );
       BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
    }
+   // (e) G4-06 direct evaluator-registration asserts: dispatch each new op
+   // 83-86 straight to database::apply_operation, bypassing PUSH_TX fee /
+   // authority layers AND relay-side validate(). Pre-fork every one must
+   // reach its evaluator's hardfork gate — "No registered evaluator" would
+   // prove a db_init wiring miss; the hardfork refusal proves the evaluator
+   // exists and gates. (The inferred PUSH_TX pins in (d) cannot prove this:
+   // a missing evaluator and a hardfork refusal both throw at push.)
+   // (C++14: tag<X>::value is constexpr-static; bind it to a local first —
+   // passing it straight into BOOST_CHECK_EQUAL odr-uses it via const-ref
+   // and fails to link. Copy-init is a constant-expression use, no odr-use.)
+   const int tag83 = operation::tag<stealth_transfer_operation>::value;
+   const int tag84 = operation::tag<freeze_blind_operation>::value;
+   const int tag85 = operation::tag<turnstile_reproof_operation>::value;
+   const int tag86 = operation::tag<parity_review_operation>::value;
+   BOOST_CHECK_EQUAL( tag83, 83 );
+   BOOST_CHECK_EQUAL( tag84, 84 );
+   BOOST_CHECK_EQUAL( tag85, 85 );
+   BOOST_CHECK_EQUAL( tag86, 86 );
+   {
+      auto expect_hardfork_refusal = [&]( const operation& op, const char* what )
+      {
+         transaction_evaluation_state es( &db );
+         try
+         {
+            db.apply_operation( es, op );
+            BOOST_FAIL( what << ": unregistered evaluator or missing hardfork gate" );
+         }
+         catch( const fc::exception& e )
+         {
+            std::string w = e.to_detail_string();
+            BOOST_CHECK_MESSAGE( w.find( "No registered evaluator" ) == std::string::npos, w );
+            BOOST_CHECK_MESSAGE( w.find( "hardfork" ) != std::string::npos, w );
+         }
+      };
+      stealth_transfer_operation t83;
+      expect_hardfork_refusal( operation( t83 ), "op 83 stealth_transfer" );
+      freeze_blind_operation f84;
+      f84.voter = dan.id;
+      expect_hardfork_refusal( operation( f84 ), "op 84 freeze_blind" );
+      turnstile_reproof_operation t85;
+      expect_hardfork_refusal( operation( t85 ), "op 85 turnstile_reproof" );
+      parity_review_operation r86;
+      r86.voter = dan.id; r86.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      expect_hardfork_refusal( operation( r86 ), "op 86 parity_review" );
+   }
+   // (f) G4-06 old-DB lazy path: an old database replaying without the
+   // genesis-created singleton (db_genesis.cpp:596) must read as
+   // pre-activation defaults and lazily create on the first post-STEALTH
+   // maintenance — never assert on a missing index entry.
+   {
+      const auto& idx = db.get_index_type<stealth_status_index>().indices();
+      BOOST_REQUIRE_EQUAL( idx.size(), 1u ); // genesis created it
+      db.remove( *idx.begin() ); // simulate an old DB: singleton absent
+      BOOST_CHECK( db.get_index_type<stealth_status_index>().indices().empty() );
+      // Read paths treat a missing singleton as pre-activation defaults.
+      BOOST_CHECK( !stealth_blind_halted( db ) );
+      BOOST_CHECK_EQUAL( stealth_tripwire_fire_block( db ), 0u );
+      BOOST_CHECK_EQUAL( stealth_blind_count_this_block( db ), 0u );
+      BOOST_CHECK_EQUAL( stealth_pool_depth( db, asset_id_type() ), 0u );
+      BOOST_CHECK( stealth_current_alarms( db ).effective_set.empty() );
+      BOOST_CHECK( stealth_v1_sunset_time( db ) == fc::time_point_sec() );
+      // Pre-fork maintenance is a no-op: it must NOT create the singleton
+      // (creation happens only on post-STEALTH maintenance/apply paths).
+      stealth_parity_maintenance( db );
+      stealth_maybe_record_activation( db );
+      BOOST_CHECK( db.get_index_type<stealth_status_index>().indices().empty() );
+   }
    // (d) post-fork every evaluator is wired: each op reaches its own gate
    // (committee-membership for 84/86, cost path for a fee-less 85) instead
    // of "no evaluator". Op 83 is covered by stealth_transfer_happy_path
@@ -3062,6 +3283,19 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
    set_expiration( db, trx );
+   // (f2) the first post-STEALTH maintenance path lazily creates the
+   // singleton the old DB was missing, with activation recorded
+   // deterministically at the scheduled hardfork time (idempotent: a
+   // maintenance during the jump may have created it already).
+   stealth_maybe_record_activation( db );
+   {
+      const auto& idx = db.get_index_type<stealth_status_index>().indices();
+      BOOST_REQUIRE_EQUAL( idx.size(), 1u ); // lazily created, not genesis
+      BOOST_CHECK( idx.begin()->stealth_activated_time == HARDFORK_STEALTH_TIME );
+      BOOST_CHECK( idx.begin()->v1_sunset_time != fc::time_point_sec() );
+   }
+   stealth_parity_maintenance( db ); // idempotent on the fresh singleton
+   BOOST_CHECK_EQUAL( db.get_index_type<stealth_status_index>().indices().size(), 1u );
    {
       freeze_blind_operation fz;
       fz.voter = dan_id; fz.freeze = true; fz.reason = "evaluator pin";
@@ -3111,6 +3345,27 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
                               != std::string::npos, e.to_detail_string() );
       }
       trx.clear();
+   }
+   // (g) G4-06 fee-less genesis fallback: with the fee-schedule check
+   // skipped (genesis/test/generator context — no fee paid, no subsidy
+   // consumed) the float rule is a no-op: zero paid against a real anchor
+   // gap neither throws nor debits the pool.
+   {
+      const asset_object& core = asset_id_type()(db);
+      const asset_id_type core_id = core.get_id();
+      share_type gap = stealth_parity_gap_core( db, 1, share_type( 0 ) );
+      BOOST_REQUIRE( gap.value > 0 ); // real gap: anchor above zero-fee parity
+      BOOST_CHECK_NO_THROW( stealth_require_blind_fee( db, share_type( 0 ), false,
+                                                       core_id, 1, share_type( 0 ) ) );
+      const auto& st0 = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto pit = st0.parity_pool.find( core_id );
+      share_type before = ( pit == st0.parity_pool.end() ) ? share_type( 0 ) : pit->second;
+      BOOST_CHECK_NO_THROW( stealth_consume_parity_subsidy( db, false, core_id, 1,
+                                                            share_type( 0 ), share_type( 0 ) ) );
+      const auto& st1 = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto pit2 = st1.parity_pool.find( core_id );
+      share_type after = ( pit2 == st1.parity_pool.end() ) ? share_type( 0 ) : pit2->second;
+      BOOST_CHECK_EQUAL( after.value, before.value ); // no grant consumed
    }
    verify_asset_supplies( db );
    generate_block();

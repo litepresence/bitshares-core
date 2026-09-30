@@ -812,14 +812,33 @@ share_type stealth_parity_gap_core( const database& db, uint32_t n_blind_outputs
 share_type stealth_gap_to_asset( const database& db, asset_id_type fee_asset,
                                  share_type gap_core )
 {
+   // G4-01: negative gaps fail closed here (defense-in-depth). Production
+   // callers (stealth_parity_available, stealth_consume_parity_subsidy) check
+   // gap_core <= 0 first, so this fires only on direct/future misuse — but
+   // the CORE fast path below would otherwise return a negative amount
+   // ungated, while the UIA path wraps to uint64 and trips the overflow
+   // assert. One explicit gate keeps both legs fail-closed identically.
+   FC_ASSERT( gap_core.value >= 0, "Stealth gap conversion needs a non-negative gap" );
    if( gap_core.value == 0 )
       return share_type( 0 );
    if( fee_asset == asset_id_type() )
       return gap_core;
    const auto& cer = fee_asset( db ).options.core_exchange_rate;
+   // G4-01: price::validate checks both CER legs at issue/update time, but
+   // consensus must not trust stored state — a zero base converts every gap
+   // to 0 (free subsidy: the pool is never debited). The quote leg was
+   // already gated; the base leg was not. Both pinned here.
+   FC_ASSERT( cer.base.amount.value > 0, "Stealth gap conversion needs a valid CER" );
    FC_ASSERT( cer.quote.amount.value > 0, "Stealth gap conversion needs a valid CER" );
    // X = ceil(gap_core * base / quote): the pool never under-debits.
    // Integer only (no floats); 128-bit headroom for supply-scale amounts.
+   // Scale note: this conversion is scale-independent (CER, not fee scale).
+   // The fee-scale snapshot edge lives in stealth_cost_anchor_core above: the
+   // activation snapshot stores RAW k39 fee/ppo, so a non-100% scale AT
+   // activation understates the snapshot floor. Fail-closed direction (a
+   // lower anchor shrinks gaps/subsidies, never inflates them); live scale
+   // moves current + parity together (scale-together: 100% -> parity 500000 /
+   // anchor 600000 / gap 100000; 200% -> 1000000 / 1200000 / 200000).
    fc::uint128_t r( (uint64_t)gap_core.value );
    r *= (uint64_t)cer.base.amount.value;
    r += (uint64_t)cer.quote.amount.value - 1;
@@ -1129,6 +1148,13 @@ void_result parity_review_evaluator::do_evaluate( const parity_review_operation&
    const database& d = db();
    FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
               "Parity reviews are not allowed until the stealth hardfork" );
+   // G4-02: kind gate in do_evaluate (mirrors do_apply below and the record
+   // helper) so a bad kind fails fast at mempool/proposal-create instead of a
+   // late block failure. validate() is relay-side only and proposal-embedded
+   // ops bypass it; the consensus boundary must gate the kind itself.
+   FC_ASSERT( o.kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
+              o.kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
+              "Unknown parity review kind" );
    const auto& cidx = d.get_index_type<committee_member_index>().indices().get<by_account>();
    FC_ASSERT( cidx.find( o.voter ) != cidx.end(), "Parity review voter is not a committee member" );
    return void_result();

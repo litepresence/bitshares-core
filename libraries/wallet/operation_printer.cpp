@@ -337,6 +337,25 @@ std::string operation_printer::operator()(const htlc_redeemed_operation& op) con
    return "";
 }
 
+// G3-04: op 86 printer entry (parity_review_operation). Kind 0 = 6-month
+// parity-pricing review, kind 1 = quarterly anonymity-set report; unknown
+// kinds print raw (consensus rejects them — see parity_review_evaluator).
+std::string operation_printer::operator()(const parity_review_operation& op) const
+{
+   auto voter = wallet.get_account( op.voter );
+   out << voter.name;
+   if( op.kind == graphene::protocol::GRAPHENE_STEALTH_REVIEW_SET_REPORT )
+      out << " published quarterly anonymity-set report";
+   else if( op.kind == graphene::protocol::GRAPHENE_STEALTH_REVIEW_PARITY )
+      out << " recorded 6-month parity-pricing review";
+   else
+      out << " recorded parity review (unknown kind " << (unsigned)op.kind << ")";
+   if( !op.note.empty() )
+      out << ": " << op.note;
+   print_fee(op.fee);
+   return "";
+}
+
 std::string operation_printer::operator()(const htlc_create_operation& op) const
 {
    static htlc_hash_to_string_visitor vtor;

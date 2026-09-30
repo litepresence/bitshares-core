@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <functional>
+
 #include <fc/thread/mutex.hpp>
 
 #include <graphene/app/api.hpp>
@@ -425,6 +427,11 @@ public:
    // the wallet file, so upgrades never misread persisted values; the
    // browser-wallet contract in BLIND_DEFAULTS_CONTRACT.md owns persistence).
    blind_transfer_defaults _blind_defaults;
+
+   // G3-05: injectable sleep behind blind_broadcast_delay (tests control
+   // it; empty = the real fc::usleep). Takes whole seconds. Session-local,
+   // never serialized, no consensus effect.
+   std::function<void(uint32_t)> _blind_sleep;
 
    map<public_key_type,string> _keys;
    fc::sha512                  _checksum;

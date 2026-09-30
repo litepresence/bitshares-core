@@ -1524,8 +1524,10 @@ vector<asset>   wallet_api::get_blind_balances( const string& key_or_label )cons
    uint32_t batch = my->_blind_defaults.decoy_fetch_batch_size;
    if( batch == 0 ) batch = 1;
    flat_set<commitment_type> live;
-   for( size_t off = 0; off < candidates.size(); off += batch )
+   const size_t chunks = blind_batch_chunk_count( candidates.size(), batch );
+   for( size_t c = 0; c < chunks; ++c )
    {
+      const size_t off = c * batch;
       flat_set<commitment_type> chunk;
       for( size_t k = off; k < candidates.size() && k < off + batch; ++k )
          chunk.insert( candidates[k] );
@@ -2032,7 +2034,24 @@ void wallet_api::blind_broadcast_delay()const
    }
    ilog( "blind broadcast delay: waiting ${s}s before broadcast (timing defense)",
          ("s", secs) );
-   fc::usleep( fc::seconds( secs ) );
+   // G3-05: injected sleep in tests, real fc::usleep in production.
+   if( my->_blind_sleep )
+      my->_blind_sleep( secs );
+   else
+      fc::usleep( fc::seconds( secs ) );
+}
+
+void wallet_api::set_blind_sleep_hook( std::function<void(uint32_t)> hook )const
+{
+   my->_blind_sleep = std::move( hook );
+}
+
+void wallet_api::set_unlocked_for_tests()const
+{
+   // White-box by design (see header): _checksum is the sole is_locked
+   // input. A fixed nonzero sentinel keeps the marker recognizable in
+   // dumps; it carries no key material and unlocks no funds.
+   my->_checksum = fc::sha512::hash( "g1-unit-test-unlocked", 21 );
 }
 
 signed_transaction wallet_api::transfer_default( const string& from,

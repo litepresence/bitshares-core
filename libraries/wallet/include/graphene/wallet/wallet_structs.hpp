@@ -340,10 +340,27 @@ struct blind_transfer_defaults
    /// (propagation-timing defense against few DPOS producers). Applies only
    /// when broadcast=true; 0 disables (explicit, logged choice).
    uint32_t min_broadcast_delay_sec = 3;
-   /// Optional N-block holding before a received blind output is spent
-   /// (cheap heuristic defense; consensus does not require it). 0 = off.
+   /// Optional N-block holding before a received blind output is spent.
+   /// RESERVED, not enforced by cli_wallet (G3-05): blind receipts carry
+   /// no creation-block height, so input selection cannot filter on age
+   /// without a wallet-schema change; consensus never enforces it either.
+   /// Wallets MAY enforce an equivalent hold locally, but nothing in-tree
+   /// reads this field today. 0 = off (the default).
    uint32_t min_mix_blocks = 0;
 };
+
+/**
+ * Number of RPC round-trips needed to cover n decoy candidates at
+ * batch_size per trip (G1c decoy-fetch batching, BSIP-2 §1). Pure helper
+ * so the chunking math is unit-testable without a node: batch 0 is
+ * treated as 1 (same guard as get_blind_balances). No consensus effect.
+ */
+inline size_t blind_batch_chunk_count( size_t n, uint32_t batch_size )
+{
+   if( batch_size == 0 )
+      batch_size = 1;
+   return ( n + batch_size - 1 ) / batch_size;
+}
 
 }} // namespace graphene::wallet
 

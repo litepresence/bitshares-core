@@ -115,6 +115,7 @@ public:
    std::string operator()(const graphene::protocol::htlc_create_operation& op)const;
    std::string operator()(const graphene::protocol::htlc_redeem_operation& op)const;
    std::string operator()(const graphene::protocol::htlc_redeemed_operation& op)const;
+   std::string operator()(const graphene::protocol::parity_review_operation& op)const;
 
 protected:
    std::string print_memo( const fc::optional<graphene::protocol::memo_data>& memo)const;

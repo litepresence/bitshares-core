@@ -49,9 +49,11 @@ it (mix hold).
 - The delay applies per broadcast, including retries (a retry is a new
   broadcast). Setting 0 is allowed only as an explicit advanced option with
   a warning.
-- `min_mix_blocks > 0` (user opt-in): received blind outputs younger than N
-  blocks MUST NOT be selected as spend inputs. Consensus does not enforce
-  this; the wallet does.
+- `min_mix_blocks` (default 0, off) is RESERVED, not wallet-enforced
+  (G3-05): in-tree blind receipts carry no creation-block height, so input
+  selection cannot filter on age, and consensus never enforces a hold.
+  Wallets MAY enforce an equivalent hold locally, but the field's old
+  "wallet does it" promise was removed — nothing in-tree reads it today.
 
 ## 5. Change and amounts
 

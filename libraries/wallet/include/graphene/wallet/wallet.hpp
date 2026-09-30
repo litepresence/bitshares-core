@@ -24,6 +24,7 @@
 #pragma once
 
 #include <fc/optional.hpp>
+#include <functional>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/app/api.hpp>
@@ -994,7 +995,7 @@ class wallet_api
 
       /**
        * Replace the full blind-defaults struct (batching, broadcast delay,
-       * mix hold). Session-local; see BLIND_DEFAULTS_CONTRACT.md.
+       * reserved mix hold). Session-local; see BLIND_DEFAULTS_CONTRACT.md.
        */
       void set_blind_defaults( const blind_transfer_defaults& defaults )const;
 
@@ -1004,6 +1005,22 @@ class wallet_api
        * broadcast=true. Not remote-callable (no FC_API entry by design).
        */
       void blind_broadcast_delay()const;
+
+      /**
+       * G3-05 test hook: replace the sleep behind blind_broadcast_delay
+       * with a caller-supplied hook (takes whole seconds). Empty hook
+       * restores the real fc::usleep. Session-local, never serialized, no
+       * consensus effect. Not remote-callable (no FC_API entry by design).
+       */
+      void set_blind_sleep_hook( std::function<void(uint32_t)> hook )const;
+
+      /**
+       * G3-05 test hook: mark the wallet unlocked without keys (offline
+       * unit tests only — the production unlock() path is untouched).
+       * Session-local, no consensus effect. Not remote-callable (no FC_API
+       * entry by design).
+       */
+      void set_unlocked_for_tests()const;
 
       /**
        * Default-routed transfer (BSIP-2 §2, G1c): blind unless the caller

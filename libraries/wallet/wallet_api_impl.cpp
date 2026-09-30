@@ -53,31 +53,37 @@ namespace graphene { namespace wallet { namespace detail {
    wallet_api_impl::wallet_api_impl( wallet_api& s, const wallet_data& initial_data, fc::api<login_api> rapi )
       : self(s),
         _chain_id(initial_data.chain_id),
-        _remote_api(rapi),
-        _remote_db(rapi->database()),
-        _remote_net_broadcast(rapi->network_broadcast()),
-        _remote_hist(rapi->history())
+        _remote_api(rapi)
    {
-      try {
-         _custom_operations = rapi->custom_operations();
-      }
-      catch(const fc::exception& e)
+      // G3-05: a null api means offline (unit-test) mode — every remote
+      // call is skipped and the wallet serves only local state (defaults,
+      // labels, fail-closed addressing checks). Production always passes a
+      // connected api, in which case behavior is unchanged.
+      if( rapi.get_handle() != 0 )
       {
-         wlog("Custom operations API is not active on server.");
-      }
-      chain_id_type remote_chain_id = _remote_db->get_chain_id();
-      if( remote_chain_id != _chain_id )
-      {
-         FC_THROW( "Remote server gave us an unexpected chain_id",
-            ("remote_chain_id", remote_chain_id)
-            ("chain_id", _chain_id) );
+         _remote_db = rapi->database();
+         _remote_net_broadcast = rapi->network_broadcast();
+         _remote_hist = rapi->history();
+         try {
+            _custom_operations = rapi->custom_operations();
+         }
+         catch(const fc::exception& e)
+         {
+            wlog("Custom operations API is not active on server.");
+         }
+         chain_id_type remote_chain_id = _remote_db->get_chain_id();
+         if( remote_chain_id != _chain_id )
+         {
+            FC_THROW( "Remote server gave us an unexpected chain_id",
+               ("remote_chain_id", remote_chain_id)
+               ("chain_id", _chain_id) );
+         }
+         _remote_db->set_block_applied_callback( [this](const variant& block_id )
+         {
+            on_block_applied( block_id );
+         } );
       }
       init_prototype_ops();
-
-      _remote_db->set_block_applied_callback( [this](const variant& block_id )
-      {
-         on_block_applied( block_id );
-      } );
 
       _wallet.chain_id = _chain_id;
       _wallet.ws_server = initial_data.ws_server;
@@ -87,6 +93,8 @@ namespace graphene { namespace wallet { namespace detail {
 
    wallet_api_impl::~wallet_api_impl()
    {
+      if( _remote_api.get_handle() == 0 )
+         return; // offline (unit-test) mode: no subscriptions to cancel
       try
       {
          _remote_db->cancel_all_subscriptions();

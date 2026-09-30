@@ -223,6 +223,21 @@ void h2c_vote(
    PUSH_TX( f.db, tx );
 }
 
+/// Builds + signs one transaction without pushing it, so a benchmark batch
+/// can be fully staged before the clock starts (validators verify, they do
+/// not sign — signing inside the window would pollute the measurement).
+template< typename Op >
+signed_transaction e06_staged_tx(
+      database_fixture& f, Op op, const fc::ecc::private_key& key )
+{
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return tx;
+}
+
 /// Votes a sustain supermajority from the genesis seated set (init0..initN).
 void h2c_sustain_from_genesis( database_fixture& f, object_id_type target )
 {
@@ -402,6 +417,228 @@ BOOST_AUTO_TEST_CASE( vault_rotate_moves_authority_and_gates_old_release )
    BOOST_CHECK( db.find( bond_a ) == nullptr );
    // The incoming set's bond still secures the vault.
    BOOST_CHECK( db.find( bond_b ) != nullptr );
+} FC_LOG_AND_RETHROW() }
+
+/// E-06 H2 worst-case block benchmark (WARN-only, never a hard gate): one
+/// block's maximum plausible new-op load — max concurrent challenges (3,
+/// one per pair under the per-pair cap) + dispute escalation + votes +
+/// publishes + bond locks + freeze + rotate + resolve — is staged fully
+/// signed, then verified+applied under a clock. The elapsed time is asserted
+/// against the 3s block envelope with BOOST_WARN_MESSAGE and both numbers
+/// are recorded. If the load ever exceeds the envelope, the answer is a
+/// report — caps and checks are NEVER loosened to make the WARN pass.
+BOOST_AUTO_TEST_CASE( e06_h2_worst_case_block_benchmark )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   fund( dave, asset( 3000000000000LL ) );
+   fund( get_account( "init0" ), asset( 1000000 ) );
+   fund( get_account( "init1" ), asset( 1000000 ) );
+   h2c_make_committee_member( *this, alice );
+   const account_id_type init0 = get_account( "init0" ).get_id();
+   const account_id_type init1 = get_account( "init1" ).get_id();
+
+   // Four small vaults on four pairs (one live set per pair) for the timed
+   // challenge/vote/lock/freeze/rotate legs.
+   authority vault_auth( 1, alice_id, 1 );
+   const asset_id_type pair_a = h2c_create_uia( *this, alice_id, alice_private_key, "E06A" );
+   const asset_id_type pair_b = h2c_create_uia( *this, alice_id, alice_private_key, "E06B" );
+   const asset_id_type pair_c = h2c_create_uia( *this, alice_id, alice_private_key, "E06C" );
+   const asset_id_type pair_d = h2c_create_uia( *this, alice_id, alice_private_key, "E06D" );
+   const vault_id_type va = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_a );
+   const vault_id_type vb = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_b );
+   const vault_id_type vc = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_c );
+   const vault_id_type vd = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_d );
+   // A block per deposit (suite duplicate rule): back-to-back identical
+   // vesting creates would otherwise collide as duplicate transactions
+   // (same ops, expiration, and key); per-deposit blocks also mirror real
+   // sub-vault funding cadence.
+   generate_block();
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, va,
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
+         share_type( 1000000 ), 100 );
+   generate_block();
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vb,
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
+         share_type( 1000000 ), 100 );
+   generate_block();
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vc,
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
+         share_type( 1000000 ), 100 );
+   generate_block();
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vd,
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
+         share_type( 1000000 ), 100 );
+   // Pre-created vestings so the second locks land in the timed batch.
+   generate_block();
+   const auto vest_a2 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) );
+   generate_block();
+   const auto vest_b2 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) );
+
+   // Full-size resolve leg on the core pair at 200% cover (stays
+   // maintenance-healthy; sustained in setup so the timed resolve fires).
+   const vault_id_type vr = h2c_register_vault_default( *this, alice_id, alice_private_key, vault_auth );
+   const auto vest_r = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vr, vest_r, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+   h2c_set_outstanding( *this, vr, H2C_VAULT_RAW / 2 );
+   const vault_challenge_id_type cr = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vr, h2c_evidence( "e06-real" ) );
+   h2c_sustain_from_genesis( *this, object_id_type( cr ) );
+   BOOST_REQUIRE_EQUAL( cr( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
+
+   // Oracle leg: producers bob + carol, one retained print, one open
+   // round-1 dispute (carol accuses bob); the escalation is timed.
+   const auto bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2c_make_oracle( *this, alice_id, alice_private_key, "E06.USD", bts_ref, usd_ref, opts );
+   oracle_publish_operation first_pub;
+   first_pub.producer  = bob_id;
+   first_pub.oracle_id = oid;
+   first_pub.values    = { oracle_value( 1, 100 ) };
+   signed_transaction ptx0; ptx0.operations.push_back( first_pub );
+   db.current_fee_schedule().set_fee( ptx0.operations.back() );
+   set_expiration( db, ptx0 );
+   ptx0.sign( bob_private_key, db.get_chain_id() );
+   PUSH_TX( db, ptx0 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+   oracle_dispute_operation dop;
+   dop.challenger            = carol_id;
+   dop.oracle                = oid;
+   dop.defender              = bob_id;
+   dop.accused_time          = accused;
+   dop.accused_series        = 0;
+   dop.dispute_bond          = H2C_ROUND1_RAW;
+   dop.dispute_bond_usd_cents = H2C_FLOOR_USD_CENTS;
+   dop.evidence_memo         = h2c_evidence( "e06-dispute" );
+   signed_transaction dtx0; dtx0.operations.push_back( dop );
+   db.current_fee_schedule().set_fee( dtx0.operations.back() );
+   set_expiration( db, dtx0 );
+   dtx0.sign( carol_private_key, db.get_chain_id() );
+   const oracle_dispute_id_type did {
+      PUSH_TX( db, dtx0 ).operation_results.front().get<object_id_type>() };
+
+   // Stage the worst-case batch fully signed. Challenges are never pruned,
+   // so the challenge index size is the next instance number; each push
+   // below verifies it landed on its predicted id before any vote names it.
+   const uint64_t ch_base = db.get_index_type<vault_challenge_index>().indices().size();
+   const vault_challenge_id_type ca( ch_base ), cb( ch_base + 1 ), cc( ch_base + 2 );
+   vector<signed_transaction> batch;
+   for( uint32_t i = 0; i < 3; ++i )
+   {
+      const vault_id_type v = ( i == 0 ) ? va : ( ( i == 1 ) ? vb : vc );
+      vault_challenge_operation cop;
+      cop.challenger               = bob_id;
+      cop.vault                    = v;
+      cop.challenge_bond           = H2C_ROUND1_RAW;
+      cop.challenge_bond_usd_cents = H2C_FLOOR_USD_CENTS;
+      cop.evidence_memo            = h2c_evidence( string( "e06-" ) + fc::to_string( i ) );
+      batch.push_back( e06_staged_tx( *this, cop, bob_private_key ) );
+   }
+   const vault_challenge_id_type cids[3] = { ca, cb, cc };
+   for( uint32_t i = 0; i < 3; ++i )
+      for( uint32_t k = 0; k < 2; ++k )
+      {
+         challenge_vote_operation vop;
+         vop.voter    = ( k == 0 ) ? init0 : init1;
+         vop.target   = object_id_type( cids[i] );
+         vop.decision = GRAPHENE_H2_DISPUTE_SUSTAIN;
+         batch.push_back( e06_staged_tx( *this, vop, init_account_priv_key ) );
+      }
+   for( uint32_t k = 0; k < 2; ++k )
+   {
+      // Values 101/102: the setup print is (1,100), and a staged tx staged
+      // at the same head time with identical content would collide with it
+      // as a duplicate transaction (same ops, expiration, and key).
+      oracle_publish_operation pub;
+      pub.producer  = ( k == 0 ) ? bob_id : carol_id;
+      pub.oracle_id = oid;
+      pub.values    = { oracle_value( 1, 101 + int64_t( k ) ) };
+      batch.push_back( e06_staged_tx(
+            *this, pub, ( k == 0 ) ? bob_private_key : carol_private_key ) );
+   }
+   oracle_dispute_escalate_operation eop;
+   eop.escalator             = bob_id;
+   eop.dispute               = did;
+   eop.round_bond            = H2C_ROUND1_RAW * 2;
+   eop.round_bond_usd_cents  = H2C_FLOOR_USD_CENTS * 2;
+   batch.push_back( e06_staged_tx( *this, eop, bob_private_key ) );
+   for( uint32_t k = 0; k < 2; ++k )
+   {
+      challenge_vote_operation dvop;
+      dvop.voter    = ( k == 0 ) ? init0 : init1;
+      dvop.target   = object_id_type( did );
+      dvop.decision = GRAPHENE_H2_DISPUTE_SUSTAIN;
+      batch.push_back( e06_staged_tx( *this, dvop, init_account_priv_key ) );
+   }
+   vault_bond_lock_operation la;
+   la.owner           = alice_id;
+   la.vault           = va;
+   la.vesting_balance = vest_a2;
+   la.bond_amount     = share_type( 1000000 );
+   la.bond_usd_cents  = 100;
+   batch.push_back( e06_staged_tx( *this, la, alice_private_key ) );
+   vault_bond_lock_operation lb = la;
+   lb.vault           = vb;
+   lb.vesting_balance = vest_b2;
+   batch.push_back( e06_staged_tx( *this, lb, alice_private_key ) );
+   pair_freeze_operation fop;
+   fop.freezer = alice_id;
+   fop.vault   = va;
+   fop.oracle  = oid;
+   batch.push_back( e06_staged_tx( *this, fop, alice_private_key ) );
+   vault_rotate_operation rop;
+   rop.rotator       = alice_id;
+   rop.vault         = vd;
+   rop.new_authority = authority( 1, bob_id, 1 );
+   batch.push_back( e06_staged_tx( *this, rop, alice_private_key ) );
+   vault_resolve_operation rop2;
+   rop2.resolver  = alice_id;
+   rop2.challenge = cr;
+   batch.push_back( e06_staged_tx( *this, rop2, alice_private_key ) );
+   BOOST_REQUIRE_EQUAL( batch.size(), 19u );
+
+   // Clock starts: validators verify, they do not sign.
+   const fc::time_point t0 = fc::time_point::now();
+   for( uint32_t i = 0; i < 3; ++i )
+   {
+      const auto res = PUSH_TX( db, batch[i] ).operation_results.front().get<object_id_type>();
+      BOOST_REQUIRE( res == object_id_type( cids[i] ) );
+   }
+   for( size_t i = 3; i < batch.size(); ++i )
+      PUSH_TX( db, batch[i] );
+   const fc::time_point t1 = fc::time_point::now();
+   const int64_t elapsed_us = ( t1 - t0 ).count();
+   constexpr int64_t E06_H2_BLOCK_ENVELOPE_US = 3000000; // 3s block interval
+   BOOST_TEST_MESSAGE( "E-06 H2 worst-case block: " << batch.size()
+         << " ops verify+apply in " << elapsed_us << "us vs "
+         << E06_H2_BLOCK_ENVELOPE_US << "us envelope" );
+   BOOST_WARN_MESSAGE( elapsed_us < E06_H2_BLOCK_ENVELOPE_US,
+         "E-06 H2 worst-case block exceeded the 3s envelope: " << elapsed_us
+         << "us for " << batch.size() << " ops — report, never loosen checks" );
+
+   // The timed resolve really executed: R wound down on the segregated slice.
+   BOOST_REQUIRE_EQUAL( vr( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   const winddown_vault_object* wd = nullptr;
+   for( const auto& w : db.get_index_type<winddown_vault_index>().indices() )
+      if( w.source_vault == vr )
+         wd = &w;
+   BOOST_REQUIRE( wd != nullptr );
+   BOOST_CHECK( wd->segregated_bond == H2C_VAULT_RAW );
 } FC_LOG_AND_RETHROW() }
 
 /// Griefing convention (OQ-14 vehicle): stock htlc_create with a sha256 lock
@@ -681,6 +918,120 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
    tx2.sign( alice_private_key, db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( db, tx2 ), fc::exception );
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount >= share_type( 0 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Expired-resolve-to-winddown (R5C fail-closed split): an EXPIRED_FROZEN
+/// challenge executes into the IDENTICAL wind-down path as SUSTAINED —
+/// segregated bond, seniors first, rmax cap, haircut math — exit-only.
+/// Expiry is inconclusive (no 48h supermajority; the committee here never
+/// votes, the cartel-abstention shape), so it is never exoneration: the
+/// freeze holds and guilty history sticks. But the brick is not permanent:
+/// any seated member triggers the exit, while the non-committee owner
+/// cannot self-resolve. The vault NEVER returns to HEALTHY on any path.
+BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( dave, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   // Bob owns the vault but sits outside the committee: he can register and
+   // bond, but he cannot resolve.
+   authority vault_auth( 1, bob_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default( *this, bob_id, bob_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   // Half leverage (200% cover): the vault stays maintenance-healthy while
+   // the challenge window lapses, so only the expiry sweep — never the
+   // top-up path — moves this vault.
+   generate_block();
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW / 2 );
+
+   // Carol challenges; nobody votes. The window lapses and the maintenance
+   // sweep expires it fail-closed (bond returns, vault stays frozen).
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "no-quorum" ) );
+   generate_blocks( cid( db ).deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+   BOOST_REQUIRE_EQUAL( vid( db ).frozen, true );
+   BOOST_REQUIRE_EQUAL( vid( db ).open_challenges, 0u );
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+
+   // Owner self-resolve refused: bob owns the vault but is not seated.
+   vault_resolve_operation self;
+   self.resolver  = bob_id;
+   self.challenge = cid;
+   signed_transaction stx; stx.operations.push_back( self );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( bob_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, stx ), fc::exception );
+   // A seated stranger is not the owner either: dave is refused the same way.
+   vault_resolve_operation stranger;
+   stranger.resolver  = dave_id;
+   stranger.challenge = cid;
+   signed_transaction gtx; gtx.operations.push_back( stranger );
+   db.current_fee_schedule().set_fee( gtx.operations.back() );
+   set_expiration( db, gtx );
+   gtx.sign( dave_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, gtx ), fc::exception );
+
+   // Any seated member triggers the exit-only wind-down (alice never voted
+   // on this challenge: no vote is needed because a wind-down cannot steal).
+   vault_resolve_operation op;
+   op.resolver  = alice_id;
+   op.challenge = cid;
+   signed_transaction tx; tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, tx );
+
+   // Identical wind-down to the sustained path: same segregated slice.
+   const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
+   BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
+   BOOST_CHECK( wd_idx.begin()->source_vault == vid );
+   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW );
+   BOOST_CHECK( wd_idx.begin()->total_claims == H2C_VAULT_RAW / 2 );
+   BOOST_CHECK_EQUAL( cid( db ).executed, true );
+   // Exit-only: the vault never returns to HEALTHY; the freeze holds until
+   // wind-down claims complete per the existing claim rules.
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   BOOST_CHECK( vid( db ).maintenance_state != GRAPHENE_H2_VAULT_HEALTHY );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+
+   // Segregated economics on the expired path: a senior claim pays
+   // last-good-minus-15% from the seized slice (fully backed here).
+   const winddown_vault_id_type wdid { wd_idx.begin()->id };
+   const share_type senior_claim = ( H2C_VAULT_RAW / 2 ) / 3;
+   const share_type senior_expect =
+         share_type( senior_claim.value * ( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) / 10000 );
+   winddown_claim_operation sop;
+   sop.claimant     = dave_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = senior_claim;
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction ctx; ctx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( dave_private_key, db.get_chain_id() );
+   const share_type dave_before = db.get_balance( dave_id, asset_id_type() ).amount;
+   PUSH_TX( db, ctx );
+   BOOST_CHECK( db.get_balance( dave_id, asset_id_type() ).amount >= dave_before + senior_expect - share_type( 100000 ) );
+
+   // Resolving twice is refused (challenge already executed).
+   signed_transaction tx2; tx2.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx2.operations.back() );
+   set_expiration( db, tx2 );
+   tx2.sign( alice_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx2 ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
 /// pair_freeze closes the protocol door AND the debt tap in one atomic apply:

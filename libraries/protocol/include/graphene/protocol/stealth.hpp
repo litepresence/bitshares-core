@@ -281,6 +281,10 @@ struct stealth_transfer_operation : public base_operation
  */
 struct freeze_blind_operation : public base_operation
 {
+   // Zero default fee is deliberate (R7C fee floors): the halt switch must stay
+   // callable in emergencies (halt path exists before the proofs do); abuse is
+   // bounded because only seated committee members may call and each vote is a
+   // 2-quorum/48h record. Committee may price it nonzero by vote at activation.
    struct fee_params_t { uint64_t fee = 0; };
 
    asset                 fee;
@@ -346,6 +350,10 @@ struct turnstile_reproof_operation : public base_operation
  */
 struct parity_review_operation : public base_operation
 {
+   // Zero default fee is deliberate (R7C fee floors): attestations are
+   // committee-only heartbeats that permit (never spend) subsidies; pricing
+   // them would tax the reporting the system depends on. Committee may price
+   // nonzero by vote at activation.
    struct fee_params_t { uint64_t fee = 0; };
 
    asset                 fee;

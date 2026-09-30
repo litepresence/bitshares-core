@@ -40,6 +40,7 @@
 #include <graphene/chain/stealth_proof.hpp>
 #include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/stealth_evaluator.hpp>
+#include <graphene/wallet/wallet.hpp>
 
 #include <fc/crypto/digest.hpp>
 #include <fc/io/raw.hpp>
@@ -1031,25 +1032,27 @@ BOOST_AUTO_TEST_CASE( decoy_rules_enforced )
 
    auto now = db.head_block_time();
    std::string err;
-   // policy unit: 11 members all old, spread over windows -> accept
+   // policy unit: 11 members all old, spread over windows -> accept (deep
+   // pool: the R-04 thin rule needs an explicit depth, so deep callers pass
+   // one — 1000 selects the floor-11/40% regime).
    {
       std::vector<uint32_t> h = { 1, 150, 300, 450, 600, 750, 900, 1050, 1200, 1350, 1500 };
       std::vector<fc::time_point_sec> t( 11, now - 90000 );
-      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err ), err );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err, 1000 ), err );
    }
    // one under-age decoy (younger than 24h) -> reject
    {
       std::vector<uint32_t> h( 11, 1900 );
       std::vector<fc::time_point_sec> t( 11, now - 90000 );
       t[5] = now - 3600;
-      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err ),
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err, 1000 ),
                            "under-age decoy must reject" );
    }
    // skew: 6 of 11 decoys inside one 100-block window (>40%) -> reject
    {
       std::vector<uint32_t> h = { 1000, 1001, 1002, 1003, 1004, 1005, 2000, 2100, 2200, 2300, 2400 };
       std::vector<fc::time_point_sec> t( 11, now - 90000 );
-      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2500, err ),
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2500, err, 1000 ),
                            "skewed ring must reject" );
    }
    // op level: the pool floor gates stealth_transfer SPENDS (rings need
@@ -1124,14 +1127,19 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()(db);
-   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
-   // G1c parity economics (BSIP-2 §2): 11 deposits (1M gap each) + the ring
+   transfer( account_id_type()(db), dan, core.amount( 500000000 ) );
+   // G1c parity economics (BSIP-2 §2): 16 deposits (1M gap each) + the ring
    // spend (1.5M) run subsidized; seed once so the kernel assertions hold.
-   // Sealed first (see note above).
+   // Sealed first (see note above). Seed 24M (not 20M): the +25h aging jump
+   // below crosses a maintenance that recomputes the burn ratio from
+   // interval flow — 16M granted / 20M routed = 80% would fire
+   // burn_critical and halt subsidies before the spend. At 16/24 = 66% only
+   // the (non-gating) warn fires and 8M remains for the 1.5M spend.
    generate_block();
-   g1c_seed_pool( db, dan_id, core, 15000000 );
-   // Fund 11 post-fork outputs (4/4/3) spread over three 100-block windows
-   // so the 40%-skew rule is satisfiable; then age them 25h in one jump.
+   g1c_seed_pool( db, dan_id, core, 24000000 );
+   // Fund 16 post-fork outputs (4/4/4/4) spread over four 100-block windows
+   // so the thin-pool 25%-skew rule (R-04: depth 16 < 64) is satisfiable at
+   // the target ring size 16; then age them 25h in one jump.
    std::vector<fc::sha256> blinds;
    std::vector<fc::ecc::commitment_type> commits;
    auto fund_one = [&]( int i, uint64_t v ) {
@@ -1160,13 +1168,15 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
    generate_blocks( 110 );
    for( int i = 4; i < 8; ++i ) { fund_one( i, 1000 ); generate_block(); }
    generate_blocks( 110 );
-   for( int i = 8; i < 11; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   for( int i = 8; i < 12; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   generate_blocks( 110 );
+   for( int i = 12; i < 16; ++i ) { fund_one( i, 1000 ); generate_block(); }
    generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
    generate_block();
    set_expiration( db, trx );
-   BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 11u );
+   BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
    // Ring + range-proof ops exceed the 2048B default transaction ceiling by
-   // design (11-member rings alone are ~1.1kB). Production enables them via
+   // design (16-member rings alone are ~1.6kB). Production enables them via
    // committee-set maximum_transaction_size; the test mirrors that governance
    // action directly (precedent: db.modify on global properties in
    // authority_tests/block_tests).
@@ -1215,7 +1225,10 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
        std::copy( eb, eb + 32, (char*)stop.excess.data() );
        BN_free( e ); BN_free( t ); BN_free( b1 ); BN_free( b2 );
     }
-   // ring over all 11 commitments (Q as raw points via OpenSSL below)
+   // ring over all 16 commitments (Q as raw points via OpenSSL below).
+   // Depth 16 < 64 selects the R-04 thin regime: target-size ring with the
+   // 25% skew ceiling (4/4/4/4 passes exactly) — this spend IS the
+   // thin-pool-16 op-level case.
    std::vector<std::vector<unsigned char>> Q;
    for( const auto& c : commits )
       Q.push_back( std::vector<unsigned char>( c.begin(), c.end() ) );
@@ -1265,9 +1278,9 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
        BOOST_CHECK( idx.find( so2.commitment ) != idx.end() );
        BOOST_CHECK( idx.find( commits[s] ) != idx.end() ); // retained as decoy
     }
-    // Cached pool counter (review Finding 3): 11 funded, 1 real input
-    // consumed, 2 outputs created -> 12 unspent decoy candidates.
-    BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 12u );
+    // Cached pool counter (review Finding 3): 16 funded, 1 real input
+    // consumed, 2 outputs created -> 17 unspent decoy candidates.
+    BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 17u );
     BN_free( bs ); BN_free( bprime );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -1288,7 +1301,10 @@ BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
    // the seal-then-modify note in negative_mint_rejected).
    generate_block();
    g1c_seed_pool( db, dan_id, core, 20000000 );
-   // Fund 11 post-fork outputs (4/4/3 over three skew windows), age 25h.
+   // Fund 16 post-fork outputs (4/4/4/4 over four skew windows), age 25h.
+   // Depth 16 < 64 selects the R-04 thin regime: every attempt below rings
+   // over all 16 (target size, 25% skew each window passes exactly), so the
+   // kernel/binding checks — not the decoy gate — decide each attempt.
    std::vector<fc::sha256> blinds;
    std::vector<fc::ecc::commitment_type> commits;
    auto fund_one = [&]( int i, uint64_t v ) {
@@ -1315,7 +1331,9 @@ BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
    generate_blocks( 110 );
    for( int i = 4; i < 8; ++i ) { fund_one( i, 1000 ); generate_block(); }
    generate_blocks( 110 );
-   for( int i = 8; i < 11; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   for( int i = 8; i < 12; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   generate_blocks( 110 );
+   for( int i = 12; i < 16; ++i ) { fund_one( i, 1000 ); generate_block(); }
    generate_blocks( db.head_block_time() + 90000 );
    generate_block();
    set_expiration( db, trx );
@@ -2109,7 +2127,7 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
    generate_block();
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK, 50u );
-   ACTORS( (dan) );
+   ACTORS( (dan)(alice) );
    const asset_object& core = asset_id_type()(db);
    const asset_id_type core_id = core.get_id();
    transfer( account_id_type()(db), dan, core.amount( 300000000 ) );
@@ -2117,8 +2135,14 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
    // writes below are direct and must survive block-production replay.
    generate_block();
    // Price parity just under the pinned anchor: gap 1000 per withdrawal.
+   // Test genesis zeroes the fee scale (calculate_fee would map every
+   // schedule to 0), so pin scale at 100% for the schedule levels below to
+   // mean what they say — production default; the zeroed genesis is why
+   // the pre-parity cases above price everything at the pinned anchor.
    db.modify( db.get_global_properties(), []( global_property_object& p ) {
-      auto& fee_params = p.parameters.get_mutable_fees().parameters;
+      auto& fees = p.parameters.get_mutable_fees();
+      fees.scale = GRAPHENE_100_PERCENT;
+      auto& fee_params = fees.parameters;
       auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
       itr->get<transfer_from_blind_operation::fee_params_t>().fee = 499000;
    } );
@@ -2251,8 +2275,9 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
       trx.clear_signatures(); trx.operations.clear();
       // ...while transparent transfers still clear (reserved space rides
       // outside the blind budget: the gate only counts blind ops).
+      // (dan→dan self-transfers never validate; a second actor receives.)
       transfer_operation t;
-      t.from = dan.id; t.to = dan.id; t.amount = core.amount( 1 );
+      t.from = dan.id; t.to = alice.id; t.amount = core.amount( 1 );
       trx.operations = { t };
       db.current_fee_schedule().set_fee( trx.operations.back() );
       sign( trx, dan_private_key );
@@ -2279,9 +2304,13 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
    transfer( account_id_type()(db), dan, core.amount( 40000000 ) );
    // Seal-then-modify (see negative_mint_rejected).
    generate_block();
-   // Gap 10000 per withdrawal (parity 490000 vs 500000 anchor).
+   // Gap 10000 per withdrawal (parity 490000 vs 500000 anchor). Pin scale
+   // at 100% (see the cap test note): test genesis zeroes it, which would
+   // map the 490000 schedule to a 0 parity and a 500000 gap.
    db.modify( db.get_global_properties(), []( global_property_object& p ) {
-      auto& fee_params = p.parameters.get_mutable_fees().parameters;
+      auto& fees = p.parameters.get_mutable_fees();
+      fees.scale = GRAPHENE_100_PERCENT;
+      auto& fee_params = fees.parameters;
       auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
       itr->get<transfer_from_blind_operation::fee_params_t>().fee = 490000;
    } );
@@ -2591,6 +2620,559 @@ BOOST_AUTO_TEST_CASE( parity_joint_cap_with_h2 )
    set_h2( 0 );
    stealth_parity_maintenance( db );
    BOOST_CHECK( !stealth_current_alarms( db ).joint_cap_breach );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( thin_pool_decoy_tightening )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_THIN_POOL_DEPTH, 64u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT, 25u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_RING_TARGET, 16u );
+
+   auto now = db.head_block_time();
+   std::string err;
+   // Deep pool (>= 64): the floor-11 / 40%-skew regime is unchanged.
+   {
+      std::vector<uint32_t> h = { 1, 150, 300, 450, 600, 750, 900, 1050, 1200, 1350, 1500 };
+      std::vector<fc::time_point_sec> t( 11, now - 90000 );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err, 64 ), err );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err, 1000000 ), err );
+   }
+   // Thin pool (< 64): the same spread-compliant 11-ring now rejects —
+   // it is below the target size (availability yields to privacy).
+   {
+      std::vector<uint32_t> h = { 1, 150, 300, 450, 600, 750, 900, 1050, 1200, 1350, 1500 };
+      std::vector<fc::time_point_sec> t( 11, now - 90000 );
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err, 63 ),
+                           "thin 11-ring must reject" );
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err, 0 ),
+                           "thin 11-ring must reject at depth 0" );
+      BOOST_CHECK_MESSAGE( err.find( "thin-pool" ) != std::string::npos, err );
+   }
+   // Thin pool: a 16-ring at exactly 25% per window passes (boundary
+   // inclusive, same convention as the 40% rule: exactly-at-cap passes).
+   {
+      std::vector<uint32_t> h;
+      for( uint32_t w : { 10u, 20u, 30u, 40u } )
+         for( uint32_t k = 0; k < 4; ++k )
+            h.push_back( w * 100 + k );
+      std::vector<fc::time_point_sec> t( 16, now - 90000 );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 5000, err, 16 ), err );
+   }
+   // Thin pool: 5 of 16 in one window (31.25% > 25%) rejects — while the
+   // identical ring passes deep (31.25% < 40%). The tightening binds.
+   {
+      std::vector<uint32_t> h = { 1000, 1001, 1002, 1003, 1004,
+                                  2000, 2100, 2200, 2300, 2400, 2500,
+                                  2600, 2700, 2800, 2900, 3000 };
+      std::vector<fc::time_point_sec> t( 16, now - 90000 );
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 5000, err, 16 ),
+                           "thin 31%-skewed ring must reject" );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 5000, err, 64 ), err );
+   }
+
+   // Op level: an 11-member spend over real aged outputs at depth 11
+   // rejects on the thin rule — the pool FLOOR (11 >= 11) passes first, so
+   // the decoy gate is what fires. Fake image/sig are fine: policy runs
+   // before signature verification (same shape as the floor test above).
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), dan, core.amount( 300000000 ) );
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 12000000 ); // 11 deposits + this attempt
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   std::vector<fc::ecc::commitment_type> cs;
+   for( int i = 0; i < 11; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      blind_output o; o.owner = own;
+      // Cost path (fee 1M = the n=1 anchor): deposits grant nothing, so the
+      // aging-jump maintenance below sees no interval flow and the pool
+      // stays whole for the attempt — isolating the decoy gate as the
+      // rejector. (Parity-path deposits would grant 11M against a 12M seed
+      // = 91% burn = critical at the jump.)
+      ttb.fee = core.amount( 1000000 );
+      auto B = T_blind_secret( "g1c-thin11-b|" + std::to_string( i ) );
+      auto N = T_secret( "g1c-thin11-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, 1000 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B; ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      cs.push_back( o.commitment );
+   }
+   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 11u );
+   // One real V1 output (so output checks pass) over the 11 real inputs.
+   auto Bo = T_blind_secret( "g1c-thin11-out" );
+   auto No = T_secret( "g1c-thin11-nout" );
+   stealth_transfer_operation thin11;
+   thin11.asset_id = core.get_id();
+   thin11.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   thin11.fee = core.amount( 0 );
+   {
+      stealth_ring_input rin;
+      for( const auto& c : cs )
+         rin.ring.push_back( c );
+      rin.key_image = std::vector<char>( 33, 0x03 );
+      rin.pseudo_output = cs[0];
+      rin.ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
+      thin11.inputs = { rin };
+      stealth_blind_output so;
+      so.commitment = fc::ecc::blind( Bo, 990 );
+      so.range_proof = fc::ecc::range_proof_sign( 0, so.commitment, Bo, No, 0, 0, 990 );
+      so.owner = own;
+      thin11.outputs = { so };
+   }
+   BOOST_CHECK_NO_THROW( thin11.validate() );
+   trx.operations = { thin11 };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "thin-pool 11-ring spend must reject" );
+   }
+   catch( const fc::exception& e )
+   {
+      // what() carries only "Assert Exception"; the format lives in the
+      // detail string.
+      std::string w = e.to_detail_string();
+      BOOST_CHECK_MESSAGE( w.find( "thin-pool" ) != std::string::npos, w );
+   }
+   trx.clear();
+   // The thin-pool-16 ACCEPT case at op level is stealth_transfer_happy_path
+   // (depth 16 < 64, target-size ring, 4x4 windows at exactly 25%).
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
+{ try {
+   // G3-03: the R-05 halt is maintenance-lagged but real — while
+   // burn_critical is set, new subsidies refuse (parity path rejects, the
+   // cost-anchor path still clears); the next maintenance auto-clears with
+   // fresh routed/granted flow and subsidies resume.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 100000000 ) );
+   generate_block(); // seal-then-modify: schedule + pool writes are direct
+   // Gap 10000 per withdrawal (parity 490000 vs 500000 pinned anchor, n=0).
+   // Pin scale at 100% (see the cap test note): test genesis zeroes it.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fees = p.parameters.get_mutable_fees();
+      fees.scale = GRAPHENE_100_PERCENT;
+      auto& fee_params = fees.parameters;
+      auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
+      itr->get<transfer_from_blind_operation::fee_params_t>().fee = 490000;
+   } );
+   BOOST_REQUIRE_EQUAL( stealth_parity_gap_core( db, 0, share_type( 490000 ) ).value, 10000 );
+   // Seed the pool (5% of 1M = 50000) BEFORE forcing the halt.
+   db.adjust_balance( dan_id, core.amount( -1000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
+   BOOST_REQUIRE_EQUAL(
+      db.get_index_type<stealth_status_index>().indices().begin()->parity_pool.find( core_id )->second.value,
+      50000 );
+
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   auto deposit = [&]( const std::string& tag, int64_t dep ) -> std::pair<fc::ecc::commitment_type, fc::sha256> {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( dep );
+      ttb.from = dan.id;
+      blind_output o; o.owner = own;
+      ttb.fee = core.amount( 1000000 ); // cost path: pool reserved for the legs under test
+      auto B = T_blind_secret( "g1c-halt-b|" + tag );
+      auto N = T_secret( "g1c-halt-n|" + tag );
+      o.commitment = fc::ecc::blind( B, dep );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, dep );
+      ttb.blinding_factor = B; ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      return { o.commitment, B };
+   };
+   // Exact-conservation inputs: parity leg spends 900 + 490000, cost leg
+   // spends 900 + 500000, post-clear leg spends 900 + 490000.
+   auto cP = deposit( "parity", 490900 );
+   auto cC = deposit( "cost", 500900 );
+   auto cR = deposit( "resume", 490900 );
+   generate_block(); // seal: the halt flag below is a direct modify
+   auto withdraw = [&]( const std::pair<fc::ecc::commitment_type, fc::sha256>& in,
+                        int64_t fee, bool expect_ok ) {
+      transfer_from_blind_operation x;
+      x.to = dan.id; x.amount = core.amount( 900 ); x.fee = core.amount( fee );
+      blind_input bi; bi.commitment = in.first; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = in.second;
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      if( expect_ok )
+      {
+         db.push_transaction( precomputable_transaction( trx ), database::skip_nothing );
+         verify_asset_supplies( db );
+      }
+      else
+         BOOST_CHECK_THROW(
+            db.push_transaction( precomputable_transaction( trx ), database::skip_nothing ),
+            fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   };
+   // Force the alarm with a funded pool (maintenance would set it from
+   // flow; direct-set isolates the halt from the ratio math).
+   db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+              []( stealth_status_object& s ) { s.alarms.burn_critical = true; } );
+   // Parity path refuses while critical...
+   withdraw( cP, 490000, false );
+   // ...the cost-anchor path still clears (halt never bricks traffic)...
+   withdraw( cC, 500000, true );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 50000 ); // untouched
+   }
+   // Next maintenance auto-clears (this interval routed 50000, granted 0:
+   // worst 0%) and fresh flow resumes subsidies.
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( !st.alarms.burn_critical );
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 0u );
+   }
+   db.adjust_balance( dan_id, core.amount( -1000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
+   withdraw( cR, 490000, true );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 90000 );
+      BOOST_REQUIRE( st.interval_granted.find( core_id ) != st.interval_granted.end() );
+      BOOST_CHECK_EQUAL( st.interval_granted.find( core_id )->second.value, 10000 );
+   }
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 20u ); // 10000/50000 this interval
+      BOOST_CHECK( !st.alarms.burn_warn );
+      BOOST_CHECK( !st.alarms.burn_critical );
+   }
+   verify_asset_supplies( db );
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_uia_cer_gap_bound )
+{ try {
+   // G3-01 + G3-06: non-CORE CER gap conversion rounds UP (pool-favoring)
+   // with a ceil-vs-floor difference bounded by 1 unit. A 3:2 CER makes
+   // every odd gap expose the rounding leg.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 10000000 ) );
+   const asset_object& uia = create_user_issued_asset( "TESTUIA" );
+   const asset_id_type uia_id = uia.get_id();
+   issue_uia( dan, uia.amount( 1000000 ) );
+   generate_block(); // seal-then-modify: CER + pool writes below are direct
+   // Non-dividing CER: 2 TESTUIA cost 3 CORE units (tiny units, exact math).
+   db.modify( uia, [&]( asset_object& a ) {
+      a.options.core_exchange_rate = price( core.amount( 3 ), asset( 2, uia_id ) );
+   } );
+   // CORE identity + zero fast paths.
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, core_id, share_type( 1001 ) ).value, 1001 );
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, uia_id, share_type( 0 ) ).value, 0 );
+   // Odd gap: ceil(1001*3/2) = 1502 vs floor 1501 — the 1-unit bound.
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, uia_id, share_type( 1001 ) ).value, 1502 );
+   // Even gap: exact division, no rounding leg.
+   BOOST_CHECK_EQUAL( stealth_gap_to_asset( db, uia_id, share_type( 1000 ) ).value, 1500 );
+   // Sweep: converted - floor(exact) is always 0 or 1, never negative.
+   for( int64_t g = 0; g <= 64; ++g )
+   {
+      int64_t conv = stealth_gap_to_asset( db, uia_id, share_type( g ) ).value;
+      int64_t floor_v = ( g * 3 ) / 2;
+      BOOST_CHECK_GE( conv, floor_v );
+      BOOST_CHECK_LE( conv - floor_v, 1 );
+      BOOST_CHECK_GE( conv * 2, g * 3 ); // never under-debits the pool
+   }
+   // Availability honors the ceil: fund the pool with exactly 1502 TESTUIA
+   // through the real routing leg (supply-neutral: dan debited, pool +
+   // accumulated credited — direct pool writes would break
+   // verify_asset_supplies, which counts the pool). 1502 covers gap 1001
+   // exactly; gap 1002 needs ceil(1002*3/2) = 1503 and is short.
+   db.adjust_balance( dan_id, uia.amount( -30040 ) );
+   db.pay_market_fees( nullptr, uia, uia.amount( 30040 ), true, uia.amount( 30040 ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE_EQUAL( st.parity_pool.find( uia_id )->second.value, 1502 );
+   }
+   BOOST_CHECK( stealth_parity_available( db, uia_id, share_type( 1001 ) ) );
+   BOOST_CHECK( !stealth_parity_available( db, uia_id, share_type( 1002 ) ) );
+   verify_asset_supplies( db );
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
+{ try {
+   // G3-06 + G3-01: (a) dust routing returns zero and dirties no state;
+   // (b) the fee-schedule scale factor moves the cost anchor's current leg
+   // exactly as it moves parity_core (both through calculate_fee), so a
+   // committee repricing cannot open a windfall subsidy gap.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 10000000 ) );
+   generate_block(); // seal: routing + fee writes below are direct
+
+   // --- dust: 1 and 19 route zero at 500bps (never a partial unit) ---
+   // Supply-neutral mirroring (G3-07): every routed increment is funded by
+   // a balance debit, the remainder credited to accumulated_fees — the same
+   // legs pay_market_fees runs, so verify_asset_supplies holds.
+   {
+      const auto& st0 = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st0.parity_pool.find( core_id ) == st0.parity_pool.end() );
+      BOOST_CHECK( st0.interval_routed.find( core_id ) == st0.interval_routed.end() );
+      for( int64_t dust : { 1, 19 } )
+      {
+         db.adjust_balance( dan_id, core.amount( -dust ) );
+         share_type inc = dust;
+         share_type routed = stealth_parity_route_fee( db, core_id, inc );
+         BOOST_CHECK_EQUAL( routed.value, 0 );
+         BOOST_CHECK_EQUAL( inc.value, dust ); // remainder untouched
+         db.modify( core.dynamic_asset_data_id( db ), [&]( asset_dynamic_data_object& d ) {
+            d.accumulated_fees += inc;
+         } );
+      }
+      // 20 routes exactly one unit (20*500/10000 = 1): the dust boundary.
+      // Routed into the pool with the remainder credited back, supply-neutral.
+      {
+         db.adjust_balance( dan_id, core.amount( -20 ) );
+         share_type inc = 20;
+         share_type routed = stealth_parity_route_fee( db, core_id, inc );
+         BOOST_CHECK_EQUAL( routed.value, 1 );
+         BOOST_CHECK_EQUAL( inc.value, 19 );
+         db.modify( core.dynamic_asset_data_id( db ), [&]( asset_dynamic_data_object& d ) {
+            d.accumulated_fees += inc;
+         } );
+      }
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.parity_pool.find( core_id )->second.value, 1 );
+      verify_asset_supplies( db );
+   }
+
+   // --- scale: anchor current leg tracks parity_core through repricing ---
+   // Live schedule: transfer_to_blind 600000 (+0 ppo), transfer_from_blind
+   // 500000. Pinned n=0 floor is 500000; activation snapshot is 0 (zeroed
+   // test genesis), so the current leg governs at both scales. Note test
+   // genesis also zeroes the scale itself (fees.scale == 0 maps every
+   // schedule to 0) — the pre-parity cases above rely on that; here scale
+   // is set explicitly per leg via parity_at().
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fees = p.parameters.get_mutable_fees();
+      auto& params = fees.parameters;
+      params.find( transfer_to_blind_operation::fee_params_t() )
+         ->get<transfer_to_blind_operation::fee_params_t>().fee = 600000;
+      auto& params2 = p.parameters.get_mutable_fees().parameters;
+      params2.find( transfer_from_blind_operation::fee_params_t() )
+         ->get<transfer_from_blind_operation::fee_params_t>().fee = 500000;
+   } );
+   transfer_from_blind_operation probe;
+   const auto parity_at = [&]( uint32_t scale ) -> share_type {
+      db.modify( db.get_global_properties(), [&]( global_property_object& p ) {
+         p.parameters.get_mutable_fees().scale = scale;
+      } );
+      return db.current_fee_schedule().calculate_fee( operation( probe ) ).amount;
+   };
+   // Scale 100%: parity 500000, anchor max(600000, pinned 500000) = 600000.
+   BOOST_CHECK_EQUAL( parity_at( GRAPHENE_100_PERCENT ).value, 500000 );
+   BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 0 ).value, 600000 );
+   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 500000 ) ).value, 100000 );
+   // Scale 200%: BOTH legs double — anchor 1200000 (not the raw 600000 a
+   // scale-blind read would pin), parity 1000000, gap 200000. G3-01 pin:
+   // without the fix the anchor would sit at 600000 while parity cleared
+   // at 1000000, a 400000 windfall subsidy per op.
+   BOOST_CHECK_EQUAL( parity_at( 2 * GRAPHENE_100_PERCENT ).value, 1000000 );
+   BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 0 ).value, 1200000 );
+   BOOST_CHECK_NE( stealth_cost_anchor_core( db, 0 ).value, 600000 );
+   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 1000000 ) ).value, 200000 );
+   verify_asset_supplies( db );
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
+{ try {
+   // G3-04/E-07 genesis coverage: every new G1 op (83-86) has a registered
+   // evaluator, every evaluator-touched index is registered from genesis,
+   // and replay-from-genesis (pre-hardfork push) refuses op 86.
+   ACTORS( (dan) );
+   // (a) indexes exist before any block (genesis state, no fork needed).
+   BOOST_CHECK_NO_THROW( db.get_index_type<stealth_status_index>() );
+   BOOST_CHECK_NO_THROW( db.get_index_type<stealth_nullifier_index>() );
+   BOOST_CHECK_NO_THROW( db.get_index_type<blinded_balance_index>() );
+   // (b) the consensus kind gate fires without any fork or committee: the
+   // record helper rejects unknown kinds even pre-STEALTH (validate() is a
+   // relay-side check, not the consensus boundary for proposal-embedded
+   // ops — see parity_review_evaluator::do_apply).
+   BOOST_CHECK_THROW( stealth_record_parity_review( db, 7 ), fc::exception );
+   try
+   {
+      stealth_record_parity_review( db, 7 );
+      BOOST_FAIL( "unknown review kind must fail closed" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Unknown parity review kind" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   // (c) pre-hardfork replay refuses op 86 (like its siblings in
+   // stealth_ops_are_refused_before_the_hardfork): a well-formed review
+   // never reaches the committee gate before activation.
+   {
+      parity_review_operation r;
+      r.voter = dan.id;
+      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      r.note = "genesis replay must refuse";
+      BOOST_CHECK_NO_THROW( r.validate() );
+      signed_transaction tx;
+      tx.operations.push_back( r );
+      set_expiration( db, tx );
+      sign( tx, dan_private_key );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+   // (d) post-fork every evaluator is wired: each op reaches its own gate
+   // (committee-membership for 84/86, cost path for a fee-less 85) instead
+   // of "no evaluator". Op 83 is covered by stealth_transfer_happy_path
+   // (success) + the pre-fork refusal above.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   {
+      freeze_blind_operation fz;
+      fz.voter = dan_id; fz.freeze = true; fz.reason = "evaluator pin";
+      signed_transaction tx; tx.operations.push_back( fz );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, dan_private_key );
+      try { PUSH_TX( db, tx ); BOOST_FAIL( "non-member freeze must reject" ); }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "committee member" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   {
+      // Fee-less with a shaped (but unresolvable) leg: validate passes, the
+      // evaluator's cost path rejects — proving op 85 is wired, not absent.
+      // Owner-signed (dan) so the authority gate passes first.
+      turnstile_reproof_operation tp;
+      tp.new_output.range_proof = std::vector<char>( 64, 0 );
+      tp.new_output.owner = authority( 1, dan_id, 1 );
+      tp.owner = authority( 1, dan_id, 1 );
+      signed_transaction tx; tx.operations.push_back( tp );
+      set_expiration( db, tx );
+      BOOST_CHECK_NO_THROW( tp.validate() );
+      sign( tx, dan_private_key );
+      try { PUSH_TX( db, tx ); BOOST_FAIL( "fee-less turnstile must reject" ); }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "cost" ) != std::string::npos,
+                              e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   {
+      parity_review_operation r;
+      r.voter = dan_id; r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, dan_private_key );
+      try { PUSH_TX( db, tx ); BOOST_FAIL( "non-member review must reject" ); }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "committee member" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   verify_asset_supplies( db );
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( blind_wallet_defaults )
+{ try {
+   // G3-05 wallet unit coverage (offline: null remote api — the impl ctor
+   // skips every remote call in that mode; no consensus effect anywhere).
+   // (a) struct defaults match BLIND_DEFAULTS_CONTRACT.md exactly.
+   graphene::wallet::blind_transfer_defaults d;
+   BOOST_CHECK_EQUAL( d.blind_by_default, true );
+   BOOST_CHECK_EQUAL( d.decoy_fetch_batch_size, 32u );
+   BOOST_CHECK_EQUAL( d.min_broadcast_delay_sec, 3u );
+   BOOST_CHECK_EQUAL( d.min_mix_blocks, 0u ); // reserved, unenforced (G3-05)
+   // (b) batch-chunk math: one RPC trip per chunk, never per decoy.
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 0, 32 ), 0u );
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 1, 32 ), 1u );
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 32, 32 ), 1u );
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 33, 32 ), 2u );
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 64, 32 ), 2u );
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 65, 32 ), 3u );
+   BOOST_CHECK_EQUAL( graphene::wallet::blind_batch_chunk_count( 5, 0 ), 5u ); // 0→1 guard
+   // (c) offline wallet serves local state: fresh defaults + validation.
+   graphene::wallet::wallet_data wdata;
+   graphene::wallet::wallet_api w( wdata, fc::api<graphene::app::login_api>() );
+   auto got = w.get_blind_defaults();
+   BOOST_CHECK_EQUAL( got.blind_by_default, true );
+   BOOST_CHECK_EQUAL( got.decoy_fetch_batch_size, 32u );
+   BOOST_CHECK_EQUAL( got.min_broadcast_delay_sec, 3u );
+   auto bad = got; bad.decoy_fetch_batch_size = 0;
+   BOOST_CHECK_THROW( w.set_blind_defaults( bad ), fc::exception );
+   w.set_blind_by_default( false );
+   BOOST_CHECK_EQUAL( w.get_blind_defaults().blind_by_default, false );
+   w.set_blind_by_default( true );
+   // (d) injected sleep: hook observes seconds, no real wait. Default 3s
+   // fires once; 0 disables (hook silent).
+   uint32_t slept = 0;
+   int calls = 0;
+   w.set_blind_sleep_hook( [&]( uint32_t s ) { ++calls; slept = s; } );
+   w.blind_broadcast_delay();
+   BOOST_CHECK_EQUAL( calls, 1 );
+   BOOST_CHECK_EQUAL( slept, 3u );
+   auto off = w.get_blind_defaults(); off.min_broadcast_delay_sec = 0;
+   w.set_blind_defaults( off );
+   w.blind_broadcast_delay();
+   BOOST_CHECK_EQUAL( calls, 1 );
+   auto on = w.get_blind_defaults(); on.min_broadcast_delay_sec = 3;
+   w.set_blind_defaults( on );
+   // (e) fail-closed addressing (test hook unlock: no keys or files are
+   // touched on these paths — both legs throw before any of that).
+   w.set_unlocked_for_tests();
+   // Non-empty memo with blind default → throws before any routing.
+   BOOST_CHECK_THROW(
+      w.transfer_default( "alice", "somekey", "1.00000", "CORE", "hello", false, false ),
+      fc::exception );
+   // Unresolvable blind recipient → throws (never silently transparent).
+   // The public-account branch needs a node (get_account_id is remote-only);
+   // offline it resolves as non-account and still fails closed here.
+   BOOST_CHECK_THROW(
+      w.transfer_default( "alice", "nolabel-no-such-key", "1.00000", "CORE", "", false, false ),
+      fc::exception );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

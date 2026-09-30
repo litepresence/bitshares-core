@@ -33,6 +33,7 @@
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
+#include <graphene/protocol/vault_lifecycle_ops.hpp>
 
 #include <fc/io/raw.hpp>
 #include <fc/uint128.hpp>
@@ -184,8 +185,16 @@ void_result vault_challenge_evaluator::do_evaluate( const vault_challenge_operat
    _challenger = d.find( op.challenger );
    FC_ASSERT( nullptr != _challenger,
               "Challenger account ${a} does not exist", ("a", op.challenger) );
-   const vault_object* vault = d.find( op.vault );
-   FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );
+    const vault_object* vault = d.find( op.vault );
+    FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );
+    // R6C fail-closed: challenges against an already-WINDDOWN vault are pure
+    // state noise (the challenger locks bond for nothing: resolve is refused
+    // on WINDDOWN vaults). Refuse creation here, before the capacity/cooldown
+    // branches, so the refusal pins to the terminal state and never to a
+    // cooldown. Fail-closed direction only (rejects more, never less).
+    FC_ASSERT( vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
+               "Vault ${v} is wound down; challenges against terminal vaults are refused",
+               ("v", op.vault) );
 
    // Self-dealing ban: a challenger linked into the vault authority within the
    // bounded walk cannot challenge it.

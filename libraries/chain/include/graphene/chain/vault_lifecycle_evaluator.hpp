@@ -89,16 +89,17 @@ namespace graphene { namespace chain {
          share_type _payout;
    };
 
-   /**
-    * Segregates a vault's unseized bonds into a new wind-down object: marks
-    * each bond seized, debits its vesting balance (saturating at the vested
-    * balance, so a partially-drawn vesting seizes only what is there), and
-    * books the debited sum as segregated_bond with total_claims set to the
-    * vault's outstanding at freeze. Shared by the 150% maintenance hook and
-    * vault_resolve (sustained-challenge execution): one rulebook, both paths.
-    * Supply-neutral by construction (every vesting debit is booked into the
-    * wind-down remainder the audit counts as escrowed).
-    */
+    /**
+     * Segregates a vault's unseized bonds into a new wind-down object: marks
+     * each bond seized, debits its vesting balance (saturating at the vested
+     * balance, so a partially-drawn vesting seizes only what is there), and
+     * books the debited sum as segregated_bond with total_claims set to the
+     * vault's outstanding at freeze. Shared by the 150% maintenance hook and
+     * vault_resolve (sustained OR expired-frozen challenge execution, R5C
+     * fail-closed split): one rulebook, all paths. Supply-neutral by
+     * construction (every vesting debit is booked into the wind-down
+     * remainder the audit counts as escrowed).
+     */
    const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault );
 
    /**

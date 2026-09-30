@@ -59,8 +59,16 @@ namespace graphene { namespace protocol {
    constexpr uint16_t GRAPHENE_H2_FORFEIT_BURN_BPS = 8000;
    constexpr uint16_t GRAPHENE_H2_FORFEIT_POOL_BPS = 1500;
 
-   /// Challenge/dispute lifecycle states. Terminal states never transition.
-   constexpr uint8_t GRAPHENE_H2_CHALLENGE_OPEN = 0;
+    /// Challenge/dispute lifecycle states. Terminal states never transition.
+    /// EXPIRED_FROZEN is inconclusive, never exoneration: the 48h window
+    /// closed with no supermajority, which can be cartel-abstention
+    /// (withholding votes past the deadline vetoes sustain at the 5000bps
+    /// quorum gate). It therefore pins fail-closed (frozen stays, guilty
+    /// history sticks) — but it is exit-only resolvable: vault_resolve
+    /// accepts EXPIRED_FROZEN into the identical wind-down path as SUSTAINED
+    /// (R5C fail-closed split). There is NO path back to operation except
+    /// fresh re-registration (new vault object, new bonds).
+    constexpr uint8_t GRAPHENE_H2_CHALLENGE_OPEN = 0;
    constexpr uint8_t GRAPHENE_H2_CHALLENGE_EXONERATED = 1;
    constexpr uint8_t GRAPHENE_H2_CHALLENGE_SUSTAINED = 2;
    constexpr uint8_t GRAPHENE_H2_CHALLENGE_FAST_REJECTED = 3;

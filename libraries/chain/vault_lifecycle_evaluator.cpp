@@ -279,10 +279,23 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    // asserted inside.
    h2_require_price_leg( d.head_block_time() );
 
-   _challenge = d.find( op.challenge );
-   FC_ASSERT( nullptr != _challenge, "Challenge ${c} does not exist", ("c", op.challenge) );
-   FC_ASSERT( _challenge->state == GRAPHENE_H2_CHALLENGE_SUSTAINED,
-              "Only a sustained challenge executes into a wind-down" );
+    _challenge = d.find( op.challenge );
+    FC_ASSERT( nullptr != _challenge, "Challenge ${c} does not exist", ("c", op.challenge) );
+    // Fail-closed split (R5C expired-resolve-to-winddown): SUSTAINED and
+    // EXPIRED_FROZEN both execute into the IDENTICAL wind-down path below
+    // (exit-only: segregated bond, seniors first, rmax cap, haircut math).
+    // Expiry is inconclusive — no 48h supermajority was reached — and expiry
+    // can be cartel-abstention (withholding votes past the deadline vetoes
+    // sustain at the 5000bps quorum gate), so expiry must NEVER equal
+    // exoneration. But permanent brick punishes apathy-victims forever, and
+    // a wind-down cannot steal (it only exits funds to claimants), so any
+    // seated member may trigger it with no vote — the same trust level as
+    // the sustained resolver rule. Guilty-vs-inconclusive discrimination is
+    // economic, not procedural: neither path can return to minting without
+    // full re-bonding through fresh re-registration (a new vault object).
+    FC_ASSERT( _challenge->state == GRAPHENE_H2_CHALLENGE_SUSTAINED
+               || _challenge->state == GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN,
+               "Only a sustained or expired-frozen challenge executes into a wind-down" );
    FC_ASSERT( !_challenge->executed,
               "Challenge ${c} was already executed", ("c", op.challenge) );
    // Committee 2/3 execution path: the resolver proves seated membership (the

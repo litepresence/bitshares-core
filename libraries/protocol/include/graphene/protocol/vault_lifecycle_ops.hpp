@@ -120,24 +120,28 @@ namespace graphene { namespace protocol {
       void            validate()const;
    };
 
-   /**
-    * @brief Executes a sustained vault challenge into a segregated wind-down.
-    * @ingroup operations
-    *
-    * Committee 2/3 execution path: the resolver must be a seated committee
-    * member, and the challenge must be in the sustained terminal state (the
-    * vote already proved the supermajority). Execution seizes the vault's
-    * bonds into a wind-down vault that only ever pays from that segregated
-    * slice — never another vault's bonds, never the issuance reserve.
-    */
+    /**
+     * @brief Executes a sustained OR expired-frozen vault challenge into a segregated wind-down.
+     * @ingroup operations
+     *
+     * Committee 2/3 execution path: the resolver must be a seated committee
+     * member. The challenge must be in a terminal guilty-or-inconclusive
+     * state — SUSTAINED (the vote proved the supermajority) or
+     * EXPIRED_FROZEN (the window closed with no supermajority, which can be
+     * cartel-abstention, so it is never exoneration). Both execute into the
+     * identical exit-only wind-down: the vault's bonds segregate into a
+     * wind-down vault that only ever pays from that slice — never another
+     * vault's bonds, never the issuance reserve — and the vault never
+     * returns to operation except through fresh re-registration.
+     */
    struct vault_resolve_operation : public base_operation
    {
       struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
 
-      asset                    fee;
-      account_id_type          resolver;  ///< Must be a seated committee member
-      vault_challenge_id_type  challenge; ///< Must be sustained and unexecuted
-      extensions_type          extensions; ///< Appended-last rule
+       asset                    fee;
+       account_id_type          resolver;  ///< Must be a seated committee member
+       vault_challenge_id_type  challenge; ///< Must be sustained or expired-frozen, unexecuted
+       extensions_type          extensions; ///< Appended-last rule
 
       account_id_type fee_payer()const { return resolver; }
       void            validate()const;

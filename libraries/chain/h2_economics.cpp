@@ -69,6 +69,17 @@ namespace {
    constexpr size_t H2E_PROMOTION_LOG_CAP = 16;
    /// Distinct-pool tracking bound per window (state must stay bounded).
    constexpr size_t H2E_TRIPWIRE_POOL_CAP = 64;
+   /// Guilty-history scan bound (R4-01 backstop, shared by the oracle and
+   /// vault halves below). Dispute/challenge objects persist as the audit
+   /// trail (never pruned), so a per-target history scan is
+   /// resolution-scoped but NOT bounded by protocol state: it walks the
+   /// target's full terminal history. Several thousand terminal records on
+   /// one target is unreachable in practice, so breaching this cap fails
+   /// closed (treated as guilty: reopen refuses, committee oracle_unfreeze
+   /// stays the escape hatch for oracles). No cached flag on the H1 oracle
+   /// object by design (avoids pre-merge object-layout divergence): the
+   /// scan stays the source of truth.
+   constexpr size_t H2E_GUILTY_SCAN_CAP = 8192;
 
    /// Saturating share addition for scope accounting: state sums can in
    /// principle exceed int64 while the comparison only needs monotonicity.
@@ -106,12 +117,18 @@ namespace {
     ///   unreleased bonds do not back reads; the advancing-unlock rule keeps
     ///   active publishers ahead of their unlock).
     /// - Cost: one bounded scan per call (at most
-    ///   GRAPHENE_ORACLE_MAX_PRODUCERS entries: the producer set is capped
-    ///   at create/update validate and one bond exists per
-    ///   (oracle, producer) by lock refusal). Callers pay it once per oracle
-    ///   read (h2_read_consumed_price) and twice per pair per sweep through
-    ///   the tripwire feed leg (primary + single backup), i.e. worst case
-    ///   O(oracles x producers) per sweep.
+    ///   GRAPHENE_ORACLE_MAX_PRODUCERS bond rows: one bond exists per
+    ///   (oracle, producer) by lock refusal, but removed producers' bonds
+    ///   linger (no delete on producer removal), so MORE than 32 rows per
+    ///   oracle is reachable and the 33rd+ row truncates unread — a live
+    ///   producer past the cap backs no read and earns nothing (fail-closed
+    ///   self-grief: only the owner can strand rows by churning the producer
+    ///   set, and the strand is committee-visible on-chain). The reward
+    ///   live-set below shares this exact bound and truncation, so reads
+    ///   and payouts never disagree on who is live. Callers pay the scan
+    ///   once per oracle read (h2_read_consumed_price) and twice per pair
+    ///   per sweep through the tripwire feed leg (primary + single backup),
+    ///   i.e. worst case O(oracles x producers) per sweep.
     bool h2_oracle_has_bonded_live_set( const database& d, const oracle_object& oracle,
                                         time_point_sec now )
     {
@@ -132,9 +149,12 @@ namespace {
              continue; // R3-02: zero weight backs nothing (reward path pays zero)
           if( bitr->bond_amount <= share_type( 0 ) || now >= bitr->unlock_time )
              continue; // R3-02: releasable or unfunded-record bonds do not back reads
-          const vesting_balance_object* vb = d.find( bitr->vesting_balance );
-          if( vb == nullptr || vb->balance.amount < bitr->bond_amount )
-             continue; // R3-02: vesting withdrawals bypass the bond object
+           const vesting_balance_object* vb = d.find( bitr->vesting_balance );
+           if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+               || vb->balance.amount < bitr->bond_amount )
+              continue; // R3-02: vesting withdrawals bypass the bond object;
+                        // R4-03: BTS-only is enforced at lock (bond_evaluator),
+                        // this asset check is belt and suspenders
           const auto sitr = oracle.submissions.find( bitr->producer );
           if( sitr == oracle.submissions.end()
               || !oracle.is_submission_live( sitr->second.first, now ) )
@@ -181,11 +201,19 @@ namespace {
       return pools.size() >= 2;
    }
 
-    /// R3-01: does @p oid carry terminal guilty dispute history (SUSTAINED
-    /// or EXPIRED_FROZEN)? Dispute objects persist as the audit trail, so the
-    /// scan is resolution-scoped, never whole-history: EXONERATED and
-    /// FAST_REJECTED pasts never block (no permanent owner lockout), and
-    /// open disputes are gated separately by the open_disputes counter. Same
+    /// R3-01 guilty-history gate (R4-01 honesty + backstop): does @p oid
+    /// carry terminal guilty dispute history (SUSTAINED or EXPIRED_FROZEN)?
+    /// Dispute objects persist as the audit trail (never pruned), so this
+    /// scan is resolution-scoped but walks the oracle's FULL standing
+    /// history — per-oracle history is unbounded by protocol state, and an
+    /// earlier "never whole-history" comment was wrong (corrected here).
+    /// The H2E_GUILTY_SCAN_CAP backstop bounds the read against
+    /// pathological accumulation; breaching it fails closed (treated as
+    /// guilty; committee oracle_unfreeze stays the escape hatch). No cached
+    /// flag on the H1 oracle object by design (avoids pre-merge
+    /// object-layout divergence): the scan stays the source of truth.
+    /// EXONERATED and FAST_REJECTED pasts never block (no permanent owner
+    /// lockout), and open disputes gate separately via open_disputes. Same
     /// index pattern as the owner-refusal check in
     /// oracle_update_evaluator::do_evaluate (oracle_evaluator.cpp).
     bool h2_oracle_has_guilty_history( const database& d, oracle_id_type oid )
@@ -193,10 +221,46 @@ namespace {
        const auto& dispute_idx = d.get_index_type<oracle_dispute_index>()
                                     .indices().get<by_dispute_oracle>();
        const auto range = dispute_idx.equal_range( oid );
+       size_t scanned = 0;
        for( auto itr = range.first; itr != range.second; ++itr )
+       {
+          if( ++scanned > H2E_GUILTY_SCAN_CAP )
+             return true; // backstop breached: fail closed, see cap note
           if( itr->state == GRAPHENE_H2_CHALLENGE_SUSTAINED
               || itr->state == GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN )
              return true;
+       }
+       return false;
+    }
+
+    /// R4-02a vault-half mirror of the oracle gate above: does @p vid carry
+    /// terminal guilty challenge history (SUSTAINED or EXPIRED_FROZEN)?
+    /// Same resolution-scoped pattern over by_challenge_vault (EXONERATED /
+    /// FAST_REJECTED pasts never block; open challenges gate separately via
+    /// open_challenges), same fail-closed backstop. Third pin of three —
+    /// cross-cite the vault_lifecycle top-up restore
+    /// (vault_lifecycle_evaluator.cpp: pinned + tripwire_door_hold refuse
+    /// the coverage-restore clear) and h2_reopen_tripwire's vault half
+    /// below: all three agree that coverage recovery or clean tripwire
+    /// windows never clear a theft finding. Note the asymmetry with the
+    /// oracle half: a guilty oracle clears through committee oracle_unfreeze,
+    /// while a guilty vault has no unfreeze op (sustained executes into a
+    /// wind-down via vault_resolve; an expired challenge pins fail-closed
+    /// with no recourse — flagged as follow-up, never silently cleared).
+    bool h2_vault_has_guilty_history( const database& d, vault_id_type vid )
+    {
+       const auto& ch_idx = d.get_index_type<vault_challenge_index>()
+                               .indices().get<by_challenge_vault>();
+       const auto range = ch_idx.equal_range( vid );
+       size_t scanned = 0;
+       for( auto itr = range.first; itr != range.second; ++itr )
+       {
+          if( ++scanned > H2E_GUILTY_SCAN_CAP )
+             return true; // backstop breached: fail closed, see cap note
+          if( itr->state == GRAPHENE_H2_CHALLENGE_SUSTAINED
+              || itr->state == GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN )
+             return true;
+       }
        return false;
     }
 
@@ -233,9 +297,16 @@ namespace {
     /// counter alone would let two clean windows silently unfreeze a guilty
     /// producer's oracle, bypassing committee oracle_unfreeze. Guilty oracles
     /// clear only through the committee op — after the tripwire stage itself
-    /// has cleared, since unfreeze refuses while halt_stage >= DEBT (see
-    /// oracle_unfreeze_evaluator::do_evaluate). Vault holds keep their
-    /// existing pinned logic (open counter + health).
+    /// has cleared, since unfreeze refuses at any non-NONE stage (R4-02:
+    /// halt_stage == NONE, see oracle_unfreeze_evaluator::do_evaluate).
+    ///
+    /// R4-02a: the vault half mirrors the pin (h2_vault_has_guilty_history):
+    /// an expired/sustained vault challenge keeps the vault frozen across
+    /// clean windows even with zero open challenges and healthy coverage —
+    /// without this, the counter + health read alone would silently unfreeze
+    /// a theft finding. Third pin of three with the top-up restore guard
+    /// (vault_lifecycle_evaluator.cpp); EXONERATED/FAST_REJECTED vault pasts
+    /// never block, exactly like the oracle half.
     void h2_reopen_tripwire( database& d, const tripwire_state_object& tw,
                              const vault_object& vault )
     {
@@ -248,7 +319,8 @@ namespace {
        } );
        d.modify( vault, []( vault_object& v ) { v.tripwire_door_hold = false; } );
        if( vault.open_challenges == 0
-           && vault.maintenance_state == GRAPHENE_H2_VAULT_HEALTHY )
+           && vault.maintenance_state == GRAPHENE_H2_VAULT_HEALTHY
+           && !h2_vault_has_guilty_history( d, vault_id_type( vault.id ) ) )
           d.modify( vault, []( vault_object& v ) { v.frozen = false; } );
        if( oracle != nullptr && oracle->open_disputes == 0
            && !h2_oracle_has_guilty_history( d, oracle_id_type( oracle->id ) ) )
@@ -340,6 +412,12 @@ namespace {
           // applies door AND debt together (stage jumps past DEBT), so no
           // block ever observes door-closed/debt-open. Redemptions stay the
           // only lagging rung (manual pair_freeze was already atomic).
+          // R4-02: DOOR is dead as a STANDING stage — the jump below stores
+          // DEBT (2) directly, never 1 — so committee oracle_unfreeze gates
+          // on halt_stage == NONE (any non-NONE stage blocks; the strict
+          // form refuses a stored DOOR too, should a future rung ever store
+          // one). h2_apply_tripwire_stage still keys door effects off
+          // >= DOOR, so the standing DEBT stage carries the door hold with it.
           if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT )
              stage_after = GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT;
           else if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS )
@@ -403,22 +481,43 @@ namespace {
          balance = h2_sat_add( balance, vitr->forfeit_pool_balance );
          d.modify( *vitr, []( vault_object& v ) { v.forfeit_pool_balance = share_type( 0 ); } );
       }
-      // Live set: unslashed bond + live submission + current producer entry.
-      // Weight is owner-set (never reputation-earned); zero weights earn zero
-      // but still count as live for the denominator they cannot move.
+      // Live set (R4-03 parity): the IDENTICAL bonded-live definition as the
+      // read gate h2_oracle_has_bonded_live_set above (unslashed bond +
+      // weight > 0 + locked/unexpired + vesting still covering in BTS + live
+      // submission + current producer entry), under the same
+      // GRAPHENE_ORACLE_MAX_PRODUCERS scan bound with the same fail-closed
+      // truncation. One shared definition of "live backed producer" for
+      // reads, the tripwire feed leg, and payouts: an entry that fails the
+      // read gate earns zero here (its weight leaves the denominator too),
+      // and truncation dust accrues to the pool, never mints.
+      // Weight is owner-set (never reputation-earned); a zero weight earns
+      // zero AND counts as not-live (it cannot move the denominator).
       struct live_producer { account_id_type account; uint64_t weight; };
       vector<live_producer> live;
       uint64_t total_weight = 0;
       const auto& bond_idx = d.get_index_type<producer_bond_index>()
                                 .indices().get<by_oracle_producer>();
+      size_t scanned = 0;
       for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oracle_id_type( oracle.id ) ) );
             bitr != bond_idx.end() && bitr->oracle == oracle.id; ++bitr )
       {
+         if( ++scanned > GRAPHENE_ORACLE_MAX_PRODUCERS )
+            break; // shared cap: unreachable except via removal-lingered rows,
+                   // truncates fail-closed (33rd+ live producer unpaid)
          if( bitr->slashed )
             continue;
          const auto pitr2 = oracle.options.producers.find( bitr->producer );
          if( pitr2 == oracle.options.producers.end() )
             continue;
+         if( pitr2->second.weight == 0 )
+            continue; // R4-03 parity: zero weight backs nothing (gate refuses it too)
+         if( bitr->bond_amount <= share_type( 0 ) || now >= bitr->unlock_time )
+            continue; // R4-03 parity: releasable or unfunded-record bonds earn nothing
+         const vesting_balance_object* vb = d.find( bitr->vesting_balance );
+         if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+             || vb->balance.amount < bitr->bond_amount )
+            continue; // R4-03 parity: vesting must still cover, in BTS
+                      // (BTS-only enforced at lock; asset check is belt+suspenders)
          const auto sitr = oracle.submissions.find( bitr->producer );
          if( sitr == oracle.submissions.end()
              || !oracle.is_submission_live( sitr->second.first, now ) )

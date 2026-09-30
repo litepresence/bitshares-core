@@ -128,7 +128,10 @@ void process_h2_vault_maintenance( database& d )
             // Coverage restored inside the window: back to healthy. The halt
             // lifts only if no sustained/expired challenge still pins the
             // vault shut — a coverage recovery must never unfreeze a theft
-            // finding.
+            // finding. Second pin of three (R4-02a): h2_reopen_tripwire's
+            // vault half (h2_economics.cpp) mirrors this scan, and both agree
+            // with the oracle half that EXONERATED/FAST_REJECTED pasts never
+            // block.
             bool pinned = false;
             const auto& ch_idx = d.get_index_type<vault_challenge_index>()
                                     .indices().get<by_challenge_vault>();

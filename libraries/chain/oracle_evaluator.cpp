@@ -455,17 +455,20 @@ void_result oracle_unfreeze_evaluator::do_evaluate( const oracle_unfreeze_operat
     // first, never mid-vote.
     FC_ASSERT( _oracle->open_disputes == 0,
                "Oracle carries open disputes; unfreeze refused until resolution" );
-    // R3-01 coherence (documented choice: REFUSE while the deviation ladder
-    // holds the pair). The frozen flag conflates two causes: guilty freezes
-    // (disputes) clear here, deviation halts (tripwire stage >= DEBT) clear
-    // only through tripwire reopen (two clean windows). Clearing the flag
-    // here mid-halt would split the state (oracle live while the door hold,
-    // debt halt, or redemptions latch still stand), so this op refuses until
-    // every bound pair's stage has cleared; the committee then unfreezes in
-    // a second step. Tripwire reopen, symmetrically, never clears a guilty
-    // oracle (see h2_reopen_tripwire): each cause clears through its own
-    // path, in either order. Rare-op scan (never a sweep): vaults bound to
-    // this oracle, each with at most one tripwire state.
+    // R3-01 coherence, R4-02 NONE tightening (documented choice: REFUSE while
+    // the deviation ladder holds the pair). The frozen flag conflates two
+    // causes: guilty freezes (disputes) clear here, deviation halts (any
+    // standing tripwire stage) clear only through tripwire reopen (two clean
+    // windows). Clearing the flag here mid-halt would split the state (oracle
+    // live while the door hold, debt halt, or redemptions latch still stand),
+    // so this op refuses until every bound pair's stage reads NONE; the
+    // committee then unfreezes in a second step. DOOR needs no carve-out: it
+    // is dead as a standing stage (the X-05 jump stores DEBT directly, see
+    // h2_economics.cpp), so == NONE also refuses a stored DOOR, should a
+    // future rung ever store one. Tripwire reopen, symmetrically, never
+    // clears a guilty oracle (see h2_reopen_tripwire): each cause clears
+    // through its own path, in either order. Rare-op scan (never a sweep):
+    // vaults bound to this oracle, each with at most one tripwire state.
     const auto& vault_idx = d.get_index_type<vault_index>().indices();
     const auto& tw_idx = d.get_index_type<tripwire_index>()
                             .indices().get<by_tripwire_pair>();
@@ -475,10 +478,10 @@ void_result oracle_unfreeze_evaluator::do_evaluate( const oracle_unfreeze_operat
           continue;
        const auto titr = tw_idx.find( vitr->vault_pair );
        FC_ASSERT( titr == tw_idx.end()
-                  || titr->halt_stage < GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT,
+                  || titr->halt_stage == GRAPHENE_H2E_TRIPWIRE_STAGE_NONE,
                   "Pair ${p} sits at tripwire halt stage ${s}; committee unfreeze "
                   "refused until the wire reopens (two clean windows clear the "
-                  "stage, then unfreeze)",
+                  "stage to NONE, then unfreeze)",
                   ("p", vitr->vault_pair)("s", titr->halt_stage) );
     }
 

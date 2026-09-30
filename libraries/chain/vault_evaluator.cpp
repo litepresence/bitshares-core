@@ -25,6 +25,7 @@
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 
 #include <graphene/chain/asset_object.hpp>
@@ -96,7 +97,8 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
 
 object_id_type vault_register_evaluator::do_apply( const vault_register_operation& op ) const
 { try {
-   const auto& new_vault = db().create<vault_object>( [&op]( vault_object& v ) {
+   database& d = db();
+   const auto& new_vault = d.create<vault_object>( [&op]( vault_object& v ) {
       v.vault_pair           = op.pair;
       v.vault_authority      = op.vault_authority;
       v.min_bond             = op.min_bond;
@@ -107,6 +109,12 @@ object_id_type vault_register_evaluator::do_apply( const vault_register_operatio
       v.outstanding          = share_type( 0 );
       v.frozen               = false;
    } );
+   // Gateway-leg activation for the pair starts its 90-day BTC seasoning
+   // clock (BSIP-1 section 5) in the same atomic step: no vault without a
+   // clock, no clock without a vault. Uniqueness of the vault per pair
+   // (checked in do_evaluate) implies uniqueness of the record; the create
+   // helper re-asserts it.
+   h2_create_seasoning_record( d, op.pair, d.head_block_time() );
    return object_id_type( new_vault.id );
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

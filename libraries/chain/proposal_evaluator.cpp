@@ -299,6 +299,8 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for oracle fallback prior to the H2 price hardfork");
          FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_unfreeze_operation>(),
                    "Unable to define fees for oracle unfreeze prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<seasoning_verify_operation>(),
+                   "Unable to define fees for seasoning verification prior to the H2 price hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
@@ -451,6 +453,9 @@ struct proposal_operation_hardfork_visitor
       h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::oracle_unfreeze_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::seasoning_verify_operation&) const {
       h2_require_price_leg(block_time);
    }
 

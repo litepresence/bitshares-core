@@ -39,6 +39,7 @@ list(APPEND SOURCES account.cpp
                     challenge_ops.cpp
                     vault_lifecycle_ops.cpp
                     h2_economics.cpp
+                    seasoning_ops.cpp
                     withdraw_permission.cpp
                     worker.cpp
                     htlc.cpp)

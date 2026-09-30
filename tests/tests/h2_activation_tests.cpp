@@ -17,7 +17,7 @@
  *   lifts for the same challenge.
  * - H1-exclusion: market-issued pairs and H1-bound pairs are refused at
  *   vault_register; a plain UIA registers (control).
- * - Pins: operation tags 83-96 and protocol-space object IDs 1.25.x-1.35.x
+ * - Pins: operation tags 83-98 and protocol-space object IDs 1.25.x-1.36.x
  *   are pinned, with pack/unpack round-trips over the appended-field ops
  *   (rotate co_signers, wind-down claim, fallback set).
  *
@@ -41,6 +41,7 @@
 #include <graphene/protocol/h2_economics.hpp>
 #include <graphene/protocol/operations.hpp>
 #include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
 
@@ -496,9 +497,10 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
    BOOST_CHECK( vid( db ).vault_pair == free_id );
 } FC_LOG_AND_RETHROW() }
 
-/// Operation tags 83-97 are the on-chain numbering and must never move: a
+/// Operation tags 83-98 are the on-chain numbering and must never move: a
 /// later edit that appends out of order or renumbers fails here, not on a
-/// live chain. Tag 97 is the R-02 committee oracle_unfreeze (price leg).
+/// live chain. Tag 97 is the R-02 committee oracle_unfreeze (price leg);
+/// tag 98 is the X-02 committee seasoning_verify (price leg).
 BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_96 )
 {
    using graphene::protocol::operation;
@@ -517,9 +519,10 @@ BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_96 )
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::winddown_claim_operation>::value ), 95 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::oracle_fallback_set_operation>::value ), 96 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::oracle_unfreeze_operation>::value ), 97 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::seasoning_verify_operation>::value ), 98 );
 }
 
-/// Protocol-space object IDs 1.25.x-1.35.x are the on-chain numbering and
+/// Protocol-space object IDs 1.25.x-1.36.x are the on-chain numbering and
 /// must never move.
 BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_35 )
 {
@@ -534,6 +537,7 @@ BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_35 )
    BOOST_CHECK_EQUAL( int( graphene::protocol::guard_state_object_type ), 33 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::tripwire_state_object_type ), 34 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::recovery_state_object_type ), 35 );
+   BOOST_CHECK_EQUAL( int( graphene::protocol::seasoning_object_type ), 36 );
 }
 
 /// Appended-last fields survive pack/unpack with positions intact: the H2c
@@ -587,6 +591,15 @@ BOOST_AUTO_TEST_CASE( h2_appended_fields_round_trip )
       auto back = fc::raw::unpack<oracle_unfreeze_operation>( fc::raw::pack( op ) );
       BOOST_CHECK( back.unfreezer == op.unfreezer );
       BOOST_CHECK( back.oracle == op.oracle );
+   }
+   {
+      // X-02 seasoning verify op (tag 98): extensions appended-last round-trips.
+      seasoning_verify_operation op;
+      op.verifier = account_id_type( 11 );
+      op.pair     = asset_id_type( 12 );
+      auto back = fc::raw::unpack<seasoning_verify_operation>( fc::raw::pack( op ) );
+      BOOST_CHECK( back.verifier == op.verifier );
+      BOOST_CHECK( back.pair == op.pair );
    }
 }
 

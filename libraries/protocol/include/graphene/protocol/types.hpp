@@ -396,6 +396,7 @@ GRAPHENE_DEFINE_IDS(protocol, protocol_ids, /*protocol objects are not prefixed*
                      /* 1.33.x */ (guard_state)
                      /* 1.34.x */ (tripwire_state)
                      /* 1.35.x */ (recovery_state)
+                     /* 1.36.x */ (seasoning)
                      )
 
 FC_REFLECT(graphene::protocol::public_key_type, (key_data))

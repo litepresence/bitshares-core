@@ -88,7 +88,8 @@ struct hardfork_visitor {
                                             protocol::pair_freeze_operation,
                                             protocol::winddown_claim_operation,
                                             protocol::oracle_fallback_set_operation,
-                                            protocol::oracle_unfreeze_operation >;
+                                            protocol::oracle_unfreeze_operation,
+                                            protocol::seasoning_verify_operation >;
 
    fc::time_point_sec now;
 

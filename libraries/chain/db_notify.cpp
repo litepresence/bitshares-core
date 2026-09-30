@@ -468,6 +468,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // unfreezer (committee)
    }
+   void operator()( const seasoning_verify_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // verifier (committee)
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

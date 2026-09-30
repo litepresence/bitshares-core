@@ -46,6 +46,7 @@
 #include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/vote_count.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -1621,6 +1622,14 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    // H2d oracle economics: reward-pool sweep + pro-rata payouts, guard rate
    // windows, Recovery scope, tripwire ladder. Pre-fork no-op.
    process_h2_oracle_economics(*this);
+   // X-02 BTC seasoning clock (BSIP-1 section 5): folds current vault/oracle
+   // coverages into each pair's full-window minimums, resets breaching
+   // windows, recomputes complete. Runs LAST among the H2 sweeps: it reads
+   // vault bonds/outstanding and producer bonds the earlier sweeps may have
+   // seized or swept, so it must observe their post-sweep state. Appended
+   // after the X-06-pinned expiry/vault/tripwire prefix, whose relative
+   // order is untouched. Pre-gateway no-op.
+   process_h2_seasoning(*this);
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

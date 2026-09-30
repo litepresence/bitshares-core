@@ -1,0 +1,280 @@
+/*
+ * Copyright (c) 2026 BitShares contributors.
+ *
+ * The MIT License
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
+
+#include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/committee_member_object.hpp>
+#include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
+#include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/vault_object.hpp>
+
+#include <boost/multiprecision/cpp_int.hpp>
+#include <fc/io/raw.hpp>
+#include <fc/uint128.hpp>
+
+namespace graphene { namespace chain {
+
+namespace {
+
+using boost::multiprecision::uint256_t;
+using graphene::protocol::GRAPHENE_H2_SEASONING_ORACLE_MIN_BPS;
+using graphene::protocol::GRAPHENE_H2_SEASONING_VAULT_MIN_BPS;
+using graphene::protocol::GRAPHENE_H2_SEASONING_WINDOW_SEC;
+
+constexpr uint32_t H2_SEASONING_BPS_SATURATE = 0xFFFFFFFF;
+
+/// Saturating share addition for backing scope accounting: bond sums can in
+/// principle exceed int64 while the comparison only needs monotonicity
+/// (Recovery-scope h2_sat_add precedent in h2_economics.cpp).
+share_type h2_seasoning_sat_add( share_type a, share_type b )
+{
+   if( a <= share_type( 0 ) )
+      return b;
+   if( b <= share_type( 0 ) )
+      return a;
+   const uint256_t sum = uint256_t( uint64_t( a.value ) )
+                       + uint256_t( uint64_t( b.value ) );
+   if( sum > uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
+      return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
+   return share_type( int64_t( uint64_t( sum ) ) );
+}
+
+/**
+ * Coverage as saturating basis points: backing * 10000 / debt, exact
+ * 128-bit division, no floats. Zero (or negative) debt counts as covered
+ * (saturates): with no liabilities there is nothing to back, matching the
+ * h2_vault_meets_maintenance precedent that zero outstanding meets the
+ * maintenance trigger. Saturation is deterministic: every node computes
+ * the same quotient and the same cap.
+ */
+uint32_t h2_seasoning_coverage_bps( share_type backing, share_type debt )
+{
+   if( debt <= share_type( 0 ) )
+      return H2_SEASONING_BPS_SATURATE;
+   if( backing <= share_type( 0 ) )
+      return 0;
+   const fc::uint128_t q = fc::uint128_t( uint64_t( backing.value ) )
+                         * fc::uint128_t( 10000 )
+                         / fc::uint128_t( uint64_t( debt.value ) );
+   if( q >= fc::uint128_t( uint64_t( H2_SEASONING_BPS_SATURATE ) ) )
+      return H2_SEASONING_BPS_SATURATE;
+   return uint32_t( fc::uint128_lo64( q ) );
+}
+
+/// Unseized vault-bond backing for @p vid (same scope as
+/// h2_vault_meets_maintenance: seized bonds back nothing).
+share_type h2_seasoning_vault_backing( const database& d, vault_id_type vid )
+{
+   share_type backing( 0 );
+   const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
+   const auto range = bond_idx.equal_range( vid );
+   for( auto itr = range.first; itr != range.second; ++itr )
+      if( !itr->seized )
+         backing = h2_seasoning_sat_add( backing, itr->bond_amount );
+   return backing;
+}
+
+/**
+ * Unslashed producer-bond backing for @p oid. A backing-SIZE sum, not the
+ * bonded-live read gate (h2_oracle_has_bonded_live_set): the BSIP-H2
+ * formula is oracle_bonds / secured_debt, a size ratio over locked funds,
+ * so liveness, weights, and unlock posture do not filter rows -- slashed
+ * bonds (dispute-loss, H2b) back nothing and are the only exclusion.
+ * Unbounded by row count like the dispute-history scans (producer churn
+ * can strand rows past the 32-producer set cap); stranded rows stay
+ * countable because they are still locked funds.
+ */
+share_type h2_seasoning_oracle_backing( const database& d, oracle_id_type oid )
+{
+   share_type backing( 0 );
+   const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                             .indices().get<by_oracle_producer>();
+   for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oid ) );
+         bitr != bond_idx.end() && bitr->oracle == oid; ++bitr )
+      if( !bitr->slashed )
+         backing = h2_seasoning_sat_add( backing, bitr->bond_amount );
+   return backing;
+}
+
+const seasoning_record_object* h2_find_seasoning( const database& d, asset_id_type pair )
+{
+   const auto& idx = d.get_index_type<seasoning_record_index>()
+                        .indices().get<by_seasoning_pair>();
+   const auto itr = idx.find( pair );
+   return itr == idx.end() ? nullptr : &*itr;
+}
+
+} // namespace
+
+void h2_create_seasoning_record( database& d, asset_id_type pair,
+                                 time_point_sec now )
+{
+   FC_ASSERT( h2_find_seasoning( d, pair ) == nullptr,
+              "Pair ${p} already carries a seasoning record; duplicates refused",
+              ("p", pair) );
+   d.create<seasoning_record_object>( [&pair, &now]( seasoning_record_object& r ) {
+      r.pair = pair;
+      r.genesis_time = now;
+      r.window_start = now;
+      // No observation yet: minimums open at saturation so the first sweep's
+      // fold takes the current coverages verbatim (min(saturate, cur) = cur).
+      r.min_vault_bps = H2_SEASONING_BPS_SATURATE;
+      r.min_oracle_bps = H2_SEASONING_BPS_SATURATE;
+      r.verifier_set = false;
+      r.complete = false;
+   } );
+}
+
+void process_h2_seasoning( database& d )
+{
+   if( !HARDFORK_H2_GATEWAY_PASSED( d.head_block_time() ) )
+      return; // pre-gateway no record can exist (created at vault_register); the sweep is a no-op
+   const auto now = d.head_block_time();
+   const auto& pair_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+   const auto& rec_idx = d.get_index_type<seasoning_record_index>().indices();
+   for( auto ritr = rec_idx.begin(); ritr != rec_idx.end(); ++ritr )
+   {
+      // H2 bonded state only: vault bonds + outstanding + producer bonds.
+      // No oracle read, no H1 state, no wall-clock -- head-block time only.
+      const auto vitr = pair_idx.find( ritr->pair );
+      share_type debt( 0 );
+      uint32_t cur_vault_bps = 0;
+      uint32_t cur_oracle_bps = 0;
+      bool vault_ok = false;
+      bool oracle_ok = false;
+      if( vitr != pair_idx.end() )
+      {
+         debt = vitr->outstanding;
+         cur_vault_bps = h2_seasoning_coverage_bps(
+               h2_seasoning_vault_backing( d, vault_id_type( vitr->id ) ), debt );
+         vault_ok = cur_vault_bps >= GRAPHENE_H2_SEASONING_VAULT_MIN_BPS;
+         // The oracle leg needs the canonical binding (pinned by the first
+         // pair_freeze): an unbound pair names no bonded price series, so it
+         // cannot show oracle coverage >= 1.0 and the clock cannot accrue.
+         // The window therefore floats to binding -- documented, not
+         // incidental: every pre-binding sweep is a recorded breach reset.
+         if( vitr->bound_oracle.valid() )
+         {
+            cur_oracle_bps = h2_seasoning_coverage_bps(
+                  h2_seasoning_oracle_backing( d, *vitr->bound_oracle ), debt );
+            oracle_ok = cur_oracle_bps >= GRAPHENE_H2_SEASONING_ORACLE_MIN_BPS;
+         }
+      }
+      // A missing vault is unreachable (records are created with their
+      // vault, which is never deleted); treated as a dual breach so the
+      // clock fails closed, never open, on structural surprise.
+      if( vault_ok && oracle_ok )
+      {
+         const uint32_t next_vault_min = std::min( ritr->min_vault_bps, cur_vault_bps );
+         const uint32_t next_oracle_min = std::min( ritr->min_oracle_bps, cur_oracle_bps );
+         // Recomputed, never latched: a post-complete breach resets the
+         // window below and falsifies the predicate here, clearing the flag
+         // in the same sweep. No block observes complete with a fresh start.
+         const bool done = ( now >= ritr->window_start + GRAPHENE_H2_SEASONING_WINDOW_SEC )
+                         && next_vault_min >= GRAPHENE_H2_SEASONING_VAULT_MIN_BPS
+                         && next_oracle_min >= GRAPHENE_H2_SEASONING_ORACLE_MIN_BPS
+                         && ritr->verifier_set;
+         d.modify( *ritr, [&]( seasoning_record_object& r ) {
+            r.min_vault_bps = next_vault_min;
+            r.min_oracle_bps = next_oracle_min;
+            r.complete = done;
+         } );
+      }
+      else
+      {
+         // CONTINUOUS-HOLD, not cumulative: any breaching sweep restarts the
+         // 90-day clock at head-block time and reopens the minimums at the
+         // current (breaching) values. Partial-window cover cannot bank.
+         d.modify( *ritr, [&]( seasoning_record_object& r ) {
+            r.window_start = now;
+            r.min_vault_bps = cur_vault_bps;
+            r.min_oracle_bps = cur_oracle_bps;
+            r.complete = false;
+         } );
+      }
+   }
+}
+
+bool h2_seasoning_complete( const database& d, asset_id_type pair )
+{
+   const seasoning_record_object* r = h2_find_seasoning( d, pair );
+   if( r == nullptr )
+      return false;
+   const auto now = d.head_block_time();
+   return ( now >= r->window_start + GRAPHENE_H2_SEASONING_WINDOW_SEC )
+       && r->min_vault_bps >= GRAPHENE_H2_SEASONING_VAULT_MIN_BPS
+       && r->min_oracle_bps >= GRAPHENE_H2_SEASONING_ORACLE_MIN_BPS
+       && r->verifier_set;
+}
+
+void_result seasoning_verify_evaluator::do_evaluate( const seasoning_verify_operation& op )
+{ try {
+   database& d = db();
+
+   // Price leg (BSIP-1 section 5): the attestation judges bonded backing,
+   // so it admits at the price height. Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
+
+   _record = h2_find_seasoning( d, op.pair );
+   FC_ASSERT( nullptr != _record,
+              "Pair ${p} carries no seasoning record; only BTC ACCS-activated pairs verify",
+              ("p", op.pair) );
+   FC_ASSERT( !_record->verifier_set,
+              "Pair ${p} is already verified by ${v}; double attestation refused",
+              ("p", op.pair)("v", _record->verifier) );
+   const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   FC_ASSERT( member_idx.find( op.verifier ) != member_idx.end(),
+              "Verifier ${a} is not a seated committee member", ("a", op.verifier) );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+void_result seasoning_verify_evaluator::do_apply( const seasoning_verify_operation& op ) const
+{ try {
+   database& d = db();
+   // Once-only set: identity recorded, never anonymous. Completeness still
+   // needs the sweep (90 days + minimums); this op sets the bit only.
+   d.modify( *_record, [&op]( seasoning_record_object& r ) {
+      r.verifier_set = true;
+      r.verifier = op.verifier;
+   } );
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+} } // graphene::chain
+
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::seasoning_record_object, (graphene::db::object),
+                    (pair)
+                    (genesis_time)
+                    (window_start)
+                    (min_vault_bps)
+                    (min_oracle_bps)
+                    (verifier_set)
+                    (verifier)
+                    (complete)
+                  )
+
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::seasoning_record_object )

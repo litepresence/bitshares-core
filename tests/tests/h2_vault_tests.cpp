@@ -1034,6 +1034,79 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    BOOST_CHECK_THROW( PUSH_TX( db, tx2 ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
+/// Challenge-vs-winddown refusal (R6C fail-closed): a vault_challenge
+/// against an already-WINDDOWN vault is refused with fc::exception (pure
+/// state noise: the challenger would lock bond for nothing — resolve is
+/// already refused on WINDDOWN vaults). An otherwise-identical challenge
+/// against a HEALTHY sibling vault on another pair proceeds (control case:
+/// the gate rejects more, never less). Reuses h2c_post_challenge, no new
+/// fixtures.
+BOOST_AUTO_TEST_CASE( vault_challenge_refused_against_winddown_vault )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave)(erin) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( dave, asset( 30000000000000LL ) );
+   fund( erin, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   // Doomed vault: driven to terminal WINDDOWN via sustain + resolve below.
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default( *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+
+   // Healthy sibling on a different pair (one live set per pair): the
+   // control target. Bonded identically so the control challenge is
+   // otherwise-identical to the refused one.
+   const auto sib_pair = h2c_create_uia( *this, bob_id, bob_private_key, "SIBPAIR" );
+   authority sib_auth( 1, bob_id, 1 );
+   const vault_id_type sib = h2c_register_vault(
+         *this, bob_id, bob_private_key, sib_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, sib_pair );
+   const auto sib_vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, sib, sib_vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+
+   // Drive vid to terminal WINDDOWN via the sustained path.
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "real-theft" ) );
+   h2c_sustain_from_genesis( *this, object_id_type( cid ) );
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
+   vault_resolve_operation rop;
+   rop.resolver  = alice_id;
+   rop.challenge = cid;
+   signed_transaction rtx; rtx.operations.push_back( rop );
+   db.current_fee_schedule().set_fee( rtx.operations.back() );
+   set_expiration( db, rtx );
+   rtx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, rtx );
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+
+   // Past the 24h per-pair cooldown, so the refusal pins to the WINDDOWN
+   // gate and never to the cooldown (fail-closed ordering is verified by
+   // the gate sitting before the cooldown branch in do_evaluate).
+   generate_blocks( db.head_block_time() + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC + 3600 );
+   generate_block();
+
+   // Refusal: an identical challenge against the WINDDOWN vault throws.
+   BOOST_CHECK_THROW( h2c_post_challenge(
+         *this, dave_id, dave_private_key, vid, h2c_evidence( "winddown-noise" ) ),
+      fc::exception );
+
+   // Control: the otherwise-identical challenge against the HEALTHY sibling
+   // proceeds (fail-closed direction only: rejects more, never less).
+   const vault_challenge_id_type ok = h2c_post_challenge(
+         *this, erin_id, erin_private_key, sib, h2c_evidence( "winddown-noise" ) );
+   BOOST_CHECK_EQUAL( ok( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+   BOOST_CHECK_EQUAL( sib( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+} FC_LOG_AND_RETHROW() }
+
 /// pair_freeze closes the protocol door AND the debt tap in one atomic apply:
 /// after one op the vault blocks mints and the oracle stops promoting.
 BOOST_AUTO_TEST_CASE( pair_freeze_closes_door_and_debt_atomically )

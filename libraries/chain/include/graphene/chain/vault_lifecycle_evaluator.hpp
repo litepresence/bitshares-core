@@ -87,6 +87,11 @@ namespace graphene { namespace chain {
          /// Payout fixed at evaluate time so apply cannot diverge from the
          /// checked economics (same-asset H2c math or bound-oracle conversion).
          share_type _payout;
+         /// FXR burned on issuance-pair junior claims (ISSUANCE-1): the
+         /// claim face retired from the claimant's junior balance and from
+         /// the reserve ledger. Zero on senior claims and on legacy pairs
+         /// (no reserve), whose junior path stays byte-identical.
+         share_type _fxr_burn = share_type( 0 );
    };
 
     /**

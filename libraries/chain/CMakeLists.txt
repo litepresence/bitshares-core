@@ -48,6 +48,7 @@ add_library( graphene_chain
              challenge_evaluator.cpp
              vault_lifecycle_evaluator.cpp
              h2_economics.cpp
+             issuance.cpp
              h2_activation.cpp
              seasoning.cpp
              vault_object.cpp

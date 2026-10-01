@@ -472,6 +472,14 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // verifier (committee)
    }
+   void operator()( const hybrid_mint_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // minter
+   }
+   void operator()( const hybrid_redeem_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // redeemer
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

@@ -23,6 +23,8 @@
  */
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 
 #include <graphene/chain/account_object.hpp>
@@ -441,16 +443,33 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
     _payout = payout;
     FC_ASSERT( payout > share_type( 0 ),
                "Dust claims that pay nothing are refused" );
-   if( op.tranche == GRAPHENE_H2_WINDDOWN_JUNIOR )
-   {
-      const share_type next_junior = _winddown->junior_paid + payout;
-      // 128-bit compare against rmax x senior-paid (declared, no floats).
-      const fc::uint128_t cap = fc::uint128_t( uint64_t( _winddown->senior_paid.value ) )
-                              * fc::uint128_t( GRAPHENE_H2_WINDDOWN_RMAX_JUNIOR_X );
-      FC_ASSERT( fc::uint128_t( uint64_t( next_junior.value ) ) <= cap,
-                 "Junior dilution exceeds rmax (${m}x senior-paid)",
-                 ("m", GRAPHENE_H2_WINDDOWN_RMAX_JUNIOR_X) );
-   }
+    if( op.tranche == GRAPHENE_H2_WINDDOWN_JUNIOR )
+    {
+       const share_type next_junior = _winddown->junior_paid + payout;
+       // 128-bit compare against rmax x senior-paid (declared, no floats).
+       const fc::uint128_t cap = fc::uint128_t( uint64_t( _winddown->senior_paid.value ) )
+                               * fc::uint128_t( GRAPHENE_H2_WINDDOWN_RMAX_JUNIOR_X );
+       FC_ASSERT( fc::uint128_t( uint64_t( next_junior.value ) ) <= cap,
+                  "Junior dilution exceeds rmax (${m}x senior-paid)",
+                  ("m", GRAPHENE_H2_WINDDOWN_RMAX_JUNIOR_X) );
+       // ISSUANCE-1 FXR extension (junior path only; the rmax cap above is
+       // REUSED verbatim, never duplicated): on issuance pairs the junior
+       // face is FXR burned from the claimant, so junior supply retires as
+       // it dilutes -- burned FIRST, before residual senior settlement
+       // deepens any haircut. Legacy pairs (no reserve) keep the H2c junior
+       // path byte-identical: no burn, no new refusal.
+       const reserve_object* reserve = h2_find_reserve( d, _winddown->pair );
+       if( reserve != nullptr )
+       {
+          FC_ASSERT( d.get_balance( op.claimant, reserve->fxr_asset ).amount
+                     >= op.claim_amount,
+                     "Issuance-pair junior claims burn FXR; claimant holds "
+                     "insufficient junior balance" );
+          FC_ASSERT( reserve->fxr_supply >= op.claim_amount,
+                     "FXR burn exceeds the reserve junior ledger; mirror drift refused" );
+          _fxr_burn = op.claim_amount;
+       }
+    }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -461,7 +480,25 @@ object_id_type winddown_claim_evaluator::do_apply( const winddown_claim_operatio
    // The payout was fixed at evaluate time (same-asset or converted): apply
    // never recomputes economics, so the checked amount is the paid amount.
    const share_type payout = _payout;
+   const share_type fxr_burn = _fxr_burn;
    d.adjust_balance( op.claimant, asset( payout, asset_id_type() ) );
+   if( fxr_burn > share_type( 0 ) )
+   {
+      // ISSUANCE-1: retire the junior face that just diluted. The FXR asset
+      // balance, its current_supply, and the reserve ledger fall together
+      // (the junior mirror invariant the issuance suite pins).
+      const reserve_object* reserve = h2_find_reserve( d, _winddown->pair );
+      FC_ASSERT( nullptr != reserve, "Issuance reserve vanished inside claim apply" );
+      d.adjust_balance( op.claimant, -asset( fxr_burn, reserve->fxr_asset ) );
+      const asset_object& fxr_asset = reserve->fxr_asset( d );
+      const auto& fxr_dyn = fxr_asset.dynamic_asset_data_id( d );
+      d.modify( fxr_dyn, [&fxr_burn]( asset_dynamic_data_object& data ) {
+         data.current_supply -= fxr_burn;
+      } );
+      d.modify( *reserve, [&fxr_burn]( reserve_object& r ) {
+         r.fxr_supply -= fxr_burn;
+      } );
+   }
    const auto& new_claim = d.create<winddown_claim_object>(
          [&op, &payout]( winddown_claim_object& c ) {
       c.winddown     = op.winddown;

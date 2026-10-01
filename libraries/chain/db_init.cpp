@@ -71,6 +71,8 @@
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/seasoning_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
@@ -185,6 +187,8 @@ void database::initialize_evaluators()
    register_evaluator<oracle_fallback_set_evaluator>();
    register_evaluator<oracle_unfreeze_evaluator>();
    register_evaluator<seasoning_verify_evaluator>();
+   register_evaluator<hybrid_mint_evaluator>();
+   register_evaluator<hybrid_redeem_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -228,6 +232,7 @@ void database::initialize_indexes()
    add_index< primary_index<tripwire_index> >();
    add_index< primary_index<recovery_state_index> >();
    add_index< primary_index<seasoning_record_index> >();
+   add_index< primary_index<reserve_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

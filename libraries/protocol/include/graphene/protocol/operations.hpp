@@ -45,6 +45,7 @@
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/h2_economics.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/vesting.hpp>
 #include <graphene/protocol/withdraw_permission.hpp>
@@ -157,7 +158,9 @@ namespace graphene { namespace protocol {
              /* 95 */ winddown_claim_operation,
              /* 96 */ oracle_fallback_set_operation,
              /* 97 */ oracle_unfreeze_operation,
-             /* 98 */ seasoning_verify_operation
+             /* 98 */ seasoning_verify_operation,
+             /* 99 */ hybrid_mint_operation,
+             /* 100 */ hybrid_redeem_operation
             >;
 
    /**

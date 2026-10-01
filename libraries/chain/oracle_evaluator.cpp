@@ -228,10 +228,13 @@ void_result oracle_delete_evaluator::do_evaluate( const oracle_delete_operation&
    // Deleting an oracle a smartcoin depends on would leave that asset with no price source,
    // unable to margin call or force-settle. Deletion is refused while any subscriber's
    // binding is still LIVE; STALE subscribers (mapping drift, series out of range -- see
-   // the F5 prune rule in do_apply) are pruned instead of blocking. (Reference assets need
+   // the F5 prune rule in do_apply) are pruned instead of blocking. An EXPIRED explicit
+   // binding is stale the same way: past its consensus expiry height the pair reads no
+   // price, so deleting the oracle strands nothing that was still feeding. (Reference assets need
    // no equivalent guard at all: there is no reference-asset delete operation -- symbol
    // and precision are immutable by construction, so a reference a consumer points at can
    // never disappear.)
+   const uint32_t head_num = d.head_block_num();
    for( const auto& asset_id : _oracle->subscribers )
    {
       const asset_object* a = d.find( asset_id );
@@ -249,6 +252,8 @@ void_result oracle_delete_evaluator::do_evaluate( const oracle_delete_operation&
          bound_id = *exts.price_oracle_id;
       if( !bound_id.valid() || *bound_id != _oracle->get_id() )
          continue;   // bound elsewhere (or unbound): stale for this oracle
+      if( is_price_oracle_binding_expired( exts.price_oracle_binding, head_num ) )
+         continue;   // past its consensus expiry: stale for this oracle, pruned not blocking
       const auto debt_mapping = get_effective_reference_mapping( d, asset_id );
       const auto backing_mapping = get_effective_reference_mapping(
             d, a->bitasset_data( d ).options.short_backing_asset );
@@ -271,7 +276,7 @@ void_result oracle_delete_evaluator::do_apply( const oracle_delete_operation& op
 
    // F5 PRUNE RULE. A subscriber entry is STALE when the asset's stored binding no longer
    // validates (mapping drift since binding, a named series outside the oracle's list, an
-   // unbound-or-rebound field, or a non-MPA entry) -- evaluated with the same
+   // unbound-or-rebound field, a consensus expiry height the head block has passed, or a non-MPA entry) -- evaluated with the same
    // is_smartcoin_binding_valid predicate the bind and read paths use. Value expiry is
    // NOT staleness: an oracle quiet for a year still has live consumers that resume when
    // publishing resumes, and those keep blocking deletion (see do_evaluate).
@@ -300,7 +305,8 @@ void_result oracle_delete_evaluator::do_apply( const oracle_delete_operation& op
       else if( exts.price_oracle_id.valid() )
          bound_id = *exts.price_oracle_id;
       bool live = false;
-      if( bound_id.valid() && *bound_id == _oracle->get_id() )
+      if( bound_id.valid() && *bound_id == _oracle->get_id()
+          && !is_price_oracle_binding_expired( exts.price_oracle_binding, d.head_block_num() ) )
       {
          const auto debt_mapping = get_effective_reference_mapping( d, asset_id );
          const auto backing_mapping = get_effective_reference_mapping(

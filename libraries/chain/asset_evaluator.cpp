@@ -132,6 +132,11 @@ namespace detail {
     void check_bitasset_options_hf_oracle( const fc::time_point_sec& block_time,
                                            const bitasset_options& options )
     {
+       // The consensus expiry height rides INSIDE price_oracle_binding (struct-level,
+       // last field), so this absent-check gates it too: no binding means no expiry
+       // field to smuggle past the fork, and a binding with expiry is refused here
+       // pre-fork exactly like one without. Absent on old pairs is the legacy path,
+       // never a new restriction on old state.
        FC_ASSERT( !options.extensions.value.price_oracle_id.valid()
                   || HARDFORK_ORACLE_PASSED( block_time ),
                   "A BitAsset's price oracle cannot be set before the oracle hardfork" );
@@ -876,6 +881,16 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
    // but no series (it reads series 0 and is refused against multi-series oracles -- F3),
    // while price_oracle names {oracle, series} explicitly. The granular asserts below
    // mirror is_smartcoin_binding_valid(); keep them in sync.
+   //
+   // Expiry (H1-EXP): only the explicit binding carries a consensus expiry height, and
+   // only it is gated on it. The legacy price_oracle_id path is PINNED, not closed: it
+   // keeps its historical behavior byte-identical (single-series only, no expiry, read
+   // path untouched) for the pre-H1 consumers it was built for. It is out of scope for
+   // the expiry guarantee -- unbinding an explicit binding to rebind legacy dodges
+   // expiry, and stays possible by this decision (see the H1-EXP report: recorded,
+   // test-pinned, recommended for H2 sunset). What no path permits is extending a live
+   // explicit binding: while set it is immutable, past expiry it reads null, and no
+   // operation or chain parameter touches the height after binding.
    const auto& new_ext = op.new_options.extensions.value;
    const auto& old_ext = current_bitasset_data.options.extensions.value;
    FC_ASSERT( !( new_ext.price_oracle_binding.valid() && new_ext.price_oracle_id.valid() ),
@@ -891,6 +906,29 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
                                       && *old_legacy_oracle != *new_legacy_oracle ) );
    if( new_oracle.valid() && oracle_changed )
    {
+      // Consensus expiry, bind-time half. Every explicit binding carries the height past
+      // which it yields no price (head block number -- no wall-clock, exact integer
+      // compare). It must be present (zero is the struct default, refused) and strictly
+      // in the future: a binding that is already expired, or one that expires in the
+      // block that binds it, never feeds.
+      FC_ASSERT( new_oracle->expiry_height > 0,
+                 "A price_oracle_binding must carry a consensus expiry height" );
+      FC_ASSERT( new_oracle->expiry_height > d.head_block_num(),
+                 "A price_oracle_binding's expiry height ${e} must be in the future "
+                 "(head block ${h})",
+                 ("e", new_oracle->expiry_height)("h", d.head_block_num()) );
+      // Immutability while bound: a live binding cannot be changed at all -- not
+      // extended, not pointed at another oracle or series. Past expiry the pair fails
+      // closed with no committee action permitted to extend, so no update path may move
+      // the height (or smuggle a fresh one in beside a new oracle id). Unbinding
+      // (clearing the field) is allowed; a rebind afterwards reads as a new first bind
+      // above -- but unbinding nulls the feed in that block, so life can never be
+      // extended seamlessly: there is always a dead-feed gap first. See the H1-EXP
+      // report for the residual and the H2 latch recommendation.
+      FC_ASSERT( !old_oracle.valid() || *new_oracle == *old_oracle,
+                 "A bound price_oracle_binding is immutable while set: unbind first "
+                 "(the feed goes null in that block); a live binding cannot be extended, "
+                 "moved, or re-pointed" );
       const oracle_object& o = new_oracle->oracle_id(d);
       FC_ASSERT( new_oracle->series < o.series.size(),
                  "Oracle '${n}' declares ${s} series but the binding names series ${b}",
@@ -1214,7 +1252,11 @@ void_result asset_update_bitasset_evaluator::do_apply(const asset_update_bitasse
        // Captured before the modify below overwrites the options. Either binding field
        // resolves to an effective oracle id; the binding changed when either field did
        // (including a series change on the same oracle, which must refresh the feed even
-       // though the subscriber set itself is unchanged).
+       // though the subscriber set itself is unchanged). The element compare now covers
+       // the consensus expiry height too (price_oracle::operator==): an expiry change
+       // counts as a binding change here -- but do_evaluate above refuses any change to
+       // a live binding, so apply only ever sees identical no-ops, first binds, and
+       // unbinds, never an in-place extension.
        const auto& old_ext = bitasset_to_update->options.extensions.value;
        const auto& new_ext = op.new_options.extensions.value;
        optional<oracle_id_type> old_eff;

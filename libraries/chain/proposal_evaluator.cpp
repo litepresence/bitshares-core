@@ -143,6 +143,11 @@ struct proposal_operation_hardfork_visitor
       detail::check_bitasset_options_hf_bsip74( block_time, v.new_options ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip77( block_time, v.new_options ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip87( block_time, v.new_options ); // HF_REMOVABLE
+      // The consensus expiry height rides inside price_oracle_binding (struct-level),
+      // so this absent-check inherits it with no new overload: a proposal smuggling a
+      // binding (expiry or not) past the fork is refused here, and a proposal-wrapped
+      // extend past the fork runs the same asset_update_bitasset do_evaluate that
+      // refuses it directly. No visitor change needed: no new operation type exists.
       detail::check_bitasset_options_hf_oracle( block_time, v.new_options );
       detail::check_bitasset_opts_hf_core2467( next_maintenance_time, v.new_options ); // HF_REMOVABLE
    }

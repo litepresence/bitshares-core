@@ -69,6 +69,16 @@ bool is_smartcoin_binding_valid( const oracle_object& o, uint16_t series_idx,
           && o.quote == backing_mapping.reference;
 }
 
+bool is_price_oracle_binding_expired( const optional<price_oracle>& binding,
+                                      uint32_t head_block_num )
+{
+   // Absent (legacy or unbound) means "no expiry", never expired: only an explicit
+   // binding carries a height, and only the head block number moves past it. A zero
+   // height (the struct default, refused at bind time) reads as expired -- fail closed,
+   // never a silent live binding.
+   return binding.valid() && head_block_num > binding->expiry_height;
+}
+
 bool is_futures_binding_valid( const oracle_object& o, uint16_t series_idx,
                                reference_asset_id_type underlying,
                                const reference_mapping& collateral_mapping )

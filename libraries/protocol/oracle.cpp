@@ -133,6 +133,11 @@ void price_oracle::validate()const
    FC_ASSERT( series < GRAPHENE_ORACLE_MAX_SERIES,
               "Bound series ${s} exceeds the maximum an oracle may declare (${m})",
               ("s", series)("m", GRAPHENE_ORACLE_MAX_SERIES) );
+   // Expiry is mandatory: a binding without an expiry height (zero, the struct default)
+   // is refused here, before any chain-state check. The strictly-future rule needs the
+   // head block number, so it lives in the asset_update_bitasset evaluator, not here.
+   FC_ASSERT( expiry_height > 0,
+              "A price_oracle_binding must carry a consensus expiry height" );
 }
 
 void oracle_options::validate()const

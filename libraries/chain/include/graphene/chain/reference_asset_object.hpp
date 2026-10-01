@@ -72,6 +72,21 @@ bool is_smartcoin_binding_valid( const oracle_object& o, uint16_t series_idx,
                                  const reference_mapping& backing_mapping );
 
 /**
+ * @return whether an explicit {oracle, series, expiry} binding is past its consensus
+ * expiry at @p head_block_num: the binding is present and the head block number is
+ * strictly past its expiry height. An absent binding (legacy price_oracle_id or no
+ * binding at all) is never expired -- the legacy path has no expiry and executes its
+ * historical code unchanged.
+ *
+ * Pure over its arguments, like is_smartcoin_binding_valid. Shared by the read-time
+ * re-check (db_update), the delete-time live scan and the F5 prune rule so the three
+ * can never disagree about what "expired" means. Heights compare as exact integers;
+ * no wall-clock, no time conversion.
+ */
+bool is_price_oracle_binding_expired( const optional<price_oracle>& binding,
+                                      uint32_t head_block_num );
+
+/**
  * @return whether series @p series_idx of oracle @p o may feed a futures-style market on
  * underlying reference @p underlying collateralized in an asset mapped by
  * @p collateral_mapping: the series is declared, oracle.base is the underlying and

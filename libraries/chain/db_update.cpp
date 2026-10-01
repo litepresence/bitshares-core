@@ -302,6 +302,9 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
    }
 
    const auto& head_time = head_block_time();
+   // Consensus expiry is a head block NUMBER, never a time: head_block_num() is the
+   // only clock on this path (consensus law: no wall-clock, exact integer compare).
+   const uint32_t head_num = head_block_num();
 
     // Resolve a bound oracle before entering modify(), which cannot look objects up. The
     // binding fields can only be set after HARDFORK_ORACLE (see the asset_update_bitasset
@@ -312,6 +315,13 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
     const auto& bound_ext = bitasset.options.extensions.value;
     optional<oracle_id_type> bound_oracle_id;
     uint16_t bound_series = 0;
+    // An expired explicit binding yields no price, exactly as a drifted one: the body
+    // below is skipped and the feed goes null, which blocks new debt through the
+    // null-settlement-price rule while existing positions keep their last-good delayed
+    // behavior. A legacy (price_oracle_id) binding carries no expiry and is unaffected;
+    // an unbound asset never enters the branch at all (byte-identical legacy path).
+    const bool bound_expired = is_price_oracle_binding_expired(
+          bound_ext.price_oracle_binding, head_num );
     if( bound_ext.price_oracle_binding.valid() )
     {
        bound_oracle_id = bound_ext.price_oracle_binding->oracle_id;
@@ -348,8 +358,11 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
         // time uses (is_smartcoin_binding_valid), because a mapping can change after
         // binding. A binding that no longer matches -- or names a series the oracle does
         // not declare -- yields no price: the smartcoin behaves as it does when its feeds
-        // expire. It fails closed.
+        // expire. It fails closed. Past its consensus expiry height an explicit binding
+        // joins that set (same null, same fail-closed shape); the legacy binding has no
+        // expiry to pass and an unbound asset never reaches this predicate.
         if( nullptr != o && !o->options.frozen
+            && !bound_expired
             && o->consumed_value.valid()
             && o->is_submission_live( o->consumed_value_time, head_time )
             && bound_series < o->series.size()

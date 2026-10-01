@@ -311,6 +311,15 @@ namespace graphene { namespace protocol {
      * consumers can read different series of one oracle and no consumer silently reads a
      * series it did not choose. Appended as bitasset_options::ext::price_oracle_binding; the two
      * fields are mutually exclusive on one asset.
+     *
+     * Every explicit binding carries a consensus expiry height (a head block number, never
+     * a timestamp: no wall-clock, no time conversion anywhere on this path). Past expiry
+     * the binding yields no price -- the read path fails closed exactly as on mapping
+     * drift -- which blocks new debt through the existing null-settlement-price rule
+     * while leaving legacy pairs untouched. The field is appended LAST in this struct
+     * (never inserted): wire-tag stability for the struct's own encoding is pinned by
+     * price_oracle_expiry_round_trips. A binding with expiry_height == 0 never validates
+     * (see price_oracle::validate): expiry is mandatory, never defaulted.
      */
     struct price_oracle
     {
@@ -318,12 +327,18 @@ namespace graphene { namespace protocol {
        /// Index into the oracle's declared series list. Range-checked against the oracle
        /// at bind time; the read path re-checks (fail closed on drift).
        uint16_t series = 0;
+       /// Head block number past which this binding yields no price. Must be strictly
+       /// in the future at bind time and can never be extended while bound (the bind
+       /// evaluator refuses any change to a live binding; unbinding is allowed). There
+       /// is no committee extend path by construction: no operation and no chain
+       /// parameter touches this field after binding.
+       uint32_t expiry_height = 0;
 
        void validate()const;
     };
 
     inline bool operator==( const price_oracle& a, const price_oracle& b )
-    { return a.oracle_id == b.oracle_id && a.series == b.series; }
+    { return a.oracle_id == b.oracle_id && a.series == b.series && a.expiry_height == b.expiry_height; }
     inline bool operator!=( const price_oracle& a, const price_oracle& b )
     { return !( a == b ); }
 
@@ -523,7 +538,7 @@ FC_REFLECT( graphene::protocol::oracle_producer_reputation,
              (publish_count)(live_count)(outlier_count)(last_publish_time) )
 
 FC_REFLECT( graphene::protocol::price_oracle,
-             (oracle_id)(series) )
+             (oracle_id)(series)(expiry_height) )
 
 FC_REFLECT( graphene::protocol::reference_mapping,
             (reference)(asset_amount)(reference_amount) )

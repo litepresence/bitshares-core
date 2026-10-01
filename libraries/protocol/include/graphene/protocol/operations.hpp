@@ -160,7 +160,10 @@ namespace graphene { namespace protocol {
              /* 97 */ oracle_unfreeze_operation,
              /* 98 */ seasoning_verify_operation,
              /* 99 */ hybrid_mint_operation,
-             /* 100 */ hybrid_redeem_operation
+             /* 100 */ hybrid_redeem_operation,
+             /* 101 */ offset_deposit_operation,
+             /* 102 */ offset_claim_operation,
+             /* 103 */ issuance_exit_request_operation
             >;
 
    /**

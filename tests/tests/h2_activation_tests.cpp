@@ -499,11 +499,13 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
    BOOST_CHECK( vid( db ).vault_pair == free_id );
 } FC_LOG_AND_RETHROW() }
 
-/// Operation tags 83-100 are the on-chain numbering and must never move: a
+/// Operation tags 83-103 are the on-chain numbering and must never move: a
 /// later edit that appends out of order or renumbers fails here, not on a
 /// live chain. Tag 97 is the R-02 committee oracle_unfreeze (price leg);
 /// tag 98 is the X-02 committee seasoning_verify (price leg); tags 99/100
-/// are the ISSUANCE-1 hybrid_mint / hybrid_redeem door ops (price leg).
+/// are the ISSUANCE-1 hybrid_mint / hybrid_redeem door ops (price leg);
+/// tags 101/102/103 are the ISSUANCE-2 offset_deposit / offset_claim /
+/// issuance_exit_request ops (price leg).
 BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_100 )
 {
    using graphene::protocol::operation;
@@ -525,9 +527,12 @@ BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_100 )
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::seasoning_verify_operation>::value ), 98 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::hybrid_mint_operation>::value ), 99 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::hybrid_redeem_operation>::value ), 100 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::offset_deposit_operation>::value ), 101 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::offset_claim_operation>::value ), 102 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::issuance_exit_request_operation>::value ), 103 );
 }
 
-/// Protocol-space object IDs 1.25.x-1.37.x are the on-chain numbering and
+/// Protocol-space object IDs 1.25.x-1.38.x are the on-chain numbering and
 /// must never move.
 BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_37 )
 {
@@ -544,6 +549,7 @@ BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_37 )
    BOOST_CHECK_EQUAL( int( graphene::protocol::recovery_state_object_type ), 35 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::seasoning_object_type ), 36 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::reserve_object_type ), 37 );
+   BOOST_CHECK_EQUAL( int( graphene::protocol::offset_pool_object_type ), 38 );
 }
 
 /// Appended-last fields survive pack/unpack with positions intact: the H2c
@@ -634,6 +640,40 @@ BOOST_AUTO_TEST_CASE( h2_appended_fields_round_trip )
       BOOST_CHECK( back.vault == op.vault );
       BOOST_CHECK( back.burn.amount == op.burn.amount );
       BOOST_CHECK( back.burn.asset_id == op.burn.asset_id );
+   }
+   {
+      // ISSUANCE-2 offset deposit (tag 101): appended-last extensions intact.
+      offset_deposit_operation op;
+      op.depositor = account_id_type( 19 );
+      op.vault     = vault_id_type( 20 );
+      op.deposit   = asset( share_type( 50000 ), asset_id_type() );
+      auto back = fc::raw::unpack<offset_deposit_operation>( fc::raw::pack( op ) );
+      BOOST_CHECK( back.depositor == op.depositor );
+      BOOST_CHECK( back.vault == op.vault );
+      BOOST_CHECK( back.deposit.amount == op.deposit.amount );
+   }
+   {
+      // ISSUANCE-2 offset claim (tag 102): same contract.
+      offset_claim_operation op;
+      op.claimant = account_id_type( 21 );
+      op.vault    = vault_id_type( 22 );
+      op.amount   = share_type( 40000 );
+      auto back = fc::raw::unpack<offset_claim_operation>( fc::raw::pack( op ) );
+      BOOST_CHECK( back.claimant == op.claimant );
+      BOOST_CHECK( back.vault == op.vault );
+      BOOST_CHECK( back.amount == op.amount );
+   }
+   {
+      // ISSUANCE-2 exit request (tag 103): same contract.
+      issuance_exit_request_operation op;
+      op.requester = account_id_type( 23 );
+      op.vault     = vault_id_type( 24 );
+      op.face      = share_type( 300 );
+      auto back = fc::raw::unpack<issuance_exit_request_operation>(
+            fc::raw::pack( op ) );
+      BOOST_CHECK( back.requester == op.requester );
+      BOOST_CHECK( back.vault == op.vault );
+      BOOST_CHECK( back.face == op.face );
    }
 }
 

@@ -91,7 +91,10 @@ struct hardfork_visitor {
                                              protocol::oracle_unfreeze_operation,
                                              protocol::seasoning_verify_operation,
                                              protocol::hybrid_mint_operation,
-                                             protocol::hybrid_redeem_operation >;
+                                             protocol::hybrid_redeem_operation,
+                                             protocol::offset_deposit_operation,
+                                             protocol::offset_claim_operation,
+                                             protocol::issuance_exit_request_operation >;
 
    fc::time_point_sec now;
 

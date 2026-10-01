@@ -31,6 +31,8 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -267,11 +269,16 @@ namespace {
        return false;
     }
 
-    /// Applies one halt stage's effects idempotently (door -> debt -> redemptions).
-   void h2_apply_tripwire_stage( database& d, const tripwire_state_object& tw,
-                                 const vault_object& vault )
-   {
-      if( tw.halt_stage >= GRAPHENE_H2E_TRIPWIRE_STAGE_DOOR )
+     /// Applies one halt stage's effects idempotently (door -> debt -> redemptions).
+    void h2_apply_tripwire_stage( database& d, const tripwire_state_object& tw,
+                                  const vault_object& vault )
+    {
+       // ISSUANCE-2 REVERT-vs-ABSORB on halt entry (issuance pairs only;
+       // no-reserve pairs return inside untouched): runs BEFORE the freezes
+       // below because the transition reads the bonded price, and a frozen
+       // oracle reads absent (fail-closed hold).
+       h2_issue_on_pair_halt( d, vault.vault_pair );
+       if( tw.halt_stage >= GRAPHENE_H2E_TRIPWIRE_STAGE_DOOR )
       {
          d.modify( vault, []( vault_object& v ) {
             v.tripwire_door_hold = true;
@@ -874,6 +881,13 @@ void process_h2_oracle_economics( database& d )
       for( auto itr = tw_idx.begin(); itr != tw_idx.end(); ++itr )
          h2_evaluate_tripwire( d, *itr, now );
    }
+
+   // 5. Issuance engine (ISSUANCE-2): batch-settle exit queues at one
+   // clearing haircut per pair, then absorb residual shortfalls from offset
+   // pools. Runs after the tripwire ladder so the halt latch above is
+   // already set when settlement reads it. Legacy pairs (no reserve) skip
+   // inside; dual-stale prices hold their queues fail-closed.
+   h2_issue_maintenance( d );
 }
 
 void_result oracle_fallback_set_evaluator::do_evaluate(

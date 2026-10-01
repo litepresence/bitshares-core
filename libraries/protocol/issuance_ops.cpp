@@ -46,9 +46,39 @@ void hybrid_redeem_operation::validate()const
               "Redeem burn exceeds maximum share supply" );
 }
 
+void offset_deposit_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( deposit.amount > 0, "Offset deposit must be positive" );
+   FC_ASSERT( deposit.amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Offset deposit exceeds maximum share supply" );
+}
+
+void offset_claim_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( amount > 0, "Offset claim must be positive" );
+   FC_ASSERT( amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Offset claim exceeds maximum share supply" );
+}
+
+void issuance_exit_request_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( face > 0, "Exit face must be positive" );
+   FC_ASSERT( face <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Exit face exceeds maximum share supply" );
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::hybrid_mint_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::hybrid_redeem_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::offset_deposit_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::offset_claim_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::issuance_exit_request_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::hybrid_mint_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::hybrid_redeem_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::offset_deposit_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::offset_claim_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::issuance_exit_request_operation )

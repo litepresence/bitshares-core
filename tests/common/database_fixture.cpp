@@ -738,6 +738,17 @@ void database_fixture_base::verify_asset_supplies( const database& db )
       if( o.bts_balance > share_type( 0 ) )
          total_balances[asset_id_type()] += o.bts_balance;
    }
+   // ISSUANCE-2 offset pools: deposits debit the depositor (supply-visible)
+   // into pool balance; absorbs move pool BTS into the reserve (counted
+   // above); claims pay out into circulation. The unclaimed remainder is
+   // escrowed off-ledger exactly like the reserves above, so it stays
+   // supply-visible until claimed or absorbed. Exit-queue face was burned at
+   // request (supply fell with it), so the queue needs no counting.
+   for( const offset_pool_object& o : db.get_index_type< offset_pool_index >().indices() )
+   {
+      if( o.balance > share_type( 0 ) )
+         total_balances[asset_id_type()] += o.balance;
+   }
 
    for( const asset_object& asset_obj : db.get_index_type<asset_index>().indices() )
    {

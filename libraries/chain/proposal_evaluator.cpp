@@ -301,10 +301,16 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for oracle unfreeze prior to the H2 price hardfork");
           FC_ASSERT(!op.new_parameters.current_fees->exists<seasoning_verify_operation>(),
                     "Unable to define fees for seasoning verification prior to the H2 price hardfork");
-          FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_mint_operation>(),
-                    "Unable to define fees for hybrid mints prior to the H2 price hardfork");
-          FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_redeem_operation>(),
-                    "Unable to define fees for hybrid redeems prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_mint_operation>(),
+                     "Unable to define fees for hybrid mints prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_redeem_operation>(),
+                     "Unable to define fees for hybrid redeems prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<offset_deposit_operation>(),
+                     "Unable to define fees for offset deposits prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<offset_claim_operation>(),
+                     "Unable to define fees for offset claims prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<issuance_exit_request_operation>(),
+                     "Unable to define fees for issuance exits prior to the H2 price hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
@@ -466,6 +472,15 @@ struct proposal_operation_hardfork_visitor
       h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::hybrid_redeem_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::offset_deposit_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::offset_claim_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::issuance_exit_request_operation&) const {
       h2_require_price_leg(block_time);
    }
 

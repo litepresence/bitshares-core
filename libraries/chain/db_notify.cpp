@@ -480,6 +480,18 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // redeemer
    }
+   void operator()( const offset_deposit_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // depositor
+   }
+   void operator()( const offset_claim_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimant
+   }
+   void operator()( const issuance_exit_request_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // requester
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

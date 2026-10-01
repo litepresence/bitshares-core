@@ -46,6 +46,13 @@ namespace graphene { namespace chain {
 
 const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault )
 {
+   // ISSUANCE-2 REVERT-vs-ABSORB (issuance pairs only; legacy pairs return
+   // inside with no state touched): unvested door outputs REVERT first so
+   // the outstanding snapshot below includes reverted face (reverted holders
+   // claim here), then the offset pool absorbs what it can of any residual
+   // shortfall. Runs before segregation: reverted face is holder property,
+   // never segregated bond.
+   h2_issue_on_pair_halt( d, vault.vault_pair );
    share_type segregated( 0 );
    const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
    const auto range = bond_idx.equal_range( vault_id_type( vault.id ) );
@@ -366,6 +373,12 @@ void_result pair_freeze_evaluator::do_apply( const pair_freeze_operation& op ) c
    // Atomic by construction: both flags flip in this single apply step, so no
    // block can ever observe the door closed with debt still open.
    const vault_object& vault = op.vault(d);
+   // ISSUANCE-2 REVERT-vs-ABSORB on halt entry (issuance pairs only; legacy
+   // pairs return inside with no state touched): runs BEFORE the freeze
+   // flags below because the transition reads the bonded price, and a
+   // frozen oracle reads absent (fail-closed hold). Unvested door outputs
+   // REVERT, market shortfalls ABSORB from the offset pool first.
+   h2_issue_on_pair_halt( d, vault.vault_pair );
    d.modify( vault, [&op]( vault_object& v ) {
       v.frozen = true;
       if( !v.bound_oracle.valid() )
@@ -386,12 +399,13 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
 
     _winddown = d.find( op.winddown );
     FC_ASSERT( nullptr != _winddown, "Wind-down ${w} does not exist", ("w", op.winddown) );
-    // E-08: winddown_claim is the SOLE wind-down exit path. BSIP-1 fences
-    // issuance as spec-only: no REVERT-vs-ABSORB transitions exist anywhere
-    // in-tree (that vocabulary appears in design prose only), so there is
-    // nothing to route here. The issuance phase will define REVERT vs ABSORB
-    // as new operations with their own state machine; until then this claim
-    // path is complete, not a placeholder. No behavior change.
+    // E-08: winddown_claim is the SOLE wind-down exit path. The ISSUANCE-2
+    // REVERT-vs-ABSORB transitions (h2_issue_on_pair_halt, called FIRST from
+    // h2_create_winddown above) run BEFORE this claim path opens: unvested
+    // door outputs revert into claimable face, market shortfalls absorb from
+    // the offset pool first. Nothing routes through this evaluator -- its
+    // senior-first/rmax economics are the junior-dilution leg ABSORB falls
+    // back to. No behavior change here.
     FC_ASSERT( _winddown->state != GRAPHENE_H2_WINDDOWN_COMPLETE,
               "Wind-down ${w} is complete; no further claims",
               ("w", op.winddown) );

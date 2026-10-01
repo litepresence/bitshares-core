@@ -189,6 +189,9 @@ void database::initialize_evaluators()
    register_evaluator<seasoning_verify_evaluator>();
    register_evaluator<hybrid_mint_evaluator>();
    register_evaluator<hybrid_redeem_evaluator>();
+   register_evaluator<offset_deposit_evaluator>();
+   register_evaluator<offset_claim_evaluator>();
+   register_evaluator<issuance_exit_request_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -233,6 +236,7 @@ void database::initialize_indexes()
    add_index< primary_index<recovery_state_index> >();
    add_index< primary_index<seasoning_record_index> >();
    add_index< primary_index<reserve_index> >();
+   add_index< primary_index<offset_pool_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

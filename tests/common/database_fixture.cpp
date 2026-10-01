@@ -45,6 +45,7 @@
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -725,6 +726,17 @@ void database_fixture_base::verify_asset_supplies( const database& db )
       const share_type remainder = o.segregated_bond - o.paid_total;
       if( remainder > share_type( 0 ) )
          total_balances[asset_id_type()] += remainder;
+   }
+   // ISSUANCE-1 issuance reserves: mints debit the minter (supply-visible)
+   // into bts_balance, and redeem payouts leave it into vesting escrow
+   // (supply-visible via the vesting loop above). The locked remainder is
+   // escrowed off-ledger exactly like the H2b dispute bonds above, so it
+   // stays supply-visible until redeemed. Redeem vesting escrows need no
+   // new counting: they are plain vesting_balance_objects.
+   for( const reserve_object& o : db.get_index_type< reserve_index >().indices() )
+   {
+      if( o.bts_balance > share_type( 0 ) )
+         total_balances[asset_id_type()] += o.bts_balance;
    }
 
    for( const asset_object& asset_obj : db.get_index_type<asset_index>().indices() )

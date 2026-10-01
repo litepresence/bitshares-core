@@ -17,9 +17,9 @@
  *   lifts for the same challenge.
  * - H1-exclusion: market-issued pairs and H1-bound pairs are refused at
  *   vault_register; a plain UIA registers (control).
- * - Pins: operation tags 83-98 and protocol-space object IDs 1.25.x-1.36.x
+ * - Pins: operation tags 83-100 and protocol-space object IDs 1.25.x-1.37.x
  *   are pinned, with pack/unpack round-trips over the appended-field ops
- *   (rotate co_signers, wind-down claim, fallback set).
+ *   (rotate co_signers, wind-down claim, fallback set, hybrid mint/redeem).
  *
  * No new economics here: every value below reuses the H2a-H2d pilot basis
  * ($0.001/BTS, 1e6 raw units per USD cent).
@@ -33,12 +33,14 @@
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/h2_economics.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/operations.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/seasoning_ops.hpp>
@@ -497,11 +499,12 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
    BOOST_CHECK( vid( db ).vault_pair == free_id );
 } FC_LOG_AND_RETHROW() }
 
-/// Operation tags 83-98 are the on-chain numbering and must never move: a
+/// Operation tags 83-100 are the on-chain numbering and must never move: a
 /// later edit that appends out of order or renumbers fails here, not on a
 /// live chain. Tag 97 is the R-02 committee oracle_unfreeze (price leg);
-/// tag 98 is the X-02 committee seasoning_verify (price leg).
-BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_96 )
+/// tag 98 is the X-02 committee seasoning_verify (price leg); tags 99/100
+/// are the ISSUANCE-1 hybrid_mint / hybrid_redeem door ops (price leg).
+BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_100 )
 {
    using graphene::protocol::operation;
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::vault_register_operation>::value ), 83 );
@@ -520,11 +523,13 @@ BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_96 )
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::oracle_fallback_set_operation>::value ), 96 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::oracle_unfreeze_operation>::value ), 97 );
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::seasoning_verify_operation>::value ), 98 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::hybrid_mint_operation>::value ), 99 );
+   BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::hybrid_redeem_operation>::value ), 100 );
 }
 
-/// Protocol-space object IDs 1.25.x-1.36.x are the on-chain numbering and
+/// Protocol-space object IDs 1.25.x-1.37.x are the on-chain numbering and
 /// must never move.
-BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_35 )
+BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_37 )
 {
    BOOST_CHECK_EQUAL( int( graphene::protocol::vault_object_type ), 25 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::vault_bond_object_type ), 26 );
@@ -538,6 +543,7 @@ BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_35 )
    BOOST_CHECK_EQUAL( int( graphene::protocol::tripwire_state_object_type ), 34 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::recovery_state_object_type ), 35 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::seasoning_object_type ), 36 );
+   BOOST_CHECK_EQUAL( int( graphene::protocol::reserve_object_type ), 37 );
 }
 
 /// Appended-last fields survive pack/unpack with positions intact: the H2c
@@ -600,6 +606,34 @@ BOOST_AUTO_TEST_CASE( h2_appended_fields_round_trip )
       auto back = fc::raw::unpack<seasoning_verify_operation>( fc::raw::pack( op ) );
       BOOST_CHECK( back.verifier == op.verifier );
       BOOST_CHECK( back.pair == op.pair );
+   }
+   {
+      // ISSUANCE-1 hybrid mint (tag 99): every field incl. appended-last
+      // extensions round-trips with positions intact.
+      hybrid_mint_operation op;
+      op.minter        = account_id_type( 13 );
+      op.vault         = vault_id_type( 14 );
+      op.deposit       = asset( share_type( 130000 ), asset_id_type() );
+      op.stable_amount = share_type( 1000 );
+      op.fxr_asset     = asset_id_type( 15 );
+      auto back = fc::raw::unpack<hybrid_mint_operation>( fc::raw::pack( op ) );
+      BOOST_CHECK( back.minter == op.minter );
+      BOOST_CHECK( back.vault == op.vault );
+      BOOST_CHECK( back.deposit.amount == op.deposit.amount );
+      BOOST_CHECK( back.stable_amount == op.stable_amount );
+      BOOST_CHECK( back.fxr_asset == op.fxr_asset );
+   }
+   {
+      // ISSUANCE-1 hybrid redeem (tag 100): same appended-last contract.
+      hybrid_redeem_operation op;
+      op.redeemer = account_id_type( 16 );
+      op.vault    = vault_id_type( 17 );
+      op.burn     = asset( share_type( 1000 ), asset_id_type( 18 ) );
+      auto back = fc::raw::unpack<hybrid_redeem_operation>( fc::raw::pack( op ) );
+      BOOST_CHECK( back.redeemer == op.redeemer );
+      BOOST_CHECK( back.vault == op.vault );
+      BOOST_CHECK( back.burn.amount == op.burn.amount );
+      BOOST_CHECK( back.burn.asset_id == op.burn.asset_id );
    }
 }
 

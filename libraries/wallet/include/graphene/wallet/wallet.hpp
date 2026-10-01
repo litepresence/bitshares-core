@@ -1249,6 +1249,25 @@ class wallet_api
       signed_transaction publish_oracle_value( const string& producer, const string& name_or_id,
                                                const vector<oracle_value>& values, bool broadcast );
 
+      /** Creates a reference asset (the quoted legs oracles price against).
+       *
+       *  Reference assets live in their own symbol namespace, disjoint from
+       *  on-chain assets: creating "USD" here does not touch any UIA/MIA.
+       *  Creation is committee-gated at consensus until the committee opens
+       *  it, and refused before the oracle hardfork — both fail closed on
+       *  chain; this command only builds, validates locally, and signs.
+       *
+       * @param creator the account paying the fee (committee member while gated)
+       * @param symbol unique reference symbol, e.g. "USD" ("BTS" forces precision 5)
+       * @param precision decimals the reference quotes at
+       * @param description free text
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction create_reference_asset( const string& creator, const string& symbol,
+                                                 uint8_t precision, const string& description,
+                                                 bool broadcast );
+
       signed_transaction update_bitasset( const string& symbol_or_id,
                                           const bitasset_options& new_options,
                                           bool broadcast = false )const;
@@ -1957,6 +1976,7 @@ FC_API( graphene::wallet::wallet_api,
         (update_asset_issuer)
         (update_bitasset)
         (get_oracle)
+        (create_reference_asset)
         (create_oracle)
         (update_oracle)
         (delete_oracle)

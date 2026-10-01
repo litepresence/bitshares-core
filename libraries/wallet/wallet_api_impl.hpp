@@ -263,6 +263,9 @@ public:
    /// Resolves an oracle by name or by id string, throwing if there is no such oracle.
    oracle_object get_oracle( const string& name_or_id )const;
 
+   signed_transaction create_reference_asset( string creator, string symbol,
+         uint8_t precision, string description, bool broadcast );
+
    signed_transaction create_oracle( string owner, string name, string description,
          string base_symbol, string quote_symbol, vector<oracle_series> series,
          oracle_options options, bool broadcast );

@@ -218,7 +218,29 @@ namespace graphene { namespace wallet { namespace detail {
       return sign_transaction( tx, broadcast );
    } FC_CAPTURE_AND_RETHROW( (publishing_account)(symbol)(feed)(broadcast) ) }
 
-   oracle_object wallet_api_impl::get_oracle( const string& name_or_id )const
+    signed_transaction wallet_api_impl::create_reference_asset( string creator, string symbol,
+          uint8_t precision, string description, bool broadcast )
+    { try {
+       // Fail-closed twice: tx.validate() below refuses a bad symbol /
+       // precision (including the BTS-precision rule) before anything is
+       // signed, and consensus refuses pre-hardfork and duplicate symbols
+       // at apply time. The wallet sets no fee override: the fee schedule
+       // (500 BTS + data fee) prices the state (one bounded object).
+       reference_asset_create_operation op;
+       op.creator     = get_account_id( creator );
+       op.symbol      = symbol;
+       op.precision   = precision;
+       op.description = description;
+
+       signed_transaction tx;
+       tx.operations.push_back( op );
+       set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+       tx.validate();
+
+       return sign_transaction( tx, broadcast );
+    } FC_CAPTURE_AND_RETHROW( (creator)(symbol)(precision)(broadcast) ) }
+
+    oracle_object wallet_api_impl::get_oracle( const string& name_or_id )const
    { try {
       // Names are the way people refer to oracles, so try that first; fall back to an id so
       // that anything the API returned can be pasted straight back in.

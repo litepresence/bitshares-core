@@ -834,6 +834,13 @@ oracle_object wallet_api::get_oracle( const string& name_or_id )const
    return my->get_oracle( name_or_id );
 }
 
+signed_transaction wallet_api::create_reference_asset( const string& creator, const string& symbol,
+                                                       uint8_t precision, const string& description,
+                                                       bool broadcast )
+{
+   return my->create_reference_asset( creator, symbol, precision, description, broadcast );
+}
+
 signed_transaction wallet_api::create_oracle( const string& owner, const string& name,
                                               const string& description, const string& base_symbol,
                                               const string& quote_symbol,

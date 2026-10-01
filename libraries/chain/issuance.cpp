@@ -336,36 +336,6 @@ uint256_t h2_issue_queue_value_256( const reserve_object* reserve,
    return total;
 }
 
-/// Tripwire depth qualifier, same rule as the H2d sweep (h2_windows_valid
-/// precedent, duplicated read-only: both windows non-empty, both at depth,
-/// two distinct pools across both). No tripwire state: boost::none =
-/// pre-pool bootstrap (depth leg skipped). Unqualified state: valid
-/// optional holding 0 = fail-closed refuse (impact cannot be priced).
-optional<uint64_t> h2_issue_qualified_depth( const database& d, asset_id_type pair )
-{
-   const auto& idx = d.get_index_type<tripwire_index>().indices().get<by_tripwire_pair>();
-   const auto itr = idx.find( pair );
-   if( itr == idx.end() )
-      return optional<uint64_t>(); // no state: bootstrap, depth leg skipped
-   if( itr->win_old.samples.empty() || itr->win_new.samples.empty() )
-      return optional<uint64_t>( uint64_t( 0 ) );
-   if( itr->win_old.total_volume < GRAPHENE_H2E_TRIPWIRE_MIN_DEPTH_RAW
-       || itr->win_new.total_volume < GRAPHENE_H2E_TRIPWIRE_MIN_DEPTH_RAW )
-      return optional<uint64_t>( uint64_t( 0 ) );
-   flat_set<liquidity_pool_id_type> pools = itr->win_old.pools;
-   pools.insert( itr->win_new.pools.begin(), itr->win_new.pools.end() );
-   if( pools.size() < 2 )
-      return optional<uint64_t>( uint64_t( 0 ) ); // single-pool depth refused
-    const uint256_t sum = uint256_t( itr->win_old.total_volume )
-                        + uint256_t( itr->win_new.total_volume );
-    // Depth is the SUM of the two qualified windows; the door bound applies
-    // k2 = 1/2 to it (h2_issue_door_admits), so the effective flow limit is
-    // the MEAN of the two windows -- one block's door flow stays inside the
-    // market's demonstrated two-window absorption.
-    const uint64_t cap = std::numeric_limits<uint64_t>::max();
-    return optional<uint64_t>( sum > uint256_t( cap ) ? cap : uint64_t( sum ) );
-}
-
 /// Absorb pass for one pair: move min(pool, shortfall) into the reserve
 /// (center band 3, the active issuance band) and record the remainder as
 /// uncovered_shortfall (overwritten each computation, 0 when covered).
@@ -448,6 +418,40 @@ size_t h2_issue_pending_unmatured( const database& d, const reserve_object& rese
 }
 
 } // namespace
+
+/// Tripwire depth qualifier, same rule as the H2d sweep (h2_windows_valid
+/// precedent, duplicated read-only: both windows non-empty, both at depth,
+/// two distinct pools across both). No tripwire state: boost::none =
+/// pre-pool bootstrap (depth leg skipped). Unqualified state: valid
+/// optional holding 0 = fail-closed refuse (impact cannot be priced).
+///
+/// Public linkage (moved out of the anonymous namespace verbatim for the
+/// F3 depth-median API): identical body, no behavior change. Read-only
+/// over `const database&`, so no hardfork gate and no new state apply.
+optional<uint64_t> h2_issue_qualified_depth( const database& d, asset_id_type pair )
+{
+   const auto& idx = d.get_index_type<tripwire_index>().indices().get<by_tripwire_pair>();
+   const auto itr = idx.find( pair );
+   if( itr == idx.end() )
+      return optional<uint64_t>(); // no state: bootstrap, depth leg skipped
+   if( itr->win_old.samples.empty() || itr->win_new.samples.empty() )
+      return optional<uint64_t>( uint64_t( 0 ) );
+   if( itr->win_old.total_volume < GRAPHENE_H2E_TRIPWIRE_MIN_DEPTH_RAW
+       || itr->win_new.total_volume < GRAPHENE_H2E_TRIPWIRE_MIN_DEPTH_RAW )
+      return optional<uint64_t>( uint64_t( 0 ) );
+   flat_set<liquidity_pool_id_type> pools = itr->win_old.pools;
+   pools.insert( itr->win_new.pools.begin(), itr->win_new.pools.end() );
+   if( pools.size() < 2 )
+      return optional<uint64_t>( uint64_t( 0 ) ); // single-pool depth refused
+    const uint256_t sum = uint256_t( itr->win_old.total_volume )
+                        + uint256_t( itr->win_new.total_volume );
+    // Depth is the SUM of the two qualified windows; the door bound applies
+    // k2 = 1/2 to it (h2_issue_door_admits), so the effective flow limit is
+    // the MEAN of the two windows -- one block's door flow stays inside the
+    // market's demonstrated two-window absorption.
+    const uint64_t cap = std::numeric_limits<uint64_t>::max();
+    return optional<uint64_t>( sum > uint256_t( cap ) ? cap : uint64_t( sum ) );
+}
 
 const reserve_object* h2_find_reserve( const database& d, asset_id_type pair )
 {

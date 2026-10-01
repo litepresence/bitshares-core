@@ -29,6 +29,7 @@
 #include <graphene/app/util.hpp>
 #include <graphene/chain/get_config.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/protocol/pts_address.hpp>
 #include <graphene/protocol/restriction_predicate.hpp>
 
@@ -2157,6 +2158,16 @@ optional<reference_asset_object> database_api::get_reference_asset_by_symbol(
    if( itr == idx.end() )
       return {};
    return *itr;
+}
+
+fc::optional<uint64_t> database_api::get_h2_qualified_depth(
+            const std::string& asset_symbol_or_id )const
+{
+   // Thin read-only alias of h2_issue_qualified_depth (the F1 cap's depth
+   // leg): pool-observe tripwire inputs, no state touched, no gate needed
+   // (pre-pool reads empty; unqualified reads zero and the door refuses).
+   asset_id_type pair = my->get_asset_from_string( asset_symbol_or_id )->get_id();
+   return h2_issue_qualified_depth( my->_db, pair );
 }
 
 vector<credit_offer_object> database_api::get_credit_offers_by_asset(

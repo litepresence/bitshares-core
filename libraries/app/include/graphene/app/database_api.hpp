@@ -1014,6 +1014,17 @@ class database_api
             const string& symbol )const;
 
       /**
+       * @brief Get the qualified pool-observe depth behind the issuance door cap
+       * @param asset_symbol_or_id symbol or ID of the pair's face asset
+       * @return the qualified two-window depth (sum of both tripwire windows),
+       *         empty when no pools observed yet (depth leg skipped), or zero
+       *         when live state is unqualified (thin or single-pool: the door
+       *         refuses outright). Read-only: exposes h2_issue_qualified_depth.
+       */
+      fc::optional<uint64_t> get_h2_qualified_depth(
+            const std::string& asset_symbol_or_id )const;
+
+      /**
        * @brief Get a list of credit offers by the name or ID of the owner account
        * @param account_name_or_id name or ID of the owner account
        * @param limit The limitation of items each query can fetch, not greater than the configured value of
@@ -1629,6 +1640,7 @@ FC_API(graphene::app::database_api,
    (get_oracles_by_owner)
    (get_reference_assets)
    (get_reference_asset_by_symbol)
+   (get_h2_qualified_depth)
    (get_credit_offers_by_asset)
    (list_credit_deals)
    (get_credit_deals_by_offer_id)

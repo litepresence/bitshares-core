@@ -37,6 +37,9 @@
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
+#include <graphene/app/database_api.hpp>
+
+#include <algorithm>
 
 #include "../common/database_fixture.hpp"
 
@@ -1431,6 +1434,75 @@ BOOST_AUTO_TEST_CASE( issuance2_fee_defaults_pinned_nonzero )
                       5 * GRAPHENE_BLOCKCHAIN_PRECISION );
    BOOST_CHECK_EQUAL( fee_schedule::get_default().get<issuance_exit_request_operation>().fee,
                       5 * GRAPHENE_BLOCKCHAIN_PRECISION );
+} FC_LOG_AND_RETHROW() }
+
+/// Collects database_api FC_API member names without a node connection.
+/// File scope: local classes cannot carry the member template the
+/// per-method functor types require.
+struct h2_api_method_name_collector {
+   std::vector<std::string>& out;
+   template<typename Member>
+   void operator()( const char* name, Member )const { out.emplace_back( name ); }
+};
+
+/// F3 depth-median API gap: the F1 cap consumes h2_issue_qualified_depth
+/// (pool-observe tripwire inputs), but no database_api accessor exposes
+/// it, so wallets and tooling cannot price door flow. API clients read
+/// exactly the FC_API table, so presence in the vtable == served.
+BOOST_AUTO_TEST_CASE( depth_median_api_exposes_qualified_depth )
+{ try {
+   fc::vtable<graphene::app::database_api,
+              fc::identity_member_with_optionals> vt;
+   std::vector<std::string> names;
+   vt.visit( h2_api_method_name_collector{ names } );
+   BOOST_CHECK( std::find( names.begin(), names.end(), "get_h2_qualified_depth" )
+                != names.end() );
+} FC_LOG_AND_RETHROW() }
+
+/// The accessor reads live tripwire state exactly: pre-pool it reads empty
+/// (bootstrap, depth leg skipped), single-pool/single-window it reads zero
+/// (fail-closed refuse) — mirroring h2_issue_qualified_depth call-for-call.
+BOOST_AUTO_TEST_CASE( depth_median_api_reads_live_tripwire_state )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 100000000000LL ) );
+   fund( bob, asset( 30000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYAPI", "HYAPIF", share_type( 1 ), uint64_t( 1 ), "G" );
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 20000000000LL ), share_type( 100000000LL ) );
+   generate_block();
+
+   graphene::app::database_api db_api( db );
+   // Pre-pool: the chain helper and the API both read empty.
+   BOOST_CHECK( !h2_issue_qualified_depth( db, d.pair ).valid() );
+   BOOST_CHECK( !db_api.get_h2_qualified_depth( "HYAPI" ).valid() );
+
+   // One pool, one deep exchange in the current window only: state exists
+   // but is unqualified (empty old window and a single pool).
+   const asset_id_type lpa = h2j_create_uia( *this, alice_id, alice_private_key, "HYAPILP" );
+   const liquidity_pool_object& pool = create_liquidity_pool(
+         alice_id, asset_id_type(), d.pair, lpa, 0, 0 );
+   deposit_to_liquidity_pool( alice_id, pool.get_id(),
+                              asset( share_type( 1000000000 ), asset_id_type() ),
+                              asset( share_type( 10000000 ), d.pair ) );
+   exchange_with_liquidity_pool( alice_id, pool.get_id(),
+                                 asset( share_type( 200000000 ), asset_id_type() ),
+                                 asset( share_type( 1 ), d.pair ) );
+
+   // Unqualified: the chain helper and the API both read zero.
+   const auto chain_depth = h2_issue_qualified_depth( db, d.pair );
+   const auto api_depth = db_api.get_h2_qualified_depth( "HYAPI" );
+   BOOST_REQUIRE( chain_depth.valid() );
+   BOOST_REQUIRE( api_depth.valid() );
+   BOOST_CHECK_EQUAL( *chain_depth, 0u );
+   BOOST_CHECK_EQUAL( *api_depth, 0u );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

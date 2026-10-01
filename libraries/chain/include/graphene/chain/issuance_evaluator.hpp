@@ -129,6 +129,19 @@ namespace graphene { namespace chain {
    const offset_pool_object* h2_find_offset_pool( const database& d, asset_id_type pair );
 
    /**
+    * Qualified two-window pool-observe depth for @p pair (the F1 cap's
+    * depth leg, read-only): both tripwire windows non-empty, both at or
+    * above the minimum depth, spanning at least two distinct pools.
+    * No tripwire state reads as an empty optional (pre-pool bootstrap:
+    * the depth leg is skipped); live-but-unqualified state reads as a
+    * valid zero (fail-closed: impact cannot be priced, the door refuses).
+    * Saturates at uint64 max. No hardfork gate: pre-fork no tripwire
+    * state can exist, so the empty read is the only possible answer.
+    */
+   fc::optional<uint64_t> h2_issue_qualified_depth( const database& d,
+                                                    asset_id_type pair );
+
+   /**
     * Half-tick move predicate (declared, exact, no floats, no division):
     * has @p now moved beyond half a band tick (125bps) from @p anchor?
     * Cross-multiplied in 256-bit: |now.base*anchor.quote -

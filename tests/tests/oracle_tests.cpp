@@ -10,6 +10,7 @@
 
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/market_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
@@ -2136,12 +2137,28 @@ void rev2_bind_series( database_fixture& f, const asset_object& mia,
 
 void rev2_bind_explicit( database_fixture& f, const asset_object& mia,
                          account_id_type issuer, const fc::ecc::private_key& key,
-                         oracle_id_type oid, uint16_t series )
+                         oracle_id_type oid, uint16_t series, uint32_t expiry_height )
 {
    price_oracle b;
    b.oracle_id = oid;
    b.series    = series;
+   b.expiry_height = expiry_height;
    rev2_bind_series( f, mia, issuer, key, b );
+}
+
+/// Far-future consensus expiry for binds that do not exercise expiry: strictly in the
+/// future (the bind gate requires it) and far enough out that no test's block advance
+/// crosses it. Expiry tests bind near-term heights through the overload above instead.
+uint32_t rev2_far_future_expiry( database_fixture& f )
+{
+   return f.db.head_block_num() + 1000000000;
+}
+
+void rev2_bind_explicit( database_fixture& f, const asset_object& mia,
+                         account_id_type issuer, const fc::ecc::private_key& key,
+                         oracle_id_type oid, uint16_t series )
+{
+   rev2_bind_explicit( f, mia, issuer, key, oid, series, rev2_far_future_expiry( f ) );
 }
 
 /// Legacy bind without a series choice (Task 6 path). Multi-series oracles must refuse it.
@@ -2730,6 +2747,33 @@ BOOST_AUTO_TEST_CASE( appending_price_oracle_did_not_shift_existing_extension_ta
 }
 
 /**
+ * The consensus expiry height was appended LAST inside price_oracle (after series),
+ * not as a new extension tag: expiry travels with the binding through operator==,
+ * subscriber diffing and delete-liveness, and a binding without an expiry cannot be
+ * expressed. The ext-level tag above (8) is unchanged by this; the struct's own
+ * encoding carries the height and round-trips it.
+ */
+BOOST_AUTO_TEST_CASE( price_oracle_expiry_round_trips )
+{
+   price_oracle b;
+   b.oracle_id     = oracle_id_type( 3 );
+   b.series        = 1;
+   b.expiry_height = 123456789;
+   auto back = fc::raw::unpack<price_oracle>( fc::raw::pack( b ) );
+   BOOST_CHECK( back.oracle_id == oracle_id_type( 3 ) );
+   BOOST_CHECK_EQUAL( int( back.series ), 1 );
+   BOOST_CHECK_EQUAL( back.expiry_height, 123456789u );
+
+   // A pre-expiry encoding carried only two fields. It must never decode into a live
+   // binding with a defaulted height: short buffers fail instead of defaulting, so an
+   // old payload is rejected, never silently treated as unexpiring.
+   std::vector<char> old_bytes = fc::raw::pack( oracle_id_type( 3 ) );
+   auto series_bytes = fc::raw::pack( uint16_t( 1 ) );
+   old_bytes.insert( old_bytes.end(), series_bytes.begin(), series_bytes.end() );
+   BOOST_CHECK_THROW( fc::raw::unpack<price_oracle>( old_bytes ), fc::exception );
+}
+
+/**
  * The UIA mapping home was appended LAST to additional_asset_options (tag 3, after
  * taker_fee_percent at 2). Pins the numbering the same way.
  */
@@ -2814,8 +2858,12 @@ struct guard_fixture : oracle_fixture
 
    /// Local explicit-bind helper. (The Task 7 rev2_bind_explicit lives in that
    /// suite's scope; this is the same operation, duplicated so this suite stands alone.)
+   /// The short form binds with a far-future consensus expiry so guard tests that do
+   /// not exercise expiry keep passing the bind gate; expiry tests pass near-term
+   /// heights through the long form.
    void bind_explicit( const asset_object& mia, account_id_type issuer,
-                       const fc::ecc::private_key& key, oracle_id_type oid, uint16_t series )
+                       const fc::ecc::private_key& key, oracle_id_type oid, uint16_t series,
+                       uint32_t expiry_height )
    {
       asset_update_bitasset_operation op;
       op.issuer          = issuer;
@@ -2824,6 +2872,7 @@ struct guard_fixture : oracle_fixture
       price_oracle b;
       b.oracle_id = oid;
       b.series    = series;
+      b.expiry_height = expiry_height;
       op.new_options.extensions.value.price_oracle_binding = b;
       signed_transaction tx;
       tx.operations.push_back( op );
@@ -2831,6 +2880,11 @@ struct guard_fixture : oracle_fixture
       set_expiration( db, tx );
       tx.sign( key, db.get_chain_id() );
       PUSH_TX( db, tx );
+   }
+   void bind_explicit( const asset_object& mia, account_id_type issuer,
+                       const fc::ecc::private_key& key, oracle_id_type oid, uint16_t series )
+   {
+      bind_explicit( mia, issuer, key, oid, series, db.head_block_num() + 1000000000 );
    }
 };
 
@@ -3220,6 +3274,457 @@ BOOST_AUTO_TEST_CASE( t8f_subscriber_cap_refuses_and_pending_queue_bounded )
       generate_blocks( db.head_block_time() + 300 );
    }
    BOOST_CHECK( oid(db).pending_queue.size() <= 16u );
+} FC_LOG_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
+/**
+ * H1-EXP: consensus expiry-height on explicit {oracle, series} bindings.
+ *
+ * Every explicit binding carries the head block number past which it yields no
+ * price. Past expiry the read path fails closed (null feed, same shape as mapping
+ * drift), which blocks new debt through the existing null-settlement-price rule
+ * while existing positions stand. A live binding is immutable (no extend, no
+ * re-point); unbinding is allowed but nulls the feed in that block, so life can
+ * never be extended seamlessly. The legacy price_oracle_id path is pinned, not
+ * closed (t9d): it carries no expiry by design and stays out of scope.
+ */
+BOOST_FIXTURE_TEST_SUITE( oracle_expiry_tests, guard_fixture )
+
+/// T9a: binding with a consensus expiry is a happy path while head <= expiry: the
+/// stored height is exact, the subscriber set tracks the pair, the feed reads the
+/// chosen series, and margin actions work.
+BOOST_AUTO_TEST_CASE( t9a_bind_with_expiry_feeds_while_live )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9A", alice_id, alice_private_key, usd_ref );
+
+   // Attack-first: with no binding there is no price, so no debt either.
+   BOOST_REQUIRE( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK_THROW( borrow( bob, asset( 500, mia_id ), asset( 100000, asset_id_type() ) ),
+                      fc::exception );
+
+   const uint32_t expiry = db.head_block_num() + 100;
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0, expiry );
+
+   const auto& stored = mia_id(db).bitasset_data(db).options.extensions.value
+                           .price_oracle_binding;
+   BOOST_REQUIRE( stored.valid() );
+   BOOST_CHECK_EQUAL( stored->expiry_height, expiry );
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 1u );
+   BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+   BOOST_REQUIRE( nullptr != borrow( bob, asset( 500, mia_id ),
+                                     asset( 100000, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T9b: the boundary is exact -- live AT the expiry height, null past it. The null
+/// materializes on the next feed refresh (here: the next publish), the same lazy
+/// shape mapping drift has always had: oracles publish continuously, and every
+/// refresh past expiry fails the binding closed.
+BOOST_AUTO_TEST_CASE( t9b_expiry_boundary_is_exact )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9B", alice_id, alice_private_key, usd_ref );
+   const uint32_t expiry = db.head_block_num() + 10;
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0, expiry );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   while( db.head_block_num() < expiry )
+      generate_block();
+   BOOST_REQUIRE_EQUAL( db.head_block_num(), expiry );
+
+   // A refresh AT the expiry height still reads: live while head <= expiry.
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // One block past it the same refresh fails closed, and stays failed.
+   generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_REQUIRE_EQUAL( db.head_block_num(), expiry + 1 );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // And it stays null on further refreshes: expiry is terminal, never transient.
+   generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+} FC_LOG_AND_RETHROW() }
+
+/// T9c: post-expiry the pair rejects NEW debt automatically (null feed, existing
+/// borrow rule, no committee action involved) while an EXISTING position stands --
+/// expiry freezes growth, it does not liquidate. And an oracle with only expired
+/// consumers becomes deletable: expired bindings prune, they never strand.
+BOOST_AUTO_TEST_CASE( t9c_post_expiry_blocks_new_debt_but_keeps_positions )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9C", alice_id, alice_private_key, usd_ref );
+   const uint32_t expiry = db.head_block_num() + 10;
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0, expiry );
+
+   // Local delete helper: rev2_delete_oracle lives in the Task 7 suite's scope, so
+   // this suite spells the same operation inline.
+   auto delete_oracle = [&]( oracle_id_type o )
+   {
+      oracle_delete_operation op;
+      op.owner     = alice_id;
+      op.oracle_id = o;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+
+   // A position opened while live...
+   const auto* opened = borrow( bob, asset( 500, mia_id ), asset( 100000, asset_id_type() ) );
+   BOOST_REQUIRE( nullptr != opened );
+   const auto order_id = opened->id;
+
+   // While live the oracle cannot be deleted out from under the pair...
+   BOOST_CHECK_THROW( delete_oracle( oid ), fc::exception );
+   BOOST_CHECK( db.find( oid ) != nullptr );
+
+   // ...crosses expiry, and the next refresh fails the pair closed.
+   while( db.head_block_num() <= expiry )
+      generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // New debt is refused through the untouched null-settlement-price rule...
+   BOOST_CHECK_THROW( borrow( dave, asset( 500, mia_id ), asset( 100000, asset_id_type() ) ),
+                      fc::exception );
+   // ...while the pre-expiry position stands: no liquidation, no auto-close.
+   BOOST_CHECK( db.find<call_order_object>( order_id ) != nullptr );
+
+   // ...but with only expired consumers left, the oracle deletes: expired bindings
+   // prune (the F5 rule), they never strand an oracle undeletable.
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 1u );
+   delete_oracle( oid );
+   BOOST_CHECK( db.find( oid ) == nullptr );
+   // ...and the prune cleared the dead binding rather than leaving a dangling one.
+   const auto& exts = mia_id(db).bitasset_data(db).options.extensions.value;
+   BOOST_CHECK( !exts.price_oracle_binding.valid() );
+   BOOST_CHECK( !exts.price_oracle_id.valid() );
+} FC_LOG_AND_RETHROW() }
+
+/// T9d: legacy pin. An unbound witness-fed pair executes byte-identical code (exact
+/// medians), and a legacy price_oracle_id bind carries no expiry and reads through
+/// block advances that would have expired an explicit binding. The legacy path is
+/// out of scope for expiry BY DECISION (see the bind evaluator comment): this test
+/// pins the boundary so a later change cannot silently move it -- including the
+/// residual dodge (unbind explicit, rebind legacy) recorded for H2 sunset.
+BOOST_AUTO_TEST_CASE( t9d_legacy_pairs_ignore_expiry )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+
+   // Part 1: no binding anywhere -- the t8e medians, exactly.
+   const asset_object& legacy = create_bitasset( "LEGACY9D" );
+   const asset_id_type legacy_id = legacy.get_id();
+   const asset_id_type core_id = asset_id_type();
+   const auto& global_props = db.get_global_properties();
+   std::vector<account_id_type> active_witnesses;
+   for( const witness_id_type& wit_id : global_props.active_witnesses )
+      active_witnesses.push_back( wit_id(db).witness_account );
+   BOOST_REQUIRE_GE( active_witnesses.size(), 3u );
+   publish_feed( active_witnesses[0], core_id, 1, legacy_id, 300, core_id );
+   BOOST_CHECK_EQUAL(
+      legacy_id(db).bitasset_data(db).current_feed.settlement_price.to_real(), 300.0 );
+   publish_feed( active_witnesses[1], core_id, 1, legacy_id, 100, core_id );
+   BOOST_CHECK_EQUAL(
+      legacy_id(db).bitasset_data(db).current_feed.settlement_price.to_real(), 300.0 );
+   publish_feed( active_witnesses[2], core_id, 1, legacy_id, 1, core_id );
+   BOOST_CHECK_EQUAL(
+      legacy_id(db).bitasset_data(db).current_feed.settlement_price.to_real(), 100.0 );
+
+   // Part 2: a legacy-id-bound pair has no expiry field and outlives block advances.
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9D", alice_id, alice_private_key, usd_ref );
+   {
+      asset_update_bitasset_operation op;
+      op.issuer          = alice_id;
+      op.asset_to_update = mia_id;
+      op.new_options     = mia_id(db).bitasset_data(db).options;
+      op.new_options.extensions.value.price_oracle_id = oid;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   const auto& bound = mia_id(db).bitasset_data(db).options.extensions.value;
+   BOOST_REQUIRE( bound.price_oracle_id.valid() );
+   BOOST_REQUIRE( !bound.price_oracle_binding.valid() );
+   BOOST_REQUIRE( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Fifty blocks with a fresh refresh at the end: still quoting, no expiry to pass.
+   for( int i = 0; i < 50; ++i )
+      generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
+                == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T9e: a live binding is immutable. Every in-place change -- extending the height,
+/// shortening it, re-pointing at another oracle -- is refused, directly. Unbinding
+/// is the only allowed transition, and it nulls the feed in that block: life can
+/// never be extended seamlessly.
+BOOST_AUTO_TEST_CASE( t9e_live_binding_is_immutable )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   const auto oid2 = make_guard_oracle( alice_id, alice_private_key, "USD.TWO", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   guard_publish( oid2, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9E", alice_id, alice_private_key, usd_ref );
+   const uint32_t expiry = db.head_block_num() + 100;
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0, expiry );
+
+   auto try_set_binding = [&]( const optional<price_oracle>& b )
+   {
+      asset_update_bitasset_operation op;
+      op.issuer          = alice_id;
+      op.asset_to_update = mia_id;
+      op.new_options     = mia_id(db).bitasset_data(db).options;
+      op.new_options.extensions.value.price_oracle_binding = b;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+   auto bound_as = [&]( oracle_id_type o, uint16_t s, uint32_t e )
+   {
+      price_oracle b;
+      b.oracle_id = o;
+      b.series    = s;
+      b.expiry_height = e;
+      return optional<price_oracle>( b );
+   };
+
+   // Extending the height is refused...
+   BOOST_CHECK_THROW( try_set_binding( bound_as( oid, 0, expiry + 1000 ) ), fc::exception );
+   // ...shortening it is refused too: ANY change to a live binding is, not just +.
+   BOOST_CHECK_THROW( try_set_binding( bound_as( oid, 0, expiry - 50 ) ), fc::exception );
+   // ...re-pointing at another oracle (with a fresh height beside it) is refused...
+   BOOST_CHECK_THROW( try_set_binding( bound_as( oid2, 0, expiry + 1000 ) ), fc::exception );
+   // ...a binding with no height at all is refused...
+   BOOST_CHECK_THROW( try_set_binding( bound_as( oid, 0, 0 ) ), fc::exception );
+   // ...and the stored binding is untouched by every refused route.
+   BOOST_CHECK( mia_id(db).bitasset_data(db).options.extensions.value
+                   .price_oracle_binding->expiry_height == expiry );
+   BOOST_CHECK_EQUAL( oid(db).subscribers.size(), 1u );
+   BOOST_CHECK( oid2(db).subscribers.empty() );
+
+   // Unbinding is the one allowed transition -- and the feed dies in that block.
+   // (Fresh block first: the unbind tx would otherwise be byte-identical to the
+   // mapping-declaration tx above -- same head, same expiration -- and the chain
+   // rejects it as a duplicate, cf. t8c.)
+   generate_block();
+   set_expiration( db, trx );
+   try_set_binding( optional<price_oracle>() );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_CHECK( oid(db).subscribers.empty() );
+   BOOST_CHECK_THROW( borrow( bob, asset( 500, mia_id ), asset( 100000, asset_id_type() ) ),
+                      fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// T9f: no extend path through proposals, parameters, or the oracle side. A
+/// proposal-wrapped extend fails at execution like the direct route; no chain
+/// parameter touches the height; and past expiry neither an oracle policy update
+/// nor a mapping restore revives the feed -- expiry dominates resumption (contrast
+/// the drift-resume path, where restoring the mapping resumes with no rebind).
+BOOST_AUTO_TEST_CASE( t9f_no_extend_path_through_proposals_or_parameters )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+   const auto eur_ref = rev2_create_reference( *this, alice_id, alice_private_key, "EUR", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9F", alice_id, alice_private_key, usd_ref );
+   const uint32_t expiry = db.head_block_num() + 10;
+   bind_explicit( mia_id(db), alice_id, alice_private_key, oid, 0, expiry );
+
+   // A proposal wrapping an extend: creation passes the fork gate, but execution runs
+   // the same bind evaluator as the direct route and fails -- the height stands.
+   proposal_id_type pid;
+   {
+      asset_update_bitasset_operation extend;
+      extend.issuer          = alice_id;
+      extend.asset_to_update = mia_id;
+      extend.new_options     = mia_id(db).bitasset_data(db).options;
+      price_oracle bigger = *extend.new_options.extensions.value.price_oracle_binding;
+      bigger.expiry_height = expiry + 1000;
+      extend.new_options.extensions.value.price_oracle_binding = bigger;
+
+      proposal_create_operation pcop;
+      pcop.fee_paying_account = alice_id;
+      pcop.proposed_ops = { op_wrapper( extend ) };
+      pcop.expiration_time = db.head_block_time() + 100;
+      pcop.fee = pcop.calculate_fee(
+            db.current_fee_schedule().get<proposal_create_operation>() );
+      signed_transaction tx;
+      tx.operations = { pcop };
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      pid = proposal_id_type{ db.push_transaction( tx ).operation_results[0]
+                                                   .get<object_id_type>() };
+   }
+   BOOST_REQUIRE( nullptr != db.find( pid ) );
+   // Execution runs the same bind evaluator as the direct route and refuses: the
+   // approval itself succeeds (proposal failures are recorded, not thrown -- the
+   // proposal stays with its fail_reason set and retries at expiration, where it
+   // fails again), but the height stands and the refusal is on chain to see.
+   {
+      proposal_update_operation puop;
+      puop.fee_paying_account = alice_id;
+      puop.proposal = pid;
+      puop.active_approvals_to_add = { alice_id };
+      puop.fee = puop.calculate_fee(
+            db.current_fee_schedule().get<proposal_update_operation>() );
+      signed_transaction tx;
+      tx.operations = { puop };
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   BOOST_CHECK( mia_id(db).bitasset_data(db).options.extensions.value
+                   .price_oracle_binding->expiry_height == expiry );
+   BOOST_REQUIRE( !pid(db).fail_reason.empty() );
+   BOOST_CHECK( pid(db).fail_reason.find( "immutable" ) != std::string::npos );
+
+   // No chain parameter feeds the expiry predicate: flipping one leaves the height
+   // and the live feed exactly where they were.
+   {
+      auto& gpo = db.get_global_properties();
+      db.modify( gpo, []( global_property_object& p ) {
+         p.parameters.extensions.value.oracle_guard_delay_sec = 120;
+      } );
+   }
+   BOOST_CHECK( mia_id(db).bitasset_data(db).options.extensions.value
+                   .price_oracle_binding->expiry_height == expiry );
+   BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // Past expiry the feed is null...
+   while( db.head_block_num() <= expiry )
+      generate_block();
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_REQUIRE( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // ...an oracle policy update (which refreshes subscribers) does not revive it...
+   {
+      oracle_update_operation uop;
+      uop.owner       = alice_id;
+      uop.oracle_id   = oid;
+      uop.new_options = oid(db).options;
+      signed_transaction tx;
+      tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+
+   // ...and neither does breaking then restoring the mapping: expiry dominates
+   // resumption, so the restored pair stays dark with no rebind.
+   rev2_declare_mapping_1to1( *this, mia_id(db), alice_id, alice_private_key, eur_ref );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   rev2_declare_mapping_1to1( *this, mia_id(db), alice_id, alice_private_key, usd_ref );
+   BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -939,12 +939,33 @@ BOOST_AUTO_TEST_CASE( offset_pool_absorbs_claims_vest_and_refuse_theft )
    // over-claims refuse (mirror).
    h2j_offset_claim_throws( *this, bob_id, bob_private_key, d, share_type( 1000 ) );
    h2j_offset_claim_throws( *this, carol_id, carol_private_key, d, share_type( 1000 ) );
-   // Transfer-like attempts cannot touch the ledger: a plain BTS transfer
-   // between strangers leaves pool balance and claims byte-identical...
-   h2j_transfer( *this, carol_id, carol_private_key, dave_id,
-                 asset( share_type( 1000 ), asset_id_type() ) );
-   BOOST_CHECK( h2j_find_pool( *this, d.pair )->balance == share_type( 49000 ) );
-   BOOST_CHECK( h2j_find_pool( *this, d.pair )->claims[0].amount == share_type( 49000 ) );
+    // Transfer-like attempts cannot touch the ledger: a plain BTS transfer
+    // between strangers leaves pool balance and claims byte-identical...
+    h2j_transfer( *this, carol_id, carol_private_key, dave_id,
+                  asset( share_type( 1000 ), asset_id_type() ) );
+    BOOST_CHECK( h2j_find_pool( *this, d.pair )->balance == share_type( 49000 ) );
+    BOOST_CHECK( h2j_find_pool( *this, d.pair )->claims[0].amount == share_type( 49000 ) );
+    // ...a vesting_balance_create from liquid BTS likewise leaves the ledger
+    // untouched (pool claims fund only via offset_deposit and pay only via
+    // offset_claim/absorb: there is no claim-derived source any
+    // BTS-moving op can consume)...
+    const vesting_balance_id_type carol_vb = h2j_make_cdd_vesting(
+          *this, carol_id, carol_private_key, share_type( 1000 ) );
+    BOOST_REQUIRE( db.find( carol_vb ) != nullptr );
+    BOOST_CHECK( h2j_find_pool( *this, d.pair )->balance == share_type( 49000 ) );
+    BOOST_CHECK( h2j_find_pool( *this, d.pair )->claims[0].amount == share_type( 49000 ) );
+    // ...and the blind variants (transfer_to_blind / transfer_from_blind /
+    // blind_transfer) have no ledger path by construction: they move account
+    // balances into/out of blind commitments (protocol/confidential.hpp),
+    // while the pool ledger is an internal vector on offset_pool_object that
+    // only offset_deposit / offset_claim / h2_issue_absorb_pair ever
+    // create/modify (grep: offset_pool_object appears only in
+    // issuance.cpp + issuance_object.hpp/evaluator decls/index; zero
+    // references in confidential_evaluator.cpp, transfer/market/vesting
+    // evaluators). A blind op funded from claim-derived BTS would move the
+    // already-paid liquid BTS (same as the plain transfer above), never the
+    // ledger entry itself -- non-transferable by construction
+    // (issuance_object.hpp:158-160).
    // ...repeat deposits MERGE (one entry per owner, latest maturity wins)...
    h2j_offset_deposit( *this, bob_id, bob_private_key, d, share_type( 10000 ) );
    const offset_pool_object* p2 = h2j_find_pool( *this, d.pair );
@@ -1194,14 +1215,24 @@ BOOST_AUTO_TEST_CASE( halt_reverts_unvested_door_outputs )
    BOOST_REQUIRE( db.find( escrow ) != nullptr );
    BOOST_REQUIRE_EQUAL( h2j_find_reserve( *this, d.pair )->pending_vestings.size(), 1u );
 
-   // Halt entry (committee freeze): the unvested output REVERTS.
-   h2j_freeze( *this, alice_id, alice_private_key, d.vault, d.oracle );
-   BOOST_CHECK( db.find( escrow ) == nullptr ); // escrow cancelled
-   BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 1000 ) ); // face back
-   BOOST_CHECK( d.pair( db ).dynamic_asset_data_id( db ).current_supply == share_type( 1000 ) );
-   BOOST_CHECK( d.vault( db ).outstanding == share_type( 1000 ) );
-   BOOST_CHECK( h2j_find_reserve( *this, d.pair )->bts_balance == share_type( 200000 ) ); // whole
-   BOOST_CHECK( h2j_find_reserve( *this, d.pair )->pending_vestings.empty() );
+    // Halt entry (committee freeze): the unvested output REVERTS.
+    h2j_freeze( *this, alice_id, alice_private_key, d.vault, d.oracle );
+    BOOST_CHECK( db.find( escrow ) == nullptr ); // escrow cancelled
+    BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 1000 ) ); // face back
+    BOOST_CHECK( d.pair( db ).dynamic_asset_data_id( db ).current_supply == share_type( 1000 ) );
+    BOOST_CHECK( d.vault( db ).outstanding == share_type( 1000 ) );
+    BOOST_CHECK( h2j_find_reserve( *this, d.pair )->bts_balance == share_type( 200000 ) ); // whole
+    BOOST_CHECK( h2j_find_reserve( *this, d.pair )->pending_vestings.empty() );
+    // REVERT is the exact inverse of redeem-apply (issuance.cpp:1166-1171):
+    // the burned 500 face returns to the reserve liability AND its band
+    // partition, so the round-trip closes (stable_supply 500->1000, band
+    // face sum == supply). Without the stable leg the reserve would strand
+    // 500 of restored BTS against 500 of missing liability.
+    BOOST_CHECK( h2j_find_reserve( *this, d.pair )->stable_supply == share_type( 1000 ) );
+    BOOST_CHECK( h2j_band_sum_bts( h2j_find_reserve( *this, d.pair ) )
+                 == h2j_find_reserve( *this, d.pair )->bts_balance );
+    BOOST_CHECK( h2j_band_sum_face( h2j_find_reserve( *this, d.pair ) )
+                 == h2j_find_reserve( *this, d.pair )->stable_supply );
 } FC_LOG_AND_RETHROW() }
 
 /// ABSORB (pool leg): a below-100% position drinks from the offset pool

@@ -162,6 +162,9 @@ share_type h2_issue_door_used( const reserve_object* reserve, uint32_t head_bloc
 /// this is belt-and-suspenders, never a migration.
 void h2_issue_ensure_bands( vector<share_type>& bands )
 {
+   FC_ASSERT( bands.size() == 0 || bands.size() == GRAPHENE_H2_ISSUE_N_BANDS,
+              "Band partition must hold exactly N_BANDS entries (or be absent); "
+              "a partial vector is a consensus bug, never silently zeroed" );
    if( bands.size() != GRAPHENE_H2_ISSUE_N_BANDS )
    {
       bands.clear();
@@ -353,10 +356,14 @@ optional<uint64_t> h2_issue_qualified_depth( const database& d, asset_id_type pa
    pools.insert( itr->win_new.pools.begin(), itr->win_new.pools.end() );
    if( pools.size() < 2 )
       return optional<uint64_t>( uint64_t( 0 ) ); // single-pool depth refused
-   const uint256_t sum = uint256_t( itr->win_old.total_volume )
-                       + uint256_t( itr->win_new.total_volume );
-   const uint64_t cap = std::numeric_limits<uint64_t>::max();
-   return optional<uint64_t>( sum > uint256_t( cap ) ? cap : uint64_t( sum ) );
+    const uint256_t sum = uint256_t( itr->win_old.total_volume )
+                        + uint256_t( itr->win_new.total_volume );
+    // Depth is the SUM of the two qualified windows; the door bound applies
+    // k2 = 1/2 to it (h2_issue_door_admits), so the effective flow limit is
+    // the MEAN of the two windows -- one block's door flow stays inside the
+    // market's demonstrated two-window absorption.
+    const uint64_t cap = std::numeric_limits<uint64_t>::max();
+    return optional<uint64_t>( sum > uint256_t( cap ) ? cap : uint64_t( sum ) );
 }
 
 /// Absorb pass for one pair: move min(pool, shortfall) into the reserve
@@ -636,7 +643,9 @@ void h2_issue_on_pair_halt( database& d, asset_id_type pair )
    // 1+2. Prune stood positions, REVERT unvested door outputs. Matured or
    // missing vestings STAND (never repriced); only live unvested escrows
    // revert (cancel escrow, BTS to the reserve's active band, face back to
-   // owner/supply/outstanding so reverted holders can wind-down-claim).
+   // owner/supply/outstanding/stable_supply + band_stable so reverted
+   // holders can wind-down-claim and the band partition still sums to the
+   // totals -- the exact inverse of hybrid_redeem apply).
    // Every entry is consumed here (reverted or stood): the halt leaves no
    // pending list behind.
    const vector<h2_pending_vesting> pending = reserve->pending_vestings; // copy: reverts below
@@ -669,11 +678,14 @@ void h2_issue_on_pair_halt( database& d, asset_id_type pair )
          d.modify( *vitr, [&face]( vault_object& v ) { v.outstanding += face; } );
          reserve = h2_find_reserve( d, pair );
          FC_ASSERT( reserve != nullptr, "Issuance reserve vanished inside halt revert" );
-         d.modify( *reserve, [&escrow_bts]( reserve_object& r ) {
-            h2_issue_ensure_bands( r.band_bts );
-            r.bts_balance += escrow_bts;
-            r.band_bts[3] += escrow_bts;
-         } );
+          d.modify( *reserve, [&escrow_bts, &face]( reserve_object& r ) {
+             h2_issue_ensure_bands( r.band_bts );
+             h2_issue_ensure_bands( r.band_stable );
+             r.bts_balance += escrow_bts;
+             r.band_bts[3] += escrow_bts;
+             r.stable_supply += face;
+             r.band_stable[3] += face;
+          } );
          reserve = h2_find_reserve( d, pair );
          FC_ASSERT( reserve != nullptr, "Issuance reserve vanished inside halt revert" );
       }

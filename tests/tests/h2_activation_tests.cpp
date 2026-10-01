@@ -506,7 +506,7 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
 /// are the ISSUANCE-1 hybrid_mint / hybrid_redeem door ops (price leg);
 /// tags 101/102/103 are the ISSUANCE-2 offset_deposit / offset_claim /
 /// issuance_exit_request ops (price leg).
-BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_100 )
+BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_103 )
 {
    using graphene::protocol::operation;
    BOOST_CHECK_EQUAL( int( operation::tag<graphene::protocol::vault_register_operation>::value ), 83 );
@@ -534,7 +534,7 @@ BOOST_AUTO_TEST_CASE( h2_op_tags_pinned_83_to_100 )
 
 /// Protocol-space object IDs 1.25.x-1.38.x are the on-chain numbering and
 /// must never move.
-BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_37 )
+BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_38 )
 {
    BOOST_CHECK_EQUAL( int( graphene::protocol::vault_object_type ), 25 );
    BOOST_CHECK_EQUAL( int( graphene::protocol::vault_bond_object_type ), 26 );

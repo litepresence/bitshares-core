@@ -32,6 +32,33 @@ namespace graphene { namespace chain {
    class offset_pool_object;
    class vault_object;
 
+   /**
+    * Issuance-door evaluators (BSIP-1 §4, Phase 2 price leg).
+    *
+    * Junior-dev map: the five operations below are the ONLY way FX stable
+    * enters or leaves circulation. Mint/redeem (tags 99/100, ISSUANCE-1) move
+    * value through the 24h-vesting door; deposit/claim (tags 101/102) fund and
+    * pay out of the per-pair offset pool (the shock absorber); exit_request
+    * (tag 103) queues wind-down exits that settle pro-rata in one maintenance
+    * pass at one clearing haircut. Every evaluator here runs the same three
+    * gates first: the H2 price-leg hardfork (`h2_require_price_leg`), the dual
+    * operation gate, and the fee-vote gate — see `issuance.cpp` and
+    * `proposal_evaluator.cpp`. Fee on all five ops is 5*BTS.
+    *
+    * Evaluate/apply split: `do_evaluate` proves everything that can fail
+    * (vault/reserve existence, bonded price liveness, caps, coverage) and
+    * stashes the results in the `_`-prefixed members; `do_apply` only writes.
+    * Rounding always favors the protocol (floors on payouts, ceils on
+    * shortfalls) — each direction is named at its call site.
+    */
+
+   /**
+    * Mint FX stable against BTS collateral (tag 99).
+    * Burns the conversion fee into the reserve, escrows the payout for 24h
+    * vesting, mints FXR to the reserve coin holder burn-first. Refuses when
+    * the door cap, rmin coverage, or the bonded price fail. Sets
+    * `_creates_reserve` when this mint opens the pair's reserve.
+    */
    class hybrid_mint_evaluator : public evaluator<hybrid_mint_evaluator>
    {
       public:
@@ -47,6 +74,13 @@ namespace graphene { namespace chain {
          protocol::oracle_value _price; ///< Bonded price proven in evaluate, reused in apply
    };
 
+   /**
+    * Redeem FX stable for BTS collateral (tag 100).
+    * Inverse of mint: burns face, pays out BTS at the bonded price with the
+    * protocol-favoring haircut leg, subject to the same 24h vesting escrow.
+    * `_payout` is proven in evaluate (price-invariant conversion + uint128
+    * haircut) and written in apply.
+    */
    class hybrid_redeem_evaluator : public evaluator<hybrid_redeem_evaluator>
    {
       public:
@@ -60,6 +94,13 @@ namespace graphene { namespace chain {
          share_type            _payout = share_type( 0 );
    };
 
+   /**
+    * Fund the per-pair offset pool (tag 101, ISSUANCE-2).
+    * The pool absorbs residual shortfalls instantly when a position falls
+    * below 100% after the LLAMMA bands. Creates the `1.38.x` pool object on
+    * first use (`_creates_pool`). Claims on this pool are non-transferable
+    * by construction — only `offset_claim` names them.
+    */
    class offset_deposit_evaluator : public evaluator<offset_deposit_evaluator>
    {
       public:
@@ -73,6 +114,12 @@ namespace graphene { namespace chain {
          bool                       _creates_pool = false;
    };
 
+   /**
+    * Claim a vested offset-pool payout (tag 102, ISSUANCE-2).
+    * Pays only after the 7-day vest (`OFFSET_VEST_SEC`); premature, stranger,
+    * or over-claims are refused. At most 64 claimants per pair (the 65th is
+    * refused, never pruned).
+    */
    class offset_claim_evaluator : public evaluator<offset_claim_evaluator>
    {
       public:
@@ -85,6 +132,14 @@ namespace graphene { namespace chain {
          const offset_pool_object* _pool = nullptr;
    };
 
+   /**
+    * Queue a wind-down exit (tag 103, ISSUANCE-2).
+    * Burns face at request time; the queue (max 8 entries / 1e11 BTS value)
+    * settles pro-rata in ONE maintenance pass at ONE clearing haircut, so a
+    * front-runner cannot jump the queue — every exit in the batch takes the
+    * same haircut. A 2% exit fee stays in the reserve. While the queue is over
+    * threshold, FXR minting suspends.
+    */
    class issuance_exit_request_evaluator : public evaluator<issuance_exit_request_evaluator>
    {
       public:

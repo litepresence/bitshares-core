@@ -10,6 +10,32 @@
 
 namespace graphene { namespace chain {
 
+/**
+ * Blind-operation evaluators (BSIP-2, STEALTH hardfork leg).
+ *
+ * Junior-dev map: `stealth_transfer` is the private payment itself (ring +
+ * Bulletproofs+, verified in consensus, not in wallets); the other three are
+ * the safety rails — `freeze_blind` halts all blind ops on a 2-quorum within
+ * 48h (zero-fee so the halt is always callable), `turnstile_reproof`
+ * migrates V1 outputs to V2 range proofs before the V1 sunset, and
+ * `parity_review` records committee attestations that keep fee-parity and
+ * set-report clocks current (kind 0 = parity review, kind 1 = set report;
+ * zero-fee so attestations are never taxed). Every blind op first passes
+ * `stealth_check_blind_gate` (hardfork active, not halted, block budget left)
+ * and increments the per-block counter in apply only. Rings are floor 11
+ * (pool halt below), cap 32; decoys must be 24h old with skew guards.
+ * Markets, margin, pools, settlement, vaults, and oracles stay transparent —
+ * blindness never touches price discovery or coverage accounting.
+ */
+
+/**
+ * Private spend (CLSAG-lineage ring + Bulletproofs+ range proof).
+ * Proves in evaluate (ring verifies, proofs verify, excess balances,
+ * nullifiers fresh, fee meets the parity/cost rule via
+ * `stealth_require_blind_fee`); consumes nullifiers and the parity subsidy
+ * in apply. See the AUDIT markers in `stealth_proof.hpp` for what is
+ * verbatim crypto vs adapted — the named specialist audit owns that line.
+ */
 class stealth_transfer_evaluator : public evaluator<stealth_transfer_evaluator>
 {
    public:
@@ -21,6 +47,13 @@ class stealth_transfer_evaluator : public evaluator<stealth_transfer_evaluator>
       virtual void pay_fee() override;
 };
 
+/**
+ * Emergency blind halt (zero-fee).
+ * Two-quorum within 48h freezes all blind ops (freeze wins ties); thaw needs
+ * a second quorum. Fail-closed by default: expiry of votes without quorum
+ * leaves the freeze in place. Callable by anyone — the zero fee exists so
+ * the halt can never be priced out.
+ */
 class freeze_blind_evaluator : public evaluator<freeze_blind_evaluator>
 {
    public:
@@ -30,6 +63,12 @@ class freeze_blind_evaluator : public evaluator<freeze_blind_evaluator>
       void_result do_apply( const freeze_blind_operation& o );
 };
 
+/**
+ * V1 → V2 turnstile migration.
+ * Re-proves a legacy blind output with a V2 range proof before the V1 sunset
+ * timestamp; after sunset, V1 outputs spend ONLY through this turnstile.
+ * One-way: there is no path back to V1.
+ */
 class turnstile_reproof_evaluator : public evaluator<turnstile_reproof_evaluator>
 {
    public:
@@ -41,6 +80,13 @@ class turnstile_reproof_evaluator : public evaluator<turnstile_reproof_evaluator
       virtual void pay_fee() override;
 };
 
+/**
+ * Committee attestation review (op 86, kind-gated, zero-fee).
+ * Kind 0 resets the 6-month parity-review clock (missed review ⇒ blind fees
+ * float to cost by rule); kind 1 resets the set-report clock (two missed
+ * reports ⇒ parity funding halts until reporting resumes). Bad kinds fail
+ * fast in evaluate, never late in the block.
+ */
 class parity_review_evaluator : public evaluator<parity_review_evaluator>
 {
    public:

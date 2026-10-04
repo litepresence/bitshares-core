@@ -81,7 +81,7 @@ class turnstile_reproof_evaluator : public evaluator<turnstile_reproof_evaluator
 };
 
 /**
- * Committee attestation review (op 86, kind-gated, zero-fee).
+ * Committee attestation review (op 107, kind-gated, zero-fee).
  * Kind 0 resets the 6-month parity-review clock (missed review ⇒ blind fees
  * float to cost by rule); kind 1 resets the set-report clock (two missed
  * reports ⇒ parity funding halts until reporting resumes). Bad kinds fail
@@ -262,7 +262,7 @@ stealth_alarm_snapshot stealth_current_alarms( const database& db );
 void stealth_window_count_add( database& db, uint32_t n );
 
 /**
- * Shared pre-check for every blind op (legacy 39/40/41 + new 83/85):
+ * Shared pre-check for every blind op (legacy 39/40/41 + new 104/106):
  * hardfork active, not halted, block budget not exhausted. Increments the
  * per-block counter. Must be called from do_evaluate (check) AND the
  * increment must happen in do_apply (evaluation is side-effect free for

@@ -337,7 +337,7 @@ std::string operation_printer::operator()(const htlc_redeemed_operation& op) con
    return "";
 }
 
-// G3-04: op 86 printer entry (parity_review_operation). Kind 0 = 6-month
+// G3-04: op 107 printer entry (parity_review_operation). Kind 0 = 6-month
 // parity-pricing review, kind 1 = quarterly anonymity-set report; unknown
 // kinds print raw (consensus rejects them — see parity_review_evaluator).
 std::string operation_printer::operator()(const parity_review_operation& op) const

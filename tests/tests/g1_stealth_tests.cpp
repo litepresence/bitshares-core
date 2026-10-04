@@ -2484,7 +2484,7 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
       }
       // The valid-kind control still dispatches past the kind gate to the
       // committee gate (non-member dan): proves the gate above is kind-only
-      // and registration dispatches op 86 to this evaluator.
+      // and registration dispatches op 107 to this evaluator.
       {
          parity_review_operation good;
          good.voter = dan.id; good.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
@@ -3171,9 +3171,9 @@ BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
 
 BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
 { try {
-   // G3-04/E-07 genesis coverage: every new G1 op (83-86) has a registered
+   // G3-04/E-07 genesis coverage: every new G1 op (104-107) has a registered
    // evaluator, every evaluator-touched index is registered from genesis,
-   // and replay-from-genesis (pre-hardfork push) refuses op 86.
+   // and replay-from-genesis (pre-hardfork push) refuses op 107.
    ACTORS( (dan) );
    // (a) indexes exist before any block (genesis state, no fork needed).
    BOOST_CHECK_NO_THROW( db.get_index_type<stealth_status_index>() );
@@ -3194,7 +3194,7 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
       BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Unknown parity review kind" )
                            != std::string::npos, e.to_detail_string() );
    }
-   // (c) pre-hardfork replay refuses op 86 (like its siblings in
+    // (c) pre-hardfork replay refuses op 107 (like its siblings in
    // stealth_ops_are_refused_before_the_hardfork): a well-formed review
    // never reaches the committee gate before activation.
    {
@@ -3209,8 +3209,8 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
       sign( tx, dan_private_key );
       BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
    }
-   // (e) G4-06 direct evaluator-registration asserts: dispatch each new op
-   // 83-86 straight to database::apply_operation, bypassing PUSH_TX fee /
+    // (e) G4-06 direct evaluator-registration asserts: dispatch each new op
+    // 104-107 straight to database::apply_operation, bypassing PUSH_TX fee /
    // authority layers AND relay-side validate(). Pre-fork every one must
    // reach its evaluator's hardfork gate — "No registered evaluator" would
    // prove a db_init wiring miss; the hardfork refusal proves the evaluator
@@ -3219,14 +3219,14 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
    // (C++14: tag<X>::value is constexpr-static; bind it to a local first —
    // passing it straight into BOOST_CHECK_EQUAL odr-uses it via const-ref
    // and fails to link. Copy-init is a constant-expression use, no odr-use.)
-   const int tag83 = operation::tag<stealth_transfer_operation>::value;
-   const int tag84 = operation::tag<freeze_blind_operation>::value;
-   const int tag85 = operation::tag<turnstile_reproof_operation>::value;
-   const int tag86 = operation::tag<parity_review_operation>::value;
-   BOOST_CHECK_EQUAL( tag83, 83 );
-   BOOST_CHECK_EQUAL( tag84, 84 );
-   BOOST_CHECK_EQUAL( tag85, 85 );
-   BOOST_CHECK_EQUAL( tag86, 86 );
+    const int tag104 = operation::tag<stealth_transfer_operation>::value;
+    const int tag105 = operation::tag<freeze_blind_operation>::value;
+    const int tag106 = operation::tag<turnstile_reproof_operation>::value;
+    const int tag107 = operation::tag<parity_review_operation>::value;
+    BOOST_CHECK_EQUAL( tag104, 104 );
+    BOOST_CHECK_EQUAL( tag105, 105 );
+    BOOST_CHECK_EQUAL( tag106, 106 );
+    BOOST_CHECK_EQUAL( tag107, 107 );
    {
       auto expect_hardfork_refusal = [&]( const operation& op, const char* what )
       {
@@ -3243,16 +3243,16 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
             BOOST_CHECK_MESSAGE( w.find( "hardfork" ) != std::string::npos, w );
          }
       };
-      stealth_transfer_operation t83;
-      expect_hardfork_refusal( operation( t83 ), "op 83 stealth_transfer" );
-      freeze_blind_operation f84;
-      f84.voter = dan.id;
-      expect_hardfork_refusal( operation( f84 ), "op 84 freeze_blind" );
-      turnstile_reproof_operation t85;
-      expect_hardfork_refusal( operation( t85 ), "op 85 turnstile_reproof" );
-      parity_review_operation r86;
-      r86.voter = dan.id; r86.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
-      expect_hardfork_refusal( operation( r86 ), "op 86 parity_review" );
+       stealth_transfer_operation t104;
+       expect_hardfork_refusal( operation( t104 ), "op 104 stealth_transfer" );
+       freeze_blind_operation f105;
+       f105.voter = dan.id;
+       expect_hardfork_refusal( operation( f105 ), "op 105 freeze_blind" );
+       turnstile_reproof_operation t106;
+       expect_hardfork_refusal( operation( t106 ), "op 106 turnstile_reproof" );
+       parity_review_operation r107;
+       r107.voter = dan.id; r107.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+       expect_hardfork_refusal( operation( r107 ), "op 107 parity_review" );
    }
    // (f) G4-06 old-DB lazy path: an old database replaying without the
    // genesis-created singleton (db_genesis.cpp:596) must read as
@@ -3276,9 +3276,9 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
       stealth_maybe_record_activation( db );
       BOOST_CHECK( db.get_index_type<stealth_status_index>().indices().empty() );
    }
-   // (d) post-fork every evaluator is wired: each op reaches its own gate
-   // (committee-membership for 84/86, cost path for a fee-less 85) instead
-   // of "no evaluator". Op 83 is covered by stealth_transfer_happy_path
+    // (d) post-fork every evaluator is wired: each op reaches its own gate
+    // (committee-membership for 105/107, cost path for a fee-less 106) instead
+    // of "no evaluator". Op 104 is covered by stealth_transfer_happy_path
    // (success) + the pre-fork refusal above.
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
@@ -3313,7 +3313,7 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
    }
    {
       // Fee-less with a shaped (but unresolvable) leg: validate passes, the
-      // evaluator's cost path rejects — proving op 85 is wired, not absent.
+       // evaluator's cost path rejects — proving op 106 is wired, not absent.
       // Owner-signed (dan) so the authority gate passes first.
       turnstile_reproof_operation tp;
       tp.new_output.range_proof = std::vector<char>( 64, 0 );

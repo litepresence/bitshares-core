@@ -408,6 +408,90 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // creator
    }
+   void operator()( const vault_register_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // registrar
+   }
+   void operator()( const vault_bond_lock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_bond_lock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
+   void operator()( const oracle_bond_release_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
+   void operator()( const vault_challenge_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const oracle_dispute_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const oracle_dispute_escalate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // escalator
+   }
+   void operator()( const challenge_vote_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // voter
+   }
+   void operator()( const vault_rotate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // rotator
+   }
+   void operator()( const vault_bond_release_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const vault_resolve_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // resolver
+   }
+   void operator()( const pair_freeze_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // freezer
+   }
+   void operator()( const winddown_claim_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimant
+   }
+   void operator()( const oracle_fallback_set_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_unfreeze_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // unfreezer (committee)
+   }
+   void operator()( const seasoning_verify_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // verifier (committee)
+   }
+   void operator()( const hybrid_mint_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // minter
+   }
+   void operator()( const hybrid_redeem_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // redeemer
+   }
+   void operator()( const offset_deposit_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // depositor
+   }
+   void operator()( const offset_claim_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimant
+   }
+   void operator()( const issuance_exit_request_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // requester
+   }
    void operator()( const stealth_transfer_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // GRAPHENE_TEMP_ACCOUNT

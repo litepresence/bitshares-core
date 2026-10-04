@@ -1108,7 +1108,7 @@ void stealth_record_parity_review( database& db, uint8_t kind )
    // G3-04: unknown kinds must never be recorded as parity (the old
    // else-branch did exactly that, with only relay-side validate() gating).
    // Consensus asserts 0/1 here AND in parity_review_evaluator::do_apply so
-   // a proposal-embedded op 86 with a bad kind fails closed at apply time.
+   // a proposal-embedded op 107 with a bad kind fails closed at apply time.
    FC_ASSERT( kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
               kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
               "Unknown parity review kind" );

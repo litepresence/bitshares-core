@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/proposal_evaluator.hpp>
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -260,6 +261,57 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.extensions.value.oracle_guard_delay_sec.valid(),
                    "Unable to set the oracle guard delay before the oracle hardfork");
       }
+      // E-01 (audit-round-2): H2 fee-schedule votes are gated by leg, mirroring the
+      // execution pre-checks below (primitives/BONDS, gateway, price). Without this,
+      // a committee could price H2 fees before the code activates.
+      if (!HARDFORK_H2_BONDS_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_challenge_operation>(),
+                   "Unable to define fees for vault challenges prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_dispute_operation>(),
+                   "Unable to define fees for oracle disputes prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_dispute_escalate_operation>(),
+                   "Unable to define fees for dispute escalation prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<challenge_vote_operation>(),
+                   "Unable to define fees for challenge votes prior to the H2 bonds hardfork");
+      }
+      if (!HARDFORK_H2_GATEWAY_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_register_operation>(),
+                   "Unable to define fees for vault registration prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_bond_lock_operation>(),
+                   "Unable to define fees for vault bond locks prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_rotate_operation>(),
+                   "Unable to define fees for vault rotation prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_bond_release_operation>(),
+                   "Unable to define fees for vault bond release prior to the H2 gateway hardfork");
+      }
+      if (!HARDFORK_H2_PRICE_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_bond_lock_operation>(),
+                   "Unable to define fees for oracle bond locks prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_bond_release_operation>(),
+                   "Unable to define fees for oracle bond release prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_resolve_operation>(),
+                   "Unable to define fees for vault resolution prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pair_freeze_operation>(),
+                   "Unable to define fees for pair freeze prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<winddown_claim_operation>(),
+                   "Unable to define fees for wind-down claims prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_fallback_set_operation>(),
+                   "Unable to define fees for oracle fallback prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_unfreeze_operation>(),
+                   "Unable to define fees for oracle unfreeze prior to the H2 price hardfork");
+          FC_ASSERT(!op.new_parameters.current_fees->exists<seasoning_verify_operation>(),
+                    "Unable to define fees for seasoning verification prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_mint_operation>(),
+                     "Unable to define fees for hybrid mints prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_redeem_operation>(),
+                     "Unable to define fees for hybrid redeems prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<offset_deposit_operation>(),
+                     "Unable to define fees for offset deposits prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<offset_claim_operation>(),
+                     "Unable to define fees for offset claims prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<issuance_exit_request_operation>(),
+                     "Unable to define fees for issuance exits prior to the H2 price hardfork");
+      }
       if (!HARDFORK_STEALTH_PASSED(block_time)) {
          FC_ASSERT(!op.new_parameters.current_fees->exists<stealth_transfer_operation>(),
                    "Unable to define fees for stealth transfer operations prior to the stealth hardfork");
@@ -375,6 +427,71 @@ struct proposal_operation_hardfork_visitor
    }
    void operator()(const graphene::chain::reference_asset_create_operation&) const {
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   // H2 legs (H2e): the proposal pre-check mirrors the evaluator gates, so
+   // a leg-dark op is refused at proposal creation, not only at execution.
+   void operator()(const graphene::chain::vault_register_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_bond_lock_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_bond_lock_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_bond_release_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_challenge_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::oracle_dispute_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::oracle_dispute_escalate_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::challenge_vote_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::vault_rotate_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_bond_release_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_resolve_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::pair_freeze_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::winddown_claim_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_fallback_set_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_unfreeze_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::seasoning_verify_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::hybrid_mint_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::hybrid_redeem_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::offset_deposit_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::offset_claim_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::issuance_exit_request_operation&) const {
+      h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::stealth_transfer_operation&) const {
       FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );

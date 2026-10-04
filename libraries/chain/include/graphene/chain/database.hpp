@@ -239,6 +239,7 @@ namespace graphene { namespace chain {
             FC_ASSERT( op_type < _operation_evaluators.size(),
                        "The operation type (${a}) must be smaller than the size of _operation_evaluators (${b})",
                        ("a", op_type)("b", _operation_evaluators.size()) );
+            FC_ASSERT(!_operation_evaluators[static_cast<int>(op_type)], "evaluator slot already registered (tag collision)");
             _operation_evaluators[op_type] = std::make_unique<op_evaluator_impl<EvaluatorType>>();
          }
          ///@}

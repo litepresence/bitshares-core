@@ -25,6 +25,7 @@
 
 #include <graphene/protocol/operations.hpp>
 
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 
 #include <fc/reflect/typelist.hpp>
@@ -73,6 +74,27 @@ struct hardfork_visitor {
                                            protocol::oracle_delete_operation,
                                            protocol::oracle_publish_operation,
                                            protocol::reference_asset_create_operation >;
+   using h2_primitives_ops = fc::typelist::list< protocol::vault_challenge_operation,
+                                                     protocol::oracle_dispute_operation,
+                                                     protocol::oracle_dispute_escalate_operation,
+                                                     protocol::challenge_vote_operation >;
+   using h2_gateway_ops = fc::typelist::list< protocol::vault_register_operation,
+                                              protocol::vault_bond_lock_operation,
+                                              protocol::vault_bond_release_operation,
+                                              protocol::vault_rotate_operation >;
+   using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
+                                            protocol::oracle_bond_release_operation,
+                                            protocol::vault_resolve_operation,
+                                            protocol::pair_freeze_operation,
+                                            protocol::winddown_claim_operation,
+                                             protocol::oracle_fallback_set_operation,
+                                             protocol::oracle_unfreeze_operation,
+                                             protocol::seasoning_verify_operation,
+                                             protocol::hybrid_mint_operation,
+                                             protocol::hybrid_redeem_operation,
+                                             protocol::offset_deposit_operation,
+                                             protocol::offset_claim_operation,
+                                             protocol::issuance_exit_request_operation >;
    using stealth_ops = fc::typelist::list< protocol::stealth_transfer_operation,
                                            protocol::freeze_blind_operation,
                                            protocol::turnstile_reproof_operation,
@@ -115,6 +137,25 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<oracle_ops, Op>(), bool>
    visit() { return HARDFORK_ORACLE_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<h2_primitives_ops, Op>(), bool>
+   visit() { return HARDFORK_H2_BONDS_PASSED(now)
+                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                        HARDFORK_H2_GATEWAY_TIME,
+                                        HARDFORK_H2_PRICE_TIME ); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<h2_gateway_ops, Op>(), bool>
+   visit() { return HARDFORK_H2_GATEWAY_PASSED(now)
+                    && HARDFORK_H2_BONDS_PASSED(now)
+                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                        HARDFORK_H2_GATEWAY_TIME,
+                                        HARDFORK_H2_PRICE_TIME ); }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<h2_price_ops, Op>(), bool>
+    visit() { return HARDFORK_H2_PRICE_PASSED(now)
+                     && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                         HARDFORK_H2_GATEWAY_TIME,
+                                         HARDFORK_H2_PRICE_TIME ); }
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<stealth_ops, Op>(), bool>
    visit() { return HARDFORK_STEALTH_PASSED(now); }

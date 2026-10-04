@@ -50,7 +50,7 @@ constexpr uint32_t GRAPHENE_STEALTH_RING_TARGET = 16;
 /// Ceiling ring size: bounds verifier work per input (DoS cap, not privacy).
 constexpr uint32_t GRAPHENE_STEALTH_RING_MAX = 32;
 
-/// Per-block blind-operation budget shared by ops 39/40/41/83/85 (see G1a §4c:
+/// Per-block blind-operation budget shared by ops 39/40/41/104/106 (see G1a §4c:
 /// 100 x ring-16 worst case ~= 690ms <= 750ms = 25% of the 3s interval).
 /// Counts every blind op (legacy + stealth) so the budget is one number.
 /// Reserved transparent/market space rides the same counter: when the budget

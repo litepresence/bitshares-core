@@ -255,8 +255,12 @@ namespace graphene { namespace protocol {
        * values stay transparent) but nothing is promoted to the consumed value and
        * bound consumers read no price, so margin actions fail closed. Set and cleared
        * by the owner through oracle_update; clearing through a proposal vote is the
-       * supported unfreeze path. Appended AFTER extensions, never inserted before
-       * them, so every pre-existing field keeps its wire position.
+       * supported Track A unfreeze path. R-02: challenge-set freezes
+       * (sustain/expiry with terminal dispute history, or any open dispute)
+       * are NOT clearable by the owner (refused in consensus) and clear only
+       * through the committee oracle_unfreeze op. Appended AFTER extensions,
+       * never inserted before them, so every pre-existing field keeps its wire
+       * position.
        */
       bool frozen = false;
 
@@ -439,14 +443,48 @@ namespace graphene { namespace protocol {
    };
 
    /**
+    * @brief Committee unfreeze for challenge-set oracle freezes (R-02).
+    * @ingroup operations
+    *
+    * Owner `oracle_update` MUST NOT clear `frozen` while the oracle carries
+    * open disputes or a sustain/expiry freeze (challenge-set): that path is
+    * refused in consensus and must come here instead. Only a seated
+    * committee member may unfreeze, and only when no dispute is open
+    * (clearing after resolution, never mid-vote). Slash stays flag-only in
+    * this task (slash-to-seizure is a follow-on phase): this op clears the
+    * freeze flag only, never seizes bonds. Price-leg gated (touches the H2
+    * debt tap), tag 97, extensions appended-last.
+    */
+   struct oracle_unfreeze_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
+
+      asset           fee;
+      account_id_type unfreezer; ///< Must be a seated committee member; pays the fee
+      oracle_id_type  oracle;    ///< Must be frozen with zero open disputes
+
+      extensions_type extensions; ///< Appended-last rule
+
+      account_id_type fee_payer()const { return unfreezer; }
+      void            validate()const;
+   };
+
+   /**
     * @brief Removes an oracle.
     * @ingroup operations
     *
     * Refused while anything on chain still references it.
     */
-   struct oracle_delete_operation : public base_operation
-   {
-      struct fee_params_t { uint64_t fee = 0; };
+    struct oracle_delete_operation : public base_operation
+    {
+       // Zero by design (R7C-H2 fee-floor review): owner-only cleanup, refused
+       // while anything references the oracle, and each deletable oracle cost
+       // 500 BTS to create -- delete-spam is bounded by creation (1k deletes
+       // cost 500k BTS in creations), so a fee would only tax hygiene. Matches
+       // the chain-wide delete/cancel precedent (pool/fund/permission/offer
+       // deletes, order cancels are all zero-fee). No rate-limit: the creation
+       // cost dominates any flood the free delete could carry.
+       struct fee_params_t { uint64_t fee = 0; };
 
       asset            fee;
       account_id_type  owner;
@@ -559,6 +597,9 @@ FC_REFLECT( graphene::protocol::oracle_create_operation,
             (fee)(owner)(name)(description)(base)(quote)(series)(options)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_update_operation,
             (fee)(owner)(oracle_id)(new_description)(new_options)(extensions) )
+FC_REFLECT( graphene::protocol::oracle_unfreeze_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::oracle_unfreeze_operation,
+            (fee)(unfreezer)(oracle)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_delete_operation,
             (fee)(owner)(oracle_id)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_publish_operation,
@@ -579,5 +620,7 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_oper
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::reference_asset_create_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_create_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_update_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation )

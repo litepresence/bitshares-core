@@ -105,7 +105,7 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
                                           implementation_ids, impl_stealth_status_object_type>
 {
    public:
-      /// Fail-closed halt flag: while set, all blind ops (39/40/41/83/85)
+      /// Fail-closed halt flag: while set, all blind ops (39/40/41/104/106)
       /// reject in do_evaluate. Set by the tripwire (auto) or the freeze
       /// quorum (manual backup); cleared by the resume quorum.
       bool                  blind_halted = false;

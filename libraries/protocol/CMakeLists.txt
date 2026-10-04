@@ -36,6 +36,12 @@ list(APPEND SOURCES account.cpp
                     small_ops.cpp
                     transaction.cpp
                     types.cpp
+                    vault_ops.cpp
+                    challenge_ops.cpp
+                    vault_lifecycle_ops.cpp
+                    h2_economics.cpp
+                    issuance_ops.cpp
+                    seasoning_ops.cpp
                     withdraw_permission.cpp
                     worker.cpp
                     htlc.cpp)

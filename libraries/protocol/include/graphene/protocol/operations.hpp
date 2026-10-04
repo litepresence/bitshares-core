@@ -42,6 +42,12 @@
 #include <graphene/protocol/stealth.hpp>
 #include <graphene/protocol/ticket.hpp>
 #include <graphene/protocol/transfer.hpp>
+#include <graphene/protocol/vault_ops.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
+#include <graphene/protocol/vault_lifecycle_ops.hpp>
+#include <graphene/protocol/h2_economics.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/vesting.hpp>
 #include <graphene/protocol/withdraw_permission.hpp>
 #include <graphene/protocol/witness.hpp>
@@ -137,12 +143,33 @@ namespace graphene { namespace protocol {
             /* 79 */ oracle_update_operation,
             /* 80 */ oracle_delete_operation,
             /* 81 */ oracle_publish_operation,
-            /* 82 */ reference_asset_create_operation,
-            /* 83 */ stealth_transfer_operation,   // G1 BSIP-2 (STEALTH hardfork-gated)
-            /* 84 */ freeze_blind_operation,       // G1 BSIP-2 (STEALTH hardfork-gated)
-            /* 85 */ turnstile_reproof_operation,  // G1 BSIP-2 (STEALTH hardfork-gated)
-            /* 86 */ parity_review_operation       // G1c BSIP-2 §2 (STEALTH hardfork-gated)
-          >;
+             /* 82 */ reference_asset_create_operation,
+             /* 83 */ vault_register_operation,
+             /* 84 */ vault_bond_lock_operation,
+             /* 85 */ oracle_bond_lock_operation,
+             /* 86 */ oracle_bond_release_operation,
+             /* 87 */ vault_challenge_operation,
+             /* 88 */ oracle_dispute_operation,
+             /* 89 */ oracle_dispute_escalate_operation,
+             /* 90 */ challenge_vote_operation,
+             /* 91 */ vault_rotate_operation,
+             /* 92 */ vault_bond_release_operation,
+             /* 93 */ vault_resolve_operation,
+             /* 94 */ pair_freeze_operation,
+             /* 95 */ winddown_claim_operation,
+             /* 96 */ oracle_fallback_set_operation,
+             /* 97 */ oracle_unfreeze_operation,
+             /* 98 */ seasoning_verify_operation,
+             /* 99 */ hybrid_mint_operation,
+             /* 100 */ hybrid_redeem_operation,
+             /* 101 */ offset_deposit_operation,
+             /* 102 */ offset_claim_operation,
+             /* 103 */ issuance_exit_request_operation,
+             /* 104 */ stealth_transfer_operation,   // G1 BSIP-2 (STEALTH hardfork-gated)
+             /* 105 */ freeze_blind_operation,       // G1 BSIP-2 (STEALTH hardfork-gated)
+             /* 106 */ turnstile_reproof_operation,  // G1 BSIP-2 (STEALTH hardfork-gated)
+             /* 107 */ parity_review_operation       // G1c BSIP-2 §2 (STEALTH hardfork-gated)
+           >;
 
    /**
     *  Appends required authorites to the result vector.  The authorities appended are not the

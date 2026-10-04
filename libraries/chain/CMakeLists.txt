@@ -43,6 +43,7 @@ add_library( graphene_chain
              oracle_evaluator.cpp
              oracle_object.cpp
              reference_asset_object.cpp
+             h2_activation.cpp
              balance_evaluator.cpp
              account_evaluator.cpp
              assert_evaluator.cpp

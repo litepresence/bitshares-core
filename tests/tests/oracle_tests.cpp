@@ -17,6 +17,7 @@
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/asset_ops.hpp>
+#include <graphene/protocol/operations.hpp>
 
 #include <fc/io/raw.hpp>
 
@@ -3785,6 +3786,41 @@ BOOST_AUTO_TEST_CASE( oracle_options_guard_flags_round_trip )
    BOOST_CHECK( back.guard_rate_limit );
    BOOST_CHECK( back.guard_delay );
    BOOST_CHECK( !back.frozen );
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+/**
+ * Merge plumbing — H1 tag pin (Task 2, V-02 per-tree).
+ *
+ * H1 owns op tags 78-82 (oracle_create/update/delete/publish +
+ * reference_asset_create). The H2 block starts at 83 and the G1 block ends
+ * at 107 in the final H2R+G1R union, so these five positions must never
+ * shift: any insertion above them renumbers every downstream tag and forks
+ * the wire format. This case fails closed on any such move.
+ */
+BOOST_AUTO_TEST_SUITE( h1_op_tag_pin_tests )
+
+BOOST_AUTO_TEST_CASE( h1_op_tags_pinned_78_to_82 )
+{
+   // (C++14: tag<X>::value is constexpr-static; bind to a local first —
+   // passing it straight into BOOST_CHECK_EQUAL odr-uses it via const-ref
+   // and fails to link.)
+   const int tag78 = graphene::protocol::operation::tag<
+      graphene::protocol::oracle_create_operation>::value;
+   const int tag79 = graphene::protocol::operation::tag<
+      graphene::protocol::oracle_update_operation>::value;
+   const int tag80 = graphene::protocol::operation::tag<
+      graphene::protocol::oracle_delete_operation>::value;
+   const int tag81 = graphene::protocol::operation::tag<
+      graphene::protocol::oracle_publish_operation>::value;
+   const int tag82 = graphene::protocol::operation::tag<
+      graphene::protocol::reference_asset_create_operation>::value;
+   BOOST_CHECK_EQUAL( tag78, 78 );
+   BOOST_CHECK_EQUAL( tag79, 79 );
+   BOOST_CHECK_EQUAL( tag80, 80 );
+   BOOST_CHECK_EQUAL( tag81, 81 );
+   BOOST_CHECK_EQUAL( tag82, 82 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

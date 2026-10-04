@@ -834,10 +834,22 @@ void process_h2_oracle_economics( database& d )
        {
           if( vitr->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN )
              continue; // terminal books segregated into the wind-down object
-          const auto range = bond_idx.equal_range( vault_id_type( vitr->id ) );
-          for( auto bitr = range.first; bitr != range.second; ++bitr )
-             if( !bitr->seized )
-                collateral = h2_sat_add( collateral, bitr->bond_amount );
+           const auto range = bond_idx.equal_range( vault_id_type( vitr->id ) );
+           // Live vesting coverage (H2-05/V-03): mirrors the producer-side
+           // predicate above and h2_vault_meets_maintenance — a bond backs
+           // the scope only while its vesting balance still holds the
+           // encumbered amount in BTS. Nominal records of drawn-down vestings
+           // must not flatter the scope.
+           for( auto bitr = range.first; bitr != range.second; ++bitr )
+           {
+              if( bitr->seized )
+                 continue;
+              const vesting_balance_object* vb = d.find( bitr->vesting_balance );
+              if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+                  || vb->balance.amount < bitr->bond_amount )
+                 continue;
+              collateral = h2_sat_add( collateral, bitr->bond_amount );
+           }
           debt = h2_sat_add( debt, vitr->outstanding );
        }
        bool suspended = false;

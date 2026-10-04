@@ -31,8 +31,10 @@
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 
 #include <fc/io/raw.hpp>
+#include <fc/uint128.hpp>
 
 namespace graphene { namespace chain {
 
@@ -75,11 +77,24 @@ void_result oracle_bond_lock_evaluator::do_evaluate( const oracle_bond_lock_oper
    FC_ASSERT( _vesting->balance.amount >= op.bond_amount,
               "Bond vesting balance holds insufficient funds" );
 
-   // The USD-terms denomination is the $10,050 proposal exactly: the raw amount
-   // is the basis-converted lock recorded alongside it. Live-price conversion
-   // enforcement arrives with the H2d price leg.
+   // The USD-terms denomination is the $10,050 proposal exactly, and the raw
+   // amount must cover it at the bonded-read basis (H2-03): a 1-satoshi
+   // record against the full face is refused here, not deferred to any later
+   // price leg.
    FC_ASSERT( op.bond_usd_cents == GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS,
               "Producer bond USD-terms record must equal the genesis min_bond basis" );
+   FC_ASSERT( fc::uint128_t( uint64_t( op.bond_amount.value ) )
+                 >= fc::uint128_t( op.bond_usd_cents )
+                    * fc::uint128_t( GRAPHENE_H2_USD_BASIS_RAW_PER_CENT ),
+              "raw escrow below declared USD face at bonded read" );
+
+   // CDD forward-lock bounds (H2-06/SUP-05): the encumbered vesting must be
+   // locked 7d+ into the future, so the bond cannot be an instant-withdraw
+   // shell. Type alone (checked above) never proved this.
+   const auto& cdd = _vesting->policy.get<cdd_vesting_policy>();
+   FC_ASSERT( cdd.vesting_seconds >= GRAPHENE_H2_BOND_UNBOND_DELAY_SEC
+              && cdd.start_claim >= d.head_block_time(),
+              "CDD must be forward-locked 7d+" );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

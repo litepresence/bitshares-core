@@ -209,13 +209,18 @@ void_result vault_challenge_evaluator::do_evaluate( const vault_challenge_operat
               "Pair challenges are cooling down until ${u}",
               ("u", vault->last_challenge_time + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC) );
 
-   // The USD-terms floor is the $837.50 proposal; the raw amount is the
-   // basis-converted lock recorded alongside it (live-price consistency
-   // enforcement arrives with the H2d price leg, as in H2a).
+   // Raw-vs-USD escrow basis (H2-03): the raw escrow must cover the declared
+   // USD face at GRAPHENE_H2_USD_BASIS_RAW_PER_CENT (128-bit, overflow-safe).
+   // The old H2d-deferral let a 1-satoshi escrow claim the full $837.50 face;
+   // the floor below kills that today, with no consensus price needed.
    FC_ASSERT( op.challenge_bond_usd_cents >= GRAPHENE_H2_CHALLENGE_BOND_FLOOR_USD_CENTS,
               "Challenge bond below the $837.50 USD-terms floor" );
    FC_ASSERT( op.challenge_bond_usd_cents <= uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ),
               "Challenge bond USD-terms record exceeds the anti-overflow bound" );
+   FC_ASSERT( fc::uint128_t( uint64_t( op.challenge_bond.value ) )
+                 >= fc::uint128_t( op.challenge_bond_usd_cents )
+                    * fc::uint128_t( GRAPHENE_H2_USD_BASIS_RAW_PER_CENT ),
+              "raw escrow below declared USD face at bonded read" );
 
    // Transparent funding only: the escrow debits the challenger's visible core
    // balance in apply. Confidential balances are never consulted, so blind
@@ -293,10 +298,16 @@ void_result oracle_dispute_evaluator::do_evaluate( const oracle_dispute_operatio
    }
    FC_ASSERT( accused_found, "Accused time names no retained oracle history" );
 
+   // Same raw-vs-USD escrow basis as the challenge site (H2-03): the round-1
+   // raw escrow must cover the declared USD face at the bonded-read basis.
    FC_ASSERT( op.dispute_bond_usd_cents >= GRAPHENE_H2_CHALLENGE_BOND_FLOOR_USD_CENTS,
               "Dispute bond below the $837.50 USD-terms floor" );
    FC_ASSERT( op.dispute_bond_usd_cents <= uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ),
               "Dispute bond USD-terms record exceeds the anti-overflow bound" );
+   FC_ASSERT( fc::uint128_t( uint64_t( op.dispute_bond.value ) )
+                 >= fc::uint128_t( op.dispute_bond_usd_cents )
+                    * fc::uint128_t( GRAPHENE_H2_USD_BASIS_RAW_PER_CENT ),
+              "raw escrow below declared USD face at bonded read" );
    FC_ASSERT( d.get_balance( op.challenger, asset_id_type() ).amount >= op.dispute_bond,
               "Dispute bond must be posted from transparent funds" );
 

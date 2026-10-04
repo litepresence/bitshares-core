@@ -10,9 +10,12 @@
  * USD-terms-at-lock basis (recorded, not recomputed): every bond floor below is
  * denominated in USD cents at lock, converted to raw BTS smallest units at the
  * fixed pilot basis of $0.001/BTS (1000 BTS per USD, BTS precision 5, so exactly
- * 1,000,000 raw units per USD cent) inherited from H2a. Raw/usd consistency
- * enforcement against a live bonded-oracle price arrives with the H2d price leg;
- * H2b records the basis, exactly like H2a.
+ * 1,000,000 raw units per USD cent) inherited from H2a and pinned to
+ * GRAPHENE_H2_USD_BASIS_RAW_PER_CENT (static_assert below). A BTS-price move
+ * therefore cannot silently re-size the economics: the usd_cents record is
+ * authoritative and the raw amount is the basis-converted lock. The basis
+ * floor is ENFORCED at every lock site (H2-03): raw short of usd_cents x
+ * basis is refused in consensus.
  *
  * Proposals used (BSIP-1 section 7b + inventory): challenger/dispute base floor
  * $837.50, escalation doubles per round capped at 3 rounds, finder cap $83.75,
@@ -48,6 +51,10 @@ namespace {
 
 // Pilot basis inherited from H2a: 1e6 raw BTS units per USD cent.
 constexpr int64_t H2D_RAW_PER_USD_CENT = 1000000LL;
+// The suite mirror above is pinned to the enforced protocol basis, so the
+// pilot ratio can never drift silently on either side.
+static_assert( uint64_t( H2D_RAW_PER_USD_CENT ) == GRAPHENE_H2_USD_BASIS_RAW_PER_CENT,
+               "H2d pilot-basis mirror must equal the protocol escrow basis" );
 constexpr uint64_t H2D_FLOOR_USD_CENTS = 83750;    // $837.50 challenger/dispute base
 constexpr uint64_t H2D_FINDER_CAP_USD_CENTS = 8375; // $83.75 finder cap
 const share_type H2D_ROUND1_RAW =
@@ -314,15 +321,9 @@ BOOST_AUTO_TEST_CASE( challenge_posts_with_floor_memo_and_open_state )
    BOOST_CHECK_EQUAL( vid( db ).open_challenges, 1u );
    BOOST_CHECK( vid( db ).last_challenge_time == c.opened );
 
-   // Below-floor USD records are refused. (The $837.50 floor is USD-terms
-   // only: raw-vs-USD price consistency needs the H2d price leg, so a short
-   // raw amount with a full USD record is NOT refused in H2c as long as it is
-   // funded — the evaluator's floor branch only reads usd_cents. A prior
-   // revision asserted a raw shortfall throw here; that expectation was
-   // vacuous pre-isolation (it threw on cooldown, never on floor) and is
-   // unimplementable without a consensus price, so it is removed, not
-   // isolated. H2d must revisit this site when it adds the consistency
-   // check.)
+   // Below-floor USD records are refused, and so are raw-short escrows: the
+   // $837.50 floor is USD-terms, and the raw leg must cover the face at the
+   // bonded-read basis (H2-03: challenge_raw_shortfall_rejected pins it).
    generate_blocks( db.head_block_time() + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC + 3600 );
    generate_block();
    BOOST_CHECK_THROW( h2d_post_challenge( *this, bob_id, bob_private_key, vid,
@@ -337,6 +338,69 @@ BOOST_AUTO_TEST_CASE( challenge_posts_with_floor_memo_and_open_state )
          string( GRAPHENE_H2_EVIDENCE_MAX_LENGTH + 1, 'x' ) ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
+/// H2-03: a 1-satoshi raw escrow against the full $837.50 face is refused by
+/// the raw-vs-USD basis floor (RED: pre-fix the usd_cents-only floor passes it).
+BOOST_AUTO_TEST_CASE( challenge_raw_shortfall_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2d_register_vault( *this, alice_id, alice_private_key, vault_auth );
+
+   // Bob is funded, so only the basis branch can refuse: full face, 1 satoshi.
+   BOOST_CHECK_THROW( h2d_post_challenge( *this, bob_id, bob_private_key, vid,
+         share_type( 1 ), H2D_FLOOR_USD_CENTS, h2d_evidence( "short-raw" ) ),
+      fc::exception );
+   // Boundary: one unit under the basis-converted lock still refuses.
+   BOOST_CHECK_THROW( h2d_post_challenge( *this, bob_id, bob_private_key, vid,
+         H2D_ROUND1_RAW - 1, H2D_FLOOR_USD_CENTS, h2d_evidence( "short-raw-edge" ) ),
+      fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// H2-03 dispute mirror: 1-satoshi round-1 escrow against the full face.
+BOOST_AUTO_TEST_CASE( dispute_raw_shortfall_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "CORE.USD", bts_ref, usd_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   oracle_dispute_operation op;
+   op.challenger            = bob_id;
+   op.oracle                = oid;
+   op.defender              = carol_id;
+   op.accused_time          = accused;
+   op.accused_series        = 0;
+   op.dispute_bond          = share_type( 1 );
+   op.dispute_bond_usd_cents = H2D_FLOOR_USD_CENTS;
+   op.evidence_memo         = h2d_evidence( "short-raw" );
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( bob_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( blind_funded_challenge_is_rejected )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
@@ -345,13 +409,13 @@ BOOST_AUTO_TEST_CASE( blind_funded_challenge_is_rejected )
 
    ACTORS( (alice)(bob)(carol) );
    fund( alice );
-   // Small numbers on purpose: blind range proofs grow with the proven amount
+   // Small blinds on purpose: blind range proofs grow with the proven amount
    // and the chain caps transactions at 2kB, so this test blinds thousands,
-   // not billions. The posted bond is small in raw terms but still meets the
-   // $837.50 USD-terms floor: raw/usd consistency is H2d's live-price job, and
-   // H2b records the basis exactly like H2a does.
+   // not billions. The posted bond is full-size in raw terms: the raw-vs-USD
+   // basis floor (H2-03) refuses short escrows, so the transparency check
+   // below isolates the funding source, never the denomination.
    fund( bob, asset( 24000 ) );
-   fund( carol, asset( 24000 ) );
+   fund( carol, asset( 90000000000LL ) );
 
    authority vault_auth( 1, alice_id, 1 );
    const vault_id_type vid = h2d_register_vault( *this, alice_id, alice_private_key, vault_auth );
@@ -382,16 +446,18 @@ BOOST_AUTO_TEST_CASE( blind_funded_challenge_is_rejected )
    }
 
    // The blind money cannot fund the challenge escrow: only transparent
-   // balances are debited, and Bob's 8000 remainder is short of the 9000 bond.
+   // balances are debited, and Bob's 8000 remainder is short of the bond.
+   // (The 9000-raw post below also trips the raw-vs-USD basis floor; either
+   // branch refuses, and the funding branch is what this case pins.)
    BOOST_CHECK_EQUAL( db.get_balance( bob_id, asset_id_type() ).amount.value, 8000 );
    BOOST_CHECK_THROW( h2d_post_challenge( *this, bob_id, bob_private_key, vid,
          share_type( 9000 ), H2D_FLOOR_USD_CENTS, h2d_evidence( "blind" ) ),
       fc::exception );
 
-   // Positive control: the same small bond posts fine from transparent funds.
+   // Positive control: the full-size bond posts fine from transparent funds.
    const vault_challenge_id_type ok = h2d_post_challenge(
          *this, carol_id, carol_private_key, vid,
-         share_type( 9000 ), H2D_FLOOR_USD_CENTS, h2d_evidence( "transparent" ) );
+         H2D_ROUND1_RAW, H2D_FLOOR_USD_CENTS, h2d_evidence( "transparent" ) );
    BOOST_CHECK_EQUAL( ok( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
 } FC_LOG_AND_RETHROW() }
 

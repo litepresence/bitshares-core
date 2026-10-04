@@ -2,7 +2,9 @@
  * H2c vault lifecycle ops: rotate, wind-down, resolve, pair_freeze + HTLC griefing.
  *
  * USD-terms-at-lock basis inherited from H2a/H2b ($0.001/BTS pilot basis:
- * 1,000,000 raw units per USD cent). All proposal values from BSIP-1 section
+ * 1,000,000 raw units per USD cent, pinned to
+ * GRAPHENE_H2_USD_BASIS_RAW_PER_CENT by static_assert below). All proposal
+ * values from BSIP-1 section
  * 7b: 150% maintenance trigger, 36h top-up window, 15% wind-down haircut,
  * rmax 2x junior dilution cap, $83.75 griefing per direction, sub-vault cap 64.
  * Full LLAMMA issuance engine is deferred (H2 plan self-review): H2c covers
@@ -35,6 +37,7 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -55,6 +58,10 @@ namespace {
 
 // Pilot basis inherited from H2a/H2b: 1e6 raw BTS units per USD cent.
 constexpr int64_t H2C_RAW_PER_USD_CENT = 1000000LL;
+// The suite mirror above is pinned to the enforced protocol basis, so the
+// pilot ratio can never drift silently on either side.
+static_assert( uint64_t( H2C_RAW_PER_USD_CENT ) == GRAPHENE_H2_USD_BASIS_RAW_PER_CENT,
+               "H2c pilot-basis mirror must equal the protocol escrow basis" );
 constexpr uint64_t H2C_VAULT_USD_CENTS = 1340000;    // $13,400 vault min_bond
 constexpr uint64_t H2C_FLOOR_USD_CENTS = 83750;      // $837.50 challenge floor
 constexpr uint64_t H2C_GRIEF_USD_CENTS = 8375;       // $83.75 griefing/direction
@@ -444,49 +451,53 @@ BOOST_AUTO_TEST_CASE( e06_h2_worst_case_block_benchmark )
    const account_id_type init0 = get_account( "init0" ).get_id();
    const account_id_type init1 = get_account( "init1" ).get_id();
 
-   // Four small vaults on four pairs (one live set per pair) for the timed
-   // challenge/vote/lock/freeze/rotate legs.
+   // Four full-size vaults on four pairs (one live set per pair) for the timed
+   // challenge/vote/lock/freeze/rotate legs. Full pilot-basis min_bonds: the
+   // $13,400 floor + raw-vs-USD basis (H2-03/H2-05) forbid toy-money vaults.
    authority vault_auth( 1, alice_id, 1 );
    const asset_id_type pair_a = h2c_create_uia( *this, alice_id, alice_private_key, "E06A" );
    const asset_id_type pair_b = h2c_create_uia( *this, alice_id, alice_private_key, "E06B" );
    const asset_id_type pair_c = h2c_create_uia( *this, alice_id, alice_private_key, "E06C" );
    const asset_id_type pair_d = h2c_create_uia( *this, alice_id, alice_private_key, "E06D" );
    const vault_id_type va = h2c_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_a );
+         *this, alice_id, alice_private_key, vault_auth, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair_a );
    const vault_id_type vb = h2c_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_b );
+         *this, alice_id, alice_private_key, vault_auth, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair_b );
    const vault_id_type vc = h2c_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_c );
+         *this, alice_id, alice_private_key, vault_auth, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair_c );
    const vault_id_type vd = h2c_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, share_type( 1000000 ), 100, pair_d );
+         *this, alice_id, alice_private_key, vault_auth, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair_d );
    // A block per deposit (suite duplicate rule): back-to-back identical
    // vesting creates would otherwise collide as duplicate transactions
    // (same ops, expiration, and key); per-deposit blocks also mirror real
    // sub-vault funding cadence.
    generate_block();
    h2c_lock_vault_bond( *this, alice_id, alice_private_key, va,
-         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
-         share_type( 1000000 ), 100 );
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW ),
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    generate_block();
    h2c_lock_vault_bond( *this, alice_id, alice_private_key, vb,
-         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
-         share_type( 1000000 ), 100 );
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW ),
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    generate_block();
    h2c_lock_vault_bond( *this, alice_id, alice_private_key, vc,
-         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
-         share_type( 1000000 ), 100 );
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW ),
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    generate_block();
    h2c_lock_vault_bond( *this, alice_id, alice_private_key, vd,
-         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) ),
-         share_type( 1000000 ), 100 );
+         h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW ),
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    // Pre-created vestings so the second locks land in the timed batch.
    generate_block();
-   const auto vest_a2 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) );
+   const auto vest_a2 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
    generate_block();
-   const auto vest_b2 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000000 ) );
+   const auto vest_b2 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
 
    // Full-size resolve leg on the core pair at 200% cover (stays
    // maintenance-healthy; sustained in setup so the timed resolve fires).
+   // Block first (suite duplicate rule): vest_r below is now identical to
+   // vest_b2 (both full-size), so it needs its own head time.
+   generate_block();
    const vault_id_type vr = h2c_register_vault_default( *this, alice_id, alice_private_key, vault_auth );
    const auto vest_r = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
    h2c_lock_vault_bond( *this, alice_id, alice_private_key, vr, vest_r, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
@@ -589,8 +600,8 @@ BOOST_AUTO_TEST_CASE( e06_h2_worst_case_block_benchmark )
    la.owner           = alice_id;
    la.vault           = va;
    la.vesting_balance = vest_a2;
-   la.bond_amount     = share_type( 1000000 );
-   la.bond_usd_cents  = 100;
+   la.bond_amount     = H2C_VAULT_RAW;
+   la.bond_usd_cents  = H2C_VAULT_USD_CENTS;
    batch.push_back( e06_staged_tx( *this, la, alice_private_key ) );
    vault_bond_lock_operation lb = la;
    lb.vault           = vb;
@@ -702,6 +713,175 @@ BOOST_AUTO_TEST_CASE( htlc_griefing_lock_and_timeout_evidence_posts_challenge )
    BOOST_CHECK_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
 } FC_LOG_AND_RETHROW() }
 
+/// H2-03 vault-lock mirror: a (1 raw, $13,400 face) vault registers (the USD
+/// floor passes), so the 1-satoshi lock below isolates the raw-vs-USD basis
+/// branch (RED: pre-fix it locks).
+BOOST_AUTO_TEST_CASE( vault_bond_lock_raw_shortfall_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth,
+         share_type( 1 ), H2C_VAULT_USD_CENTS );
+   const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, share_type( 1000000 ) );
+   vault_bond_lock_operation op;
+   op.owner           = bob_id;
+   op.vault           = vid;
+   op.vesting_balance = vest;
+   op.bond_amount     = share_type( 1 );
+   op.bond_usd_cents  = H2C_VAULT_USD_CENTS;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( bob_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// H2-05: a $13,400-minus-one-cent min_bond is refused at registration, at
+/// full-size raw (isolates the USD-terms floor, RED: pre-fix `> 0` passes it).
+BOOST_AUTO_TEST_CASE( vault_dust_min_bond_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice) );
+   fund( alice, asset( 30000000000000LL ) );
+
+   vault_register_operation op;
+   op.registrar            = alice_id;
+   op.pair                 = asset_id_type();
+   op.vault_authority      = authority( 1, alice_id, 1 );
+   op.min_bond             = H2C_VAULT_RAW;
+   op.min_bond_usd_cents   = H2C_VAULT_USD_CENTS - 1;
+   op.bond_asset           = asset_id_type();
+   op.secure_ratio_bps     = 20000;
+   op.challenge_window_sec = GRAPHENE_H2_BOND_UNBOND_DELAY_SEC;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( alice_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// H2-06/SUP-05: a bond lock against a non-forward-locked CDD vesting is
+/// refused — both under-duration and already-claimable variants (RED: pre-fix
+/// the lock only checks the CDD type, so both lock).
+BOOST_AUTO_TEST_CASE( vault_cdd_instant_withdraw_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default(
+         *this, alice_id, alice_private_key, vault_auth );
+
+   // Variant 1: zero vesting_seconds (instant, no forward lock).
+   vesting_balance_create_operation vop1;
+   vop1.creator = bob_id;
+   vop1.owner   = bob_id;
+   vop1.amount  = asset( H2C_VAULT_RAW, asset_id_type() );
+   vop1.policy  = cdd_vesting_policy_initializer(
+         0, db.head_block_time() + GRAPHENE_H2_BOND_UNBOND_DELAY_SEC );
+   signed_transaction vtx1;
+   vtx1.operations.push_back( vop1 );
+   db.current_fee_schedule().set_fee( vtx1.operations.back() );
+   set_expiration( db, vtx1 );
+   vtx1.sign( bob_private_key, db.get_chain_id() );
+   const vesting_balance_id_type instant_vest {
+      PUSH_TX( db, vtx1 ).operation_results.front().get<object_id_type>() };
+   generate_block();
+   BOOST_CHECK_THROW( h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid,
+         instant_vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS ), fc::exception );
+
+   // Variant 2: full 7d duration but start_claim already past (claimable now).
+   generate_block();
+   vesting_balance_create_operation vop2;
+   vop2.creator = bob_id;
+   vop2.owner   = bob_id;
+   vop2.amount  = asset( H2C_VAULT_RAW, asset_id_type() );
+   vop2.policy  = cdd_vesting_policy_initializer(
+         GRAPHENE_H2_BOND_UNBOND_DELAY_SEC, db.head_block_time() - 3600 );
+   signed_transaction vtx2;
+   vtx2.operations.push_back( vop2 );
+   db.current_fee_schedule().set_fee( vtx2.operations.back() );
+   set_expiration( db, vtx2 );
+   vtx2.sign( bob_private_key, db.get_chain_id() );
+   const vesting_balance_id_type stale_vest {
+      PUSH_TX( db, vtx2 ).operation_results.front().get<object_id_type>() };
+   generate_block();
+   BOOST_CHECK_THROW( h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid,
+         stale_vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// H2-05/V-03: withdrawing the encumbered vesting balance drains live cover
+/// while the nominal bond object still reads full — maintenance must gate on
+/// the live balance (TOPUP + Recovery suspension), never the nominal record
+/// (RED: pre-fix the nominal sum still reads 200% and stays HEALTHY).
+BOOST_AUTO_TEST_CASE( vault_maintenance_ignores_withdrawn_vesting )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default(
+         *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW / 2 );
+
+   // Accrue past the 7d vest + 7d claim delay so the full balance is
+   // withdrawable, then drain the encumbered vesting in one op (the bond
+   // object is pointer-only: the withdraw succeeds, cover does not).
+   generate_blocks( db.head_block_time() + GRAPHENE_H2_BOND_UNBOND_DELAY_SEC + 3600 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   vesting_balance_withdraw_operation wop;
+   wop.owner           = alice_id;
+   wop.vesting_balance = vest;
+   wop.amount          = asset( H2C_VAULT_RAW, asset_id_type() );
+   signed_transaction wtx;
+   wtx.operations.push_back( wop );
+   db.current_fee_schedule().set_fee( wtx.operations.back() );
+   set_expiration( db, wtx );
+   wtx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, wtx );
+   BOOST_REQUIRE( vest( db ).balance.amount == share_type( 0 ) );
+
+   // Next maintenance: nominal bond still 1.34e12, live cover 0 → TOPUP, and
+   // the Recovery scope (0 / 50%) suspends new debt.
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+   const auto& rec_idx = db.get_index_type<recovery_state_index>().indices();
+   BOOST_REQUIRE( !rec_idx.empty() );
+   BOOST_CHECK_EQUAL( rec_idx.begin()->new_debt_suspended, true );
+   BOOST_CHECK( rec_idx.begin()->last_collateral == share_type( 0 ) );
+} FC_LOG_AND_RETHROW() }
+
 /// 150% maintenance rule: breach halts mints, opens a 36h top-up window, and
 /// expiry at maintenance auto-creates the wind-down and seizes the bonds.
 BOOST_AUTO_TEST_CASE( maintenance_breach_halts_topup_expires_into_winddown )
@@ -800,10 +980,10 @@ BOOST_AUTO_TEST_CASE( winddown_claim_pays_seniors_first_juniors_dilute_no_cross_
    authority sib_auth( 1, bob_id, 1 );
    const vault_id_type sib = h2c_register_vault(
          *this, bob_id, bob_private_key, sib_auth,
-         share_type( 1000 ), uint64_t( 100 ), sib_pair );
-   const auto sib_vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, share_type( 1000 ) );
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, sib_pair );
+   const auto sib_vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
    const vault_bond_id_type sib_bond = h2c_lock_vault_bond(
-         *this, bob_id, bob_private_key, sib, sib_vest, share_type( 1000 ), uint64_t( 100 ) );
+         *this, bob_id, bob_private_key, sib, sib_vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
 
    // Senior claims first at 85%: haircut face binds (fully backed here).
    // Claim faces must fit inside the frozen liabilities (claimed_total can
@@ -1170,32 +1350,33 @@ BOOST_AUTO_TEST_CASE( subvault_bond_cap_64 )
    set_expiration( db, trx );
 
    ACTORS( (alice) );
-   fund( alice, asset( 30000000000000LL ) );
+   // 65 full-size sub-vault bonds: 65 x $13,400 face at the pilot basis.
+   fund( alice, asset( 90000000000000LL ) );
 
    authority vault_auth( 1, alice_id, 1 );
    const vault_id_type vid = h2c_register_vault(
          *this, alice_id, alice_private_key, vault_auth,
-         share_type( 1000 ), uint64_t( 100 ) );
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    for( uint32_t i = 0; i < GRAPHENE_H2_SUBVAULT_CAP; ++i )
    {
       // A block per deposit: back-to-back identical creates would otherwise
       // collide as duplicate transactions (same ops, expiration, and key),
       // and per-deposit blocks mirror real sub-vault funding cadence.
       generate_block();
-      const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000 ) );
+      const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
       h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest,
-                           share_type( 1000 ), uint64_t( 100 ) );
+                           H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    }
    BOOST_CHECK_EQUAL( db.get_index_type<vault_bond_index>().indices().size(), 64u );
    // The 65th vesting needs its own block too, or it duplicates the 64th's.
    generate_block();
-   const auto vest65 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, share_type( 1000 ) );
+   const auto vest65 = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
    vault_bond_lock_operation op;
    op.owner           = alice_id;
    op.vault           = vid;
    op.vesting_balance = vest65;
-   op.bond_amount     = share_type( 1000 );
-   op.bond_usd_cents  = 100;
+   op.bond_amount     = H2C_VAULT_RAW;
+   op.bond_usd_cents  = H2C_VAULT_USD_CENTS;
    signed_transaction tx; tx.operations.push_back( op );
    db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx );

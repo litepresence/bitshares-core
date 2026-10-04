@@ -4,10 +4,12 @@
  * USD-terms-at-lock basis (recorded, not recomputed): every bond and floor below
  * is denominated in USD cents at lock, converted to raw BTS smallest units at the
  * fixed pilot basis of $0.001/BTS (1000 BTS per USD, BTS precision 5, so exactly
- * 1,000,000 raw units per USD cent). A BTS-price move therefore cannot silently
+ * 1,000,000 raw units per USD cent, pinned to
+ * GRAPHENE_H2_USD_BASIS_RAW_PER_CENT by static_assert below). A BTS-price move
+ * therefore cannot silently
  * re-size the economics: the usd_cents record is authoritative and the raw amount
- * is the basis-converted lock. Full USD conversion enforcement against a live
- * bonded-oracle price arrives with the H2d price leg; H2a records the basis.
+ * is the basis-converted lock. The basis floor is ENFORCED at both lock sites
+ * (H2-03): raw short of usd_cents x basis is refused in consensus.
  *
  * Proposals used (BSIP-1 section 7b): vault min_bond $13,400, oracle min_bond
  * $10,050, 7-day unbond, 24h publication advance (inventory OQ-23 was open with
@@ -22,6 +24,7 @@
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/vault_ops.hpp>
 
@@ -34,6 +37,10 @@ namespace {
 
 // $0.001/BTS pilot basis: 1000 BTS per USD at precision 5 => 1e6 raw units per USD cent.
 constexpr int64_t H2_TEST_RAW_PER_USD_CENT = 1000000LL;
+// Pinned to the enforced protocol basis: the suite and consensus can never
+// drift apart silently.
+static_assert( uint64_t( H2_TEST_RAW_PER_USD_CENT ) == GRAPHENE_H2_USD_BASIS_RAW_PER_CENT,
+               "H2 pilot-basis mirror must equal the protocol escrow basis" );
 constexpr uint64_t H2_TEST_VAULT_USD_CENTS = 1340000;   // $13,400 proposal
 constexpr uint64_t H2_TEST_ORACLE_USD_CENTS = 1005000;  // $10,050 proposal
 // Raw locks at the pilot basis (not constexpr: fc::safe has no constexpr ctor).
@@ -325,6 +332,43 @@ BOOST_AUTO_TEST_CASE( publish_advances_producer_unlock )
    h2_publish( *this, oid, bob_id, bob_private_key, 100 );
    const fc::time_point_sec unlock1 = pbid( db ).unlock_time;
    BOOST_CHECK( unlock1 == unlock0 + GRAPHENE_H2_BOND_ADVANCE_SEC );
+} FC_LOG_AND_RETHROW() }
+
+/// H2-03 producer-lock mirror: 1-satoshi raw against the exact $10,050 USD
+/// record locks pre-fix (no raw check exists); the basis floor refuses it.
+BOOST_AUTO_TEST_CASE( oracle_bond_lock_raw_shortfall_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   h2_make_committee_member( *this, alice );
+   const auto bts_ref = h2_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2_make_oracle( *this, alice_id, alice_private_key, "CORE.USD", bts_ref, usd_ref, opts );
+
+   const vesting_balance_id_type vbid =
+         h2_make_cdd_vesting( *this, bob_id, bob_private_key, share_type( 1000000 ) );
+
+   oracle_bond_lock_operation lop;
+   lop.producer        = bob_id;
+   lop.oracle          = oid;
+   lop.vesting_balance = vbid;
+   lop.bond_amount     = share_type( 1 );
+   lop.bond_usd_cents  = H2_TEST_ORACLE_USD_CENTS;
+   signed_transaction ltx;
+   ltx.operations.push_back( lop );
+   db.current_fee_schedule().set_fee( ltx.operations.back() );
+   set_expiration( db, ltx );
+   ltx.sign( bob_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, ltx ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( release_refused_before_unlock_then_allowed )

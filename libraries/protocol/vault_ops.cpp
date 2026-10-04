@@ -35,8 +35,8 @@ void vault_register_operation::validate()const
    FC_ASSERT( min_bond > 0, "Vault min_bond must be positive" );
    FC_ASSERT( min_bond <= GRAPHENE_MAX_SHARE_SUPPLY,
               "Vault min_bond exceeds maximum share supply" );
-   FC_ASSERT( min_bond_usd_cents > 0,
-              "Vault min_bond_usd_cents records the USD-terms basis and must be positive" );
+   FC_ASSERT( min_bond_usd_cents >= GRAPHENE_H2_VAULT_MIN_BOND_USD_CENTS,
+              "vault min bond below $13,400 floor" );
    // BTS-only at genesis (inventory OQ-05 reversible minimum): the basket join
    // rule is a later task's explicit allow-list, never a silent expansion. The
    // evaluator re-checks this against the registered asset; validate pins the

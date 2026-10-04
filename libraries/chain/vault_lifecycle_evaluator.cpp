@@ -103,16 +103,28 @@ bool h2_vault_meets_maintenance( database& d, const vault_object& vault )
 {
    if( vault.outstanding <= share_type( 0 ) )
       return true;
-   share_type bonds( 0 );
+   // Live vesting coverage (H2-05/V-03, mirrors the producer-side predicate
+   // in h2_economics.cpp): a bond counts only while its vesting balance still
+   // holds the encumbered amount in BTS. The bond object is pointer-only, so
+   // a drawn-down vesting must not read as cover here. Seized bonds never
+   // count (unchanged).
+   share_type covered( 0 );
    const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
    const auto range = bond_idx.equal_range( vault_id_type( vault.id ) );
    for( auto itr = range.first; itr != range.second; ++itr )
-      if( !itr->seized )
-         bonds += itr->bond_amount;
-   if( bonds <= share_type( 0 ) )
+   {
+      if( itr->seized )
+         continue;
+      const vesting_balance_object* vb = d.find( itr->vesting_balance );
+      if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+          || vb->balance.amount < itr->bond_amount )
+         continue;
+      covered += itr->bond_amount;
+   }
+   if( covered <= share_type( 0 ) )
       return false;
-   // bonds / outstanding >= 15000 / 10000, cross-multiplied in 128-bit.
-   const fc::uint128_t lhs = fc::uint128_t( uint64_t( bonds.value ) )
+   // covered / outstanding >= 15000 / 10000, cross-multiplied in 128-bit.
+   const fc::uint128_t lhs = fc::uint128_t( uint64_t( covered.value ) )
                            * fc::uint128_t( 10000 );
    const fc::uint128_t rhs = fc::uint128_t( uint64_t( vault.outstanding.value ) )
                            * fc::uint128_t( GRAPHENE_H2_MAINTENANCE_TRIGGER_BPS );

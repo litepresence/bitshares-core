@@ -33,6 +33,9 @@
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
+
+#include <fc/uint128.hpp>
 
 namespace graphene { namespace chain {
 
@@ -145,10 +148,24 @@ void_result vault_bond_lock_evaluator::do_evaluate( const vault_bond_lock_operat
 
    // The lock must equal the registered min_bond exactly, in both the raw and
    // the USD-terms records: a BTS-price move cannot silently re-size the lock.
+   // The raw leg must additionally cover the USD face at the bonded-read
+   // basis (H2-03): equality with a short vault record is refused, never
+   // locked.
    FC_ASSERT( op.bond_amount == vault->min_bond,
               "Bond amount must equal the vault min_bond" );
    FC_ASSERT( op.bond_usd_cents == vault->min_bond_usd_cents,
               "Bond USD-terms record must match the vault min_bond basis" );
+   FC_ASSERT( fc::uint128_t( uint64_t( op.bond_amount.value ) )
+                 >= fc::uint128_t( op.bond_usd_cents )
+                    * fc::uint128_t( GRAPHENE_H2_USD_BASIS_RAW_PER_CENT ),
+              "raw escrow below declared USD face at bonded read" );
+
+   // CDD forward-lock bounds (H2-06/SUP-05): same rule as the producer lock —
+   // the encumbered vesting must be locked 7d+ into the future.
+   const auto& cdd = vesting->policy.get<cdd_vesting_policy>();
+   FC_ASSERT( cdd.vesting_seconds >= GRAPHENE_H2_BOND_UNBOND_DELAY_SEC
+              && cdd.start_claim >= d.head_block_time(),
+              "CDD must be forward-locked 7d+" );
 
    // Sub-vault bound (inventory OQ-10 proposal: 64): per-deposit sub-vaults
    // stay countable on-chain; the 65th lock is refused while the first 64

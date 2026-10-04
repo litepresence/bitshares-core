@@ -30,6 +30,18 @@ namespace graphene { namespace protocol {
 
    /// Challenger/dispute base floor proposal: $837.50 in USD cents (BSIP-1 section 7b).
    constexpr uint64_t GRAPHENE_H2_CHALLENGE_BOND_FLOOR_USD_CENTS = 83750;
+   /**
+    * Raw-vs-USD escrow basis (H2-03/H2-05/H2-06): 1,000,000 raw BTS units per
+    * USD cent. Derivation (BSIP-1 section 6 memo): the H2a pilot basis
+    * $0.001/BTS — 1000 BTS per USD at BTS precision 5 — so one USD cent is
+    * 10 BTS = 10 x 100000 raw units. Enforced at all four lock sites
+    * (challenge, dispute, vault lock, producer lock): raw >= usd_cents x
+    * BASIS, compared in 128-bit. A fail-closed floor, not a live price: a
+    * BTS-price move can only make compliant escrows larger in USD terms, never
+    * let a 1-satoshi escrow claim a full USD face. A live bonded-read
+    * conversion (h2_read_pair_price) may tighten this later, never loosen it.
+    */
+   constexpr uint64_t GRAPHENE_H2_USD_BASIS_RAW_PER_CENT = 1000000;
    /// Finder fee cap proposal: $83.75 in USD cents (BSIP-1 sections 2, 7b).
    constexpr uint64_t GRAPHENE_H2_FINDER_CAP_USD_CENTS = 8375;
    /// Dispute rounds hard cap proposal (inventory section 2.4).

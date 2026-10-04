@@ -31,6 +31,7 @@
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/committee_member.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/fee_schedule.hpp>
 #include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
@@ -61,6 +62,18 @@ static_assert( GRAPHENE_H2_WINDDOWN_RMAX_JUNIOR_X == 2,
 // Suite price: base bond units per quote face unit (100 BTS per face).
 constexpr int64_t H2I_BASE = 100;
 constexpr int64_t H2I_QUOTE = 1;
+
+// Pilot basis ($0.001/BTS: 1e6 raw units per USD cent), pinned to consensus.
+constexpr int64_t H2I_RAW_PER_USD_CENT = 1000000LL;
+static_assert( uint64_t( H2I_RAW_PER_USD_CENT ) == GRAPHENE_H2_USD_BASIS_RAW_PER_CENT,
+               "H2i pilot-basis mirror must equal the protocol escrow basis" );
+constexpr uint64_t H2I_VAULT_USD_CENTS = 1340000;   // $13,400 vault min_bond
+constexpr uint64_t H2I_ORACLE_USD_CENTS = 1005000;  // $10,050 oracle min_bond
+// Full-size locks at the pilot basis (not constexpr: fc::safe has no constexpr ctor).
+const share_type H2I_VAULT_RAW =
+      share_type( int64_t( H2I_VAULT_USD_CENTS ) * H2I_RAW_PER_USD_CENT );    // 1.34e12
+const share_type H2I_ORACLE_RAW =
+      share_type( int64_t( H2I_ORACLE_USD_CENTS ) * H2I_RAW_PER_USD_CENT );  // 1.005e12
 
 void h2i_make_committee_member( database_fixture& f, const account_object& account )
 {
@@ -276,7 +289,7 @@ h2i_door h2i_open_door(
    const oracle_id_type oid = h2i_make_oracle(
          f, alice.get_id(), alice_key, "H2I.USD", bts_ref, usd_ref, opts );
    // Producer bond sized in pilot raw units (weight comes from the entry).
-   const share_type oracle_bond( 1000000000 );
+   const share_type oracle_bond = H2I_ORACLE_RAW;
    const auto vb = h2i_make_cdd_vesting( f, bob.get_id(), bob_key, oracle_bond );
     h2i_lock_producer_bond( f, bob.get_id(), bob_key, oid, vb, oracle_bond,
                             GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS );
@@ -502,11 +515,11 @@ BOOST_AUTO_TEST_CASE( mint_meets_rmin_at_exact_boundary_and_refuses_below )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYBND", "HYBNDF", share_type( 1 ), uint64_t( 1 ) );
+         "HYBND", "HYBNDF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
 
    // One unit below the floor refuses.
    h2i_mint_throws( *this, alice_id, alice_private_key, d,
@@ -562,11 +575,11 @@ BOOST_AUTO_TEST_CASE( mint_net_of_fee_coverage_refuses_gross_covered_requests )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYFEE", "HYFEEF", share_type( 1 ), uint64_t( 1 ) );
+         "HYFEE", "HYFEEF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
 
    // Genesis book at 260%: D=260000/M=1000 (face 2600, surplus 600 -> 600 FXR
    // at genesis parity 1:1 -- asserted below).
@@ -604,11 +617,11 @@ BOOST_AUTO_TEST_CASE( door_cap_holds_second_conversion_until_next_block )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 500000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDOOR", "HYDOORF", share_type( 1 ), uint64_t( 1 ) );
+         "HYDOOR", "HYDOORF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
 
    // Fill the door exactly: D=2e11 (face 2e9), M=1e9 -> 200%, surplus 0.
    h2i_mint( *this, alice_id, alice_private_key, d,
@@ -649,11 +662,11 @@ BOOST_AUTO_TEST_CASE( redeem_above_gate_vests_24h_and_keeps_the_fee )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYRED", "HYREDF", share_type( 1 ), uint64_t( 1 ) );
+         "HYRED", "HYREDF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
 
    // 200% book, no FXR (face 2000 == 2 x 1000: surplus exactly 0).
    h2i_mint( *this, alice_id, alice_private_key, d,
@@ -707,11 +720,11 @@ BOOST_AUTO_TEST_CASE( redeem_refuses_below_gate_but_full_book_exits )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDECL", "HYDECLF", share_type( 1 ), uint64_t( 1 ) );
+         "HYDECL", "HYDECLF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
 
    h2i_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
@@ -748,11 +761,11 @@ BOOST_AUTO_TEST_CASE( dust_redeem_that_pays_nothing_is_refused )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDUST", "HYDUSTF", share_type( 1 ), uint64_t( 1 ) );
+         "HYDUST", "HYDUSTF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
 
    h2i_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
@@ -772,14 +785,14 @@ BOOST_AUTO_TEST_CASE( unbonded_mint_and_reserveless_redeem_refuse )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
    h2i_make_committee_member( *this, alice );
 
    const asset_id_type pair = h2i_create_uia( *this, alice_id, alice_private_key, "HYUNB" );
    const asset_id_type fxr = h2i_create_uia( *this, alice_id, alice_private_key, "HYUNBF" );
    authority vault_auth( 1, alice_id, 1 );
    const vault_id_type vid = h2i_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, share_type( 1 ), uint64_t( 1 ), pair );
+         *this, alice_id, alice_private_key, vault_auth, H2I_VAULT_RAW, H2I_VAULT_USD_CENTS, pair );
    BOOST_REQUIRE( !vid( db ).bound_oracle.valid() );
 
    h2i_door d;
@@ -795,13 +808,14 @@ BOOST_AUTO_TEST_CASE( unbonded_mint_and_reserveless_redeem_refuse )
    BOOST_CHECK( h2i_find_reserve( *this, pair ) == nullptr );
 } FC_LOG_AND_RETHROW() }
 
-/// FXR junior economics end-to-end (unit-exact at price (1,1)): a 400% mint
-/// prices 1e11 FXR at genesis parity; the vault winds down; a senior claims
-/// first (payout 200000); a junior claim past 2x senior-paid refuses under
-/// the REUSED rmax cap; a junior claim inside it burns FXR from the
-/// claimant, the token supply, and the reserve ledger together; a second
-/// senior then settles at the SAME haircut -- junior dilution never deepens
-/// senior settlement (burned FIRST).
+/// FXR junior economics end-to-end (unit-exact at price (1,1)): a 400%
+/// genesis mint prices 1e11 FXR at parity, ten 144% top-ups scale
+/// outstanding to 9.5e11 against the full-size $13,400 vault bond, the vault
+/// winds down; a senior claims first (payout 850000, haircut binds); a junior
+/// claim past 2x senior-paid refuses under the REUSED rmax cap; a junior
+/// claim inside it burns FXR from the claimant, the token supply, and the
+/// reserve ledger together; a second senior then settles at the SAME
+/// haircut -- junior dilution never deepens senior settlement (burned FIRST).
 BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
@@ -809,18 +823,18 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    set_expiration( db, trx );
 
    ACTORS( (alice)(bob)(carol)(dave) );
-   fund( alice, asset( 500000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
    fund( carol, asset( 30000000000LL ) );
    fund( dave, asset( 30000000000LL ) );
 
-   const share_type bond( 10000000000LL ); // $10,000 pilot-basis vault bond
+   const share_type bond = H2I_VAULT_RAW; // $13,400 full-size vault bond
    const h2i_door d = h2i_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYJR", "HYJRF", bond, uint64_t( 10000 ) );
+         "HYJR", "HYJRF", bond, H2I_VAULT_USD_CENTS );
    const auto vest = h2i_make_cdd_vesting( *this, alice_id, alice_private_key, bond );
    h2i_lock_vault_bond( *this, alice_id, alice_private_key, d.vault, vest, bond,
-                        uint64_t( 10000 ) );
+                        H2I_VAULT_USD_CENTS );
 
    // Unit-exact junior accounting from here (republish, then mint).
    h2i_publish( *this, d.oracle, bob_id, bob_private_key, 1, 1 );
@@ -833,8 +847,24 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    BOOST_CHECK( h2i_find_reserve( *this, d.pair )->fxr_supply
                 == share_type( 100000000000LL ) );
 
-   // Breach (1e10/5e10 = 20% < 150%) -> top-up -> wind-down. The price ages
-   // past its 24h lifetime on the way, so republish fresh before claiming.
+   // Scale outstanding past the 150% vault edge: ten 144% top-ups
+   // (D=1.3e11/M=9e10 each, one per block for the shared door counter).
+   // Every leg still admits: the door takes 1.3e11 of 2e11, headroom grows
+   // +1.3e10 per step from 1.35e11, net-of-fee 129.61e9 covers 9e10, and the
+   // post-book never drops below 144% (genesis 400% declining toward the
+   // 144% marginal). No new FXR (144% < 200% target: no surplus).
+   for( int i = 0; i < 10; ++i )
+   {
+      generate_block(); // reset the door counter
+      h2i_mint( *this, alice_id, alice_private_key, d,
+                share_type( 130000000000LL ), share_type( 90000000000LL ) );
+   }
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair )->stable_supply
+                == share_type( 950000000000LL ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 100000000000LL ) );
+
+   // Breach (1.34e12/9.5e11 = 141% < 150%) -> top-up -> wind-down. The price
+   // ages past its 24h lifetime on the way, so republish fresh before claiming.
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
@@ -844,10 +874,11 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    h2i_publish( *this, d.oracle, bob_id, bob_private_key, 1, 1 );
    const winddown_vault_id_type wdid {
       db.get_index_type<winddown_vault_index>().indices().begin()->id };
-   BOOST_REQUIRE( wdid( db ).total_claims == share_type( 50000000000LL ) );
+   BOOST_REQUIRE( wdid( db ).total_claims == share_type( 950000000000LL ) );
    BOOST_REQUIRE( wdid( db ).segregated_bond == bond );
 
-   // Senior first: 1e6 face -> min(850000 haircut leg, 200000 pro-rata).
+   // Senior first: 1e6 face -> min(850000 haircut leg, 1410526 pro-rata).
+   // The full-size bond overcollateralizes the share leg, so the haircut binds.
    const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
    winddown_claim_operation cop;
    cop.claimant     = carol_id;
@@ -860,16 +891,16 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    ctx.sign( carol_private_key, db.get_chain_id() );
    PUSH_TX( db, ctx );
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount
-                == carol_before + share_type( 200000 ) );
-   BOOST_REQUIRE( wdid( db ).senior_paid == share_type( 200000 ) );
+                == carol_before + share_type( 850000 ) );
+   BOOST_REQUIRE( wdid( db ).senior_paid == share_type( 850000 ) );
 
-   // Junior past the reused rmax cap refuses: payout floor(2000005/5) =
-   // 400001 > 2 x 200000 (alice holds 1e11 FXR, so the refusal is the cap,
-   // not her balance).
+   // Junior past the reused rmax cap refuses: haircut payout
+   // floor(2100000 x 8500/10000) = 1785000 > 2 x 850000 (alice holds 1e11
+   // FXR, so the refusal is the cap, not her balance).
    winddown_claim_operation rop;
    rop.claimant     = alice_id;
    rop.winddown     = wdid;
-   rop.claim_amount = share_type( 2000005 );
+   rop.claim_amount = share_type( 2100000 );
    rop.tranche      = GRAPHENE_H2_WINDDOWN_JUNIOR;
    signed_transaction rtx; rtx.operations.push_back( rop );
    db.current_fee_schedule().set_fee( rtx.operations.back() );
@@ -878,7 +909,7 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    BOOST_CHECK_THROW( PUSH_TX( db, rtx ), fc::exception );
 
    // Junior inside the cap burns FIRST: 400000 FXR leaves the claimant, the
-   // token supply, and the reserve ledger together (payout 80000 <= 400000).
+   // token supply, and the reserve ledger together (payout 340000 <= 1700000).
    const share_type alice_fxr_before = db.get_balance( alice_id, d.fxr ).amount;
    winddown_claim_operation jop;
    jop.claimant     = alice_id;
@@ -898,7 +929,7 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
                 == share_type( 100000000000LL - 400000 ) );
 
    // Senior settlement never deepens under junior dilution: dave's 1e6-face
-   // claim pays exactly carol's 200000.
+   // claim pays exactly carol's 850000.
    const share_type dave_before = db.get_balance( dave_id, asset_id_type() ).amount;
    winddown_claim_operation dop;
    dop.claimant     = dave_id;
@@ -911,7 +942,7 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    dtx.sign( dave_private_key, db.get_chain_id() );
    PUSH_TX( db, dtx );
    BOOST_CHECK( db.get_balance( dave_id, asset_id_type() ).amount
-                == dave_before + share_type( 200000 ) );
+                == dave_before + share_type( 850000 ) );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

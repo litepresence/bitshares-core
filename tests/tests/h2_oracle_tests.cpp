@@ -430,6 +430,20 @@ void h2e_set_fallback(
    PUSH_TX( f.db, tx );
 }
 
+/// Far-future consensus expiry for fallback bindings that do not exercise
+/// expiry (rev2 far-future bind precedent in oracle_tests.cpp): strictly
+/// positive so the op validate() gate passes and every refusal below
+/// isolates its named gate (owner / self / series / hardfork leg), never the
+/// expiry default. Far enough out that no test's block advance crosses it.
+price_oracle h2e_fallback_to( database_fixture& f, oracle_id_type backup, uint16_t series )
+{
+   price_oracle fb;
+   fb.oracle_id = backup;
+   fb.series = series;
+   fb.expiry_height = f.db.head_block_num() + 1000000000;
+   return fb;
+}
+
 /// Creates a plain UIA to serve as a vault pair or pool leg.
 asset_id_type h2e_create_uia(
       database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
@@ -490,9 +504,7 @@ BOOST_AUTO_TEST_CASE( h2d_fallback_op_refused_before_the_hardfork )
    oracle_fallback_set_operation op;
    op.owner    = alice_id;
    op.oracle   = oracle_id_type( 0 );
-   price_oracle fb;
-   fb.oracle_id = oracle_id_type( 1 );
-   fb.series    = 0;
+   price_oracle fb = h2e_fallback_to( *this, oracle_id_type( 1 ), 0 );
    op.fallback  = fb;
    signed_transaction tx;
    tx.operations.push_back( op );
@@ -750,7 +762,7 @@ BOOST_AUTO_TEST_CASE( fallback_set_op_auth_and_bounds )
       oracle_fallback_set_operation op;
       op.owner   = bob_id;
       op.oracle  = o1;
-      price_oracle fb; fb.oracle_id = o2; fb.series = 0;
+      price_oracle fb = h2e_fallback_to( *this, o2, 0 );
       op.fallback = fb;
       signed_transaction tx; tx.operations.push_back( op );
       db.current_fee_schedule().set_fee( tx.operations.back() );
@@ -763,7 +775,7 @@ BOOST_AUTO_TEST_CASE( fallback_set_op_auth_and_bounds )
       oracle_fallback_set_operation op;
       op.owner   = alice_id;
       op.oracle  = o1;
-      price_oracle fb; fb.oracle_id = o1; fb.series = 0;
+      price_oracle fb = h2e_fallback_to( *this, o1, 0 );
       op.fallback = fb;
       signed_transaction tx; tx.operations.push_back( op );
       db.current_fee_schedule().set_fee( tx.operations.back() );
@@ -776,7 +788,7 @@ BOOST_AUTO_TEST_CASE( fallback_set_op_auth_and_bounds )
       oracle_fallback_set_operation op;
       op.owner   = alice_id;
       op.oracle  = o1;
-      price_oracle fb; fb.oracle_id = o2; fb.series = 7;
+      price_oracle fb = h2e_fallback_to( *this, o2, 7 );
       op.fallback = fb;
       signed_transaction tx; tx.operations.push_back( op );
       db.current_fee_schedule().set_fee( tx.operations.back() );
@@ -785,7 +797,7 @@ BOOST_AUTO_TEST_CASE( fallback_set_op_auth_and_bounds )
       BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
    }
    // Owner sets, then clears.
-   price_oracle fb; fb.oracle_id = o2; fb.series = 0;
+   price_oracle fb = h2e_fallback_to( *this, o2, 0 );
    h2e_set_fallback( *this, alice_id, alice_private_key, o1, optional<price_oracle>( fb ) );
    BOOST_REQUIRE( h2e_find_guard( *this, o1 ) != nullptr );
    BOOST_CHECK( h2e_find_guard( *this, o1 )->fallback.valid() );
@@ -828,18 +840,19 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    const auto vb2 = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
    h2e_lock_producer_bond( *this, bob_id, bob_private_key, backup, vb2, H2E_ORACLE_RAW,
                            H2E_ORACLE_USD_CENTS );
-   price_oracle fb; fb.oracle_id = backup; fb.series = 0;
+   price_oracle fb = h2e_fallback_to( *this, backup, 0 );
    h2e_set_fallback( *this, alice_id, alice_private_key, primary,
                      optional<price_oracle>( fb ) );
 
-   // Vault with small books: 1e9 bond against 1e9 outstanding breaches 150%.
+   // Vault with full-size books: full bond against full-size outstanding
+   // breaches 150% only past the edge (see the recovery case for the edge).
+   // Here outstanding equals the bond (100%) to force top-up -> wind-down.
    authority vault_auth( 1, alice_id, 1 );
-   const share_type small_bond( 1000000000 );
    const vault_id_type vid = h2e_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, small_bond, uint64_t( 100000 ) );
-   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, small_bond );
-   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, small_bond,
-                        uint64_t( 100000 ) );
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
    // Pin the canonical pair<->oracle binding through the first freeze ...
    h2e_freeze( *this, alice_id, alice_private_key, vid, primary );
    BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
@@ -849,9 +862,10 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
    db.modify( primary( db ), []( oracle_object& o ) { o.options.frozen = false; } );
 
-   // Breach -> top-up -> wind-down: segregated 1e9 BTS against 1e9 face.
+   // Breach -> top-up -> wind-down: segregated full bond against equal
+   // face (100% < 150%), so the share leg pays face verbatim.
    generate_block();
-   h2e_set_outstanding( *this, vid, small_bond );
+   h2e_set_outstanding( *this, vid, H2E_VAULT_RAW );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
@@ -931,36 +945,38 @@ BOOST_AUTO_TEST_CASE( recovery_suspends_new_debt_at_150_scope_then_clears )
    fund( bob, asset( 30000000000000LL ) );
 
    authority vault_auth( 1, alice_id, 1 );
-   const share_type bonds( 1500000000 );
+   const share_type bonds = H2E_VAULT_RAW;
    const vault_id_type vid = h2e_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, bonds, uint64_t( 150000 ) );
+         *this, alice_id, alice_private_key, vault_auth, bonds, H2E_VAULT_USD_CENTS );
    const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, bonds );
    h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, bonds,
-                        uint64_t( 150000 ) );
+                        H2E_VAULT_USD_CENTS );
 
-   // Exactly 150% is healthy (cross-multiplied equality meets).
+   // Exactly 150% is healthy (cross-multiplied equality meets):
+   // floor(1.34e12 x 10000/15000) = 893333333333.
    generate_block();
-   h2e_set_outstanding( *this, vid, share_type( 1000000000 ) );
+   h2e_set_outstanding( *this, vid, share_type( 893333333333LL ) );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    const recovery_state_object* healthy = h2e_find_recovery( *this );
    BOOST_REQUIRE( healthy != nullptr );
    BOOST_CHECK_EQUAL( healthy->new_debt_suspended, false );
 
-   // One unit past the edge: 1500000000/1000000001 < 150% -> Recovery enters.
-   h2e_set_outstanding( *this, vid, share_type( 1000000001 ) );
+   // One unit past the edge: 1340000000000/893333333334 < 150% -> Recovery enters.
+   h2e_set_outstanding( *this, vid, share_type( 893333333334LL ) );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    const recovery_state_object* tripped = h2e_find_recovery( *this );
    BOOST_REQUIRE( tripped != nullptr );
    BOOST_CHECK_EQUAL( tripped->new_debt_suspended, true );
    BOOST_CHECK( tripped->last_collateral == bonds );
-   BOOST_CHECK( tripped->last_debt == share_type( 1000000001 ) );
+   BOOST_CHECK( tripped->last_debt == share_type( 893333333334LL ) );
 
-   // New debt is suspended ...
+   // New debt is suspended (full-size terms, so the refusal isolates the
+   // suspension gate, never the bond floors) ...
    BOOST_CHECK_THROW( h2e_register_vault( *this, bob_id, bob_private_key,
                                           authority( 1, bob_id, 1 ),
-                                          share_type( 1000 ), uint64_t( 100 ) ),
+                                          H2E_VAULT_RAW, H2E_VAULT_USD_CENTS ),
                       fc::exception );
 
      // ... restoration clears it (before the 36h top-up expires: no wind-down).
@@ -968,13 +984,13 @@ BOOST_AUTO_TEST_CASE( recovery_suspends_new_debt_at_150_scope_then_clears )
     // session open, and a direct modify into that session would be rolled back
     // by the next block (pending state rebuilds from pushed transactions only).
      generate_block();
-     h2e_set_outstanding( *this, vid, share_type( 1000000000 ) );
+     h2e_set_outstanding( *this, vid, share_type( 893333333333LL ) );
      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
      generate_block();
      BOOST_CHECK_EQUAL( h2e_find_recovery( *this )->new_debt_suspended, false );
    const vault_id_type vid2 = h2e_register_vault(
          *this, bob_id, bob_private_key, authority( 1, bob_id, 1 ),
-         share_type( 1000 ), uint64_t( 100 ), h2e_create_uia(
+         H2E_VAULT_RAW, H2E_VAULT_USD_CENTS, h2e_create_uia(
                *this, bob_id, bob_private_key, "RECOV2" ) );
    BOOST_CHECK( db.find( vid2 ) != nullptr );
 } FC_LOG_AND_RETHROW() }
@@ -1137,7 +1153,7 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_h2_medians )
    authority vault_auth( 1, alice_id, 1 );
    const vault_id_type lvid = h2e_register_vault(
          *this, alice_id, alice_private_key, vault_auth,
-         share_type( 1000 ), uint64_t( 100 ), lone );
+         H2E_VAULT_RAW, H2E_VAULT_USD_CENTS, lone );
      const asset_id_type lshare = h2e_create_uia( *this, sam_id, sam_private_key, "LSHARE" );
      const liquidity_pool_id_type lpool_id = create_liquidity_pool(
            sam_id, asset_id_type(), lone, lshare, 0, 0 ).get_id();
@@ -1334,12 +1350,12 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
 
    const asset_id_type pairq = h2e_create_uia( *this, alice_id, alice_private_key, "HOLD" );
    authority vault_auth( 1, alice_id, 1 );
-   const share_type small_bond( 1000000000 );
    const vault_id_type vid = h2e_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, small_bond, uint64_t( 100000 ), pairq );
-   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, small_bond );
-   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, small_bond,
-                        uint64_t( 100000 ) );
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS,
+         pairq );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
    oracle_options opts;
    opts.producers[bob_id] = oracle_producer_entry( 1 );
    const oracle_id_type oid =
@@ -1375,7 +1391,7 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
 
    // Wind the vault down (100% coverage breach -> top-up -> expiry).
    generate_block();
-   h2e_set_outstanding( *this, vid, small_bond );
+   h2e_set_outstanding( *this, vid, H2E_VAULT_RAW );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
@@ -1450,12 +1466,12 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
    // the test (binding persists; the freeze was the pin).
    const asset_id_type pairu = h2e_create_uia( *this, alice_id, alice_private_key, "NOBOND" );
    authority vault_auth( 1, alice_id, 1 );
-   const share_type small_bond( 1000000000 );
    const vault_id_type vid = h2e_register_vault(
-         *this, alice_id, alice_private_key, vault_auth, small_bond, uint64_t( 100000 ), pairu );
-   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, small_bond );
-   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, small_bond,
-                        uint64_t( 100000 ) );
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS,
+         pairu );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
    h2e_freeze( *this, alice_id, alice_private_key, vid, oid );
    BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
    generate_block();
@@ -1468,7 +1484,7 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
 
    // Breach -> top-up -> wind-down, then a fresh live publish (still unbonded).
    generate_block();
-   h2e_set_outstanding( *this, vid, small_bond );
+   h2e_set_outstanding( *this, vid, H2E_VAULT_RAW );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );

@@ -60,6 +60,8 @@ constexpr uint64_t H2G_VAULT_USD_CENTS = 1340000; // $13,400 proposal
 constexpr uint64_t H2G_FLOOR_USD_CENTS = 83750;   // $837.50 challenge floor
 const share_type H2G_VAULT_RAW =
       share_type( int64_t( H2G_VAULT_USD_CENTS ) * H2G_RAW_PER_USD_CENT );
+const share_type H2G_ROUND1_RAW =
+      share_type( int64_t( H2G_FLOOR_USD_CENTS ) * H2G_RAW_PER_USD_CENT );
 
 void h2g_make_committee_member( database_fixture& f, const account_object& account )
 {
@@ -162,7 +164,7 @@ vault_challenge_operation h2g_challenge_op(
    vault_challenge_operation op;
    op.challenger               = challenger;
    op.vault                    = vault;
-   op.challenge_bond           = share_type( 1000000 );
+   op.challenge_bond           = H2G_ROUND1_RAW;
    op.challenge_bond_usd_cents = H2G_FLOOR_USD_CENTS;
    op.evidence_memo            = "evidence:staging-window";
    return op;
@@ -472,6 +474,10 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_bonded_custody )
       price_oracle b;
       b.oracle_id = oid;
       b.series    = 0;
+      // Far-future consensus expiry (rev2 precedent): the bind must be valid
+      // for the H1-priced refusal below to isolate the custody gate, never
+      // the expiry default.
+      b.expiry_height = db.head_block_num() + 1000000000;
       bop.new_options.extensions.value.price_oracle_binding = b;
       signed_transaction tx;
       tx.operations.push_back( bop );

@@ -32,6 +32,7 @@
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/committee_member.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/fee_schedule.hpp>
 #include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
@@ -65,6 +66,18 @@ static_assert( true, "band edge pins live in the cases below" );
 // Suite price: base bond units per quote face unit (100 BTS per face).
 constexpr int64_t H2J_BASE = 100;
 constexpr int64_t H2J_QUOTE = 1;
+
+// Pilot basis ($0.001/BTS: 1e6 raw units per USD cent), pinned to consensus.
+constexpr int64_t H2J_RAW_PER_USD_CENT = 1000000LL;
+static_assert( uint64_t( H2J_RAW_PER_USD_CENT ) == GRAPHENE_H2_USD_BASIS_RAW_PER_CENT,
+               "H2j pilot-basis mirror must equal the protocol escrow basis" );
+constexpr uint64_t H2J_VAULT_USD_CENTS = 1340000;   // $13,400 vault min_bond
+constexpr uint64_t H2J_ORACLE_USD_CENTS = 1005000;  // $10,050 oracle min_bond
+// Full-size locks at the pilot basis (not constexpr: fc::safe has no constexpr ctor).
+const share_type H2J_VAULT_RAW =
+      share_type( int64_t( H2J_VAULT_USD_CENTS ) * H2J_RAW_PER_USD_CENT );    // 1.34e12
+const share_type H2J_ORACLE_RAW =
+      share_type( int64_t( H2J_ORACLE_USD_CENTS ) * H2J_RAW_PER_USD_CENT );  // 1.005e12
 
 void h2j_make_committee_member( database_fixture& f, const account_object& account )
 {
@@ -276,7 +289,7 @@ h2j_door h2j_open_door(
    opts.producers[ bob.get_id() ] = oracle_producer_entry( 1 );
    const oracle_id_type oid = h2j_make_oracle(
          f, alice.get_id(), alice_key, "H2J.USD" + tag, bts_ref, usd_ref, opts );
-   const share_type oracle_bond( 1000000000 );
+   const share_type oracle_bond = H2J_ORACLE_RAW;
    const auto vb = h2j_make_cdd_vesting( f, bob.get_id(), bob_key, oracle_bond );
    h2j_lock_producer_bond( f, bob.get_id(), bob_key, oid, vb, oracle_bond,
                            GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS );
@@ -583,11 +596,11 @@ BOOST_AUTO_TEST_CASE( bands_rebalance_on_consumed_moves_with_hysteresis )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYBAND", "HYBANDF", share_type( 1 ), uint64_t( 1 ), "1" );
+         "HYBAND", "HYBANDF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "1" );
 
    // Genesis: whole book in the active band 3, anchored at (100,1).
    // D=700000/M=1000: surplus 6000 face mints 6000 FXR at genesis parity.
@@ -697,7 +710,7 @@ BOOST_AUTO_TEST_CASE( cap_function_three_way_min_with_k1 )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 500000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    // Fixed-ceiling pins (genesis: headroom skipped, no tripwire): the full
    // $2,000 leg admits, one unit past it refuses -- the DOS bound is
@@ -705,7 +718,7 @@ BOOST_AUTO_TEST_CASE( cap_function_three_way_min_with_k1 )
    {
       const h2j_door d0 = h2j_open_door(
             *this, alice, alice_private_key, bob, bob_private_key,
-            "HYCAP0", "HYCAP0F", share_type( 1 ), uint64_t( 1 ), "A" );
+            "HYCAP0", "HYCAP0F", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "A" );
       const auto price = h2_read_pair_price( db, d0.vault( db ), 0, db.head_block_time() );
       BOOST_REQUIRE( price.valid() );
       BOOST_CHECK( h2_issue_door_admits( db, nullptr, d0.pair, *price,
@@ -723,7 +736,7 @@ BOOST_AUTO_TEST_CASE( cap_function_three_way_min_with_k1 )
    // (headroom 100 face = 10000 BTS, leg bound 10000 at k1 = unity).
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYCAP", "HYCAPF", share_type( 1 ), uint64_t( 1 ), "B" );
+         "HYCAP", "HYCAPF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "B" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 140000 ), share_type( 1000 ) );
    generate_block(); // reset the door counter; the headroom leg persists
@@ -749,14 +762,14 @@ BOOST_AUTO_TEST_CASE( cap_function_unqualified_depth_refuses )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 100000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDEEP", "HYDEEPF", share_type( 1 ), uint64_t( 1 ), "C" );
+         "HYDEEP", "HYDEEPF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "C" );
    const h2j_door c = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDEEPC", "HYDEEPCF", share_type( 1 ), uint64_t( 1 ), "D" );
+         "HYDEEPC", "HYDEEPCF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "D" );
 
    // Both books open identically at 200% (D=2e10/M=1e8, inside the fixed
    // door): alice needs 1e7 face for the pool deposit below.
@@ -798,22 +811,22 @@ BOOST_AUTO_TEST_CASE( cap_function_qualified_depth_binds )
    set_expiration( db, trx );
 
    ACTORS( (alice)(bob) );
-   fund( alice, asset( 200000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDEEP2", "HYDEEP2F", share_type( 1000000000LL ), uint64_t( 1000000 ), "E" );
+         "HYDEEP2", "HYDEEP2F", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "E" );
 
    // Deep 200% book (D=4.2e10/M=2.1e8, one block, inside the fixed door).
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 42000000000LL ), share_type( 210000000LL ) );
-   // Vault bond keeps the pair HEALTHY through the maintenance rotation
-   // below (outstanding 2.1e8 needs >= 3.15e8 bonds).
-   const auto vest = h2j_make_cdd_vesting( *this, alice_id, alice_private_key,
-                                           share_type( 1000000000LL ) );
+    // Vault bond keeps the pair HEALTHY through the maintenance rotation
+    // below (full-size lock covers outstanding 2.1e8 many times over).
+    const auto vest = h2j_make_cdd_vesting( *this, alice_id, alice_private_key,
+                                            H2J_VAULT_RAW );
    h2j_lock_vault_bond( *this, alice_id, alice_private_key, d.vault, vest,
-                        share_type( 1000000000LL ), uint64_t( 1000000 ) );
+                        H2J_VAULT_RAW, H2J_VAULT_USD_CENTS );
 
    // Two pools at the feed ratio (100:1), 1e10 BTS + 1e8 face each.
    const asset_id_type lpa = h2j_create_uia( *this, alice_id, alice_private_key, "HYDP2A" );
@@ -884,24 +897,24 @@ BOOST_AUTO_TEST_CASE( offset_pool_absorbs_claims_vest_and_refuse_theft )
    set_expiration( db, trx );
 
    ACTORS( (alice)(bob)(carol)(dave) );
-   fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
    fund( carol, asset( 30000000000LL ) );
    fund( dave, asset( 30000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYOFF", "HYOFFF", share_type( 100000 ), uint64_t( 100000 ), "F" );
+         "HYOFF", "HYOFFF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "F" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
-   // Real vault bond: the pair must stay HEALTHY through the three
-   // maintenance crossings below (outstanding 1000 needs >= 1500 bonds;
-   // otherwise the top-up ladder winds the vault down mid-test).
-   {
-      const auto hoard = h2j_make_cdd_vesting( *this, alice_id, alice_private_key,
-                                              share_type( 100000 ) );
+    // Real vault bond: the pair must stay HEALTHY through the three
+    // maintenance crossings below (full-size lock covers outstanding 1000;
+    // otherwise the top-up ladder winds the vault down mid-test).
+    {
+       const auto hoard = h2j_make_cdd_vesting( *this, alice_id, alice_private_key,
+                                                H2J_VAULT_RAW );
       h2j_lock_vault_bond( *this, alice_id, alice_private_key, d.vault, hoard,
-                           share_type( 100000 ), uint64_t( 100000 ) );
+                           H2J_VAULT_RAW, H2J_VAULT_USD_CENTS );
    }
    generate_block();
 
@@ -990,7 +1003,7 @@ BOOST_AUTO_TEST_CASE( offset_pool_absorbs_claims_vest_and_refuse_theft )
    // No pool, no claim: the reserveless door refuses.
    const h2j_door e = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYOFFE", "HYOFFEF", share_type( 1 ), uint64_t( 1 ), "G" );
+         "HYOFFE", "HYOFFEF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "G" );
    h2j_offset_claim_throws( *this, bob_id, bob_private_key, e, share_type( 1 ) );
 } FC_LOG_AND_RETHROW() }
 
@@ -1005,12 +1018,12 @@ BOOST_AUTO_TEST_CASE( batch_exits_single_haircut_and_exit_fee )
 
    ACTORS( (alice)(bob)(carol) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
    fund( carol, asset( 30000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYEXIT", "HYEXITF", share_type( 1 ), uint64_t( 1 ), "H" );
+         "HYEXIT", "HYEXITF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "H" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 2000000 ), share_type( 10000 ) );
    // Carol holds exit face via a plain transfer (no new economics).
@@ -1058,12 +1071,12 @@ BOOST_AUTO_TEST_CASE( exit_queue_suspends_fxr_mint_until_settled )
    set_expiration( db, trx );
 
    ACTORS( (alice)(bob) );
-   fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
     const h2j_door d = h2j_open_door(
-          *this, alice, alice_private_key, bob, bob_private_key,
-          "HYSUSP", "HYSUSPF", share_type( 2000000 ), uint64_t( 100000 ), "I" );
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSUSP", "HYSUSPF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "I" );
    // 200% book with zero surplus (value 20000 == 2 x 10000): no FXR yet.
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 2000000 ), share_type( 10000 ) );
@@ -1086,15 +1099,15 @@ BOOST_AUTO_TEST_CASE( exit_queue_suspends_fxr_mint_until_settled )
     // ...but senior-only flow still admits (near-par mint prices no FXR).
     h2j_mint( *this, alice_id, alice_private_key, d,
               share_type( 130000 ), share_type( 1000 ) );
-    // Real vault bond: the pair must stay HEALTHY through the maintenance
-    // crossing below (outstanding peaks at 10172, maintenance needs bonds /
-    // outstanding >= 150%; otherwise the sweep freezes the door mid-test
-    // and the post-settle mint refuses on the freeze, not the suspension).
-    {
-       const auto hoard = h2j_make_cdd_vesting( *this, alice_id, alice_private_key,
-                                               share_type( 2000000 ) );
+     // Real vault bond: the pair must stay HEALTHY through the maintenance
+     // crossing below (full-size lock covers the ~10172 peak outstanding;
+     // otherwise the sweep freezes the door mid-test
+     // and the post-settle mint refuses on the freeze, not the suspension).
+     {
+        const auto hoard = h2j_make_cdd_vesting( *this, alice_id, alice_private_key,
+                                                 H2J_VAULT_RAW );
        h2j_lock_vault_bond( *this, alice_id, alice_private_key, d.vault, hoard,
-                            share_type( 2000000 ), uint64_t( 100000 ) );
+                            H2J_VAULT_RAW, H2J_VAULT_USD_CENTS );
     }
 
     // The batch settles (haircut 0, 100-face nets floor(10000x0.98)=9800)
@@ -1116,11 +1129,11 @@ BOOST_AUTO_TEST_CASE( exit_queue_value_cap_suspends_fxr )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 500000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYVAL", "HYVALF", share_type( 1 ), uint64_t( 1 ), "J" );
+         "HYVAL", "HYVALF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "J" );
    // 3.6e11 BTS / 1.8e9 face across three blocks. The headroom leg
    // (k1 = unity) permits geometric scale-up only: each mint fits inside
    // the standing buffer (2e11 genesis, then 7e10 of 7e10 headroom, then
@@ -1156,11 +1169,11 @@ BOOST_AUTO_TEST_CASE( frontrun_attempt_settles_at_batch_haircut )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYFRONT", "HYFRONTF", share_type( 1 ), uint64_t( 1 ), "K" );
+         "HYFRONT", "HYFRONTF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "K" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
    h2j_transfer( *this, alice_id, alice_private_key, bob_id,
@@ -1204,11 +1217,11 @@ BOOST_AUTO_TEST_CASE( halt_reverts_unvested_door_outputs )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYREV", "HYREVF", share_type( 1 ), uint64_t( 1 ), "L" );
+         "HYREV", "HYREVF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "L" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
    // Redeem 500: escrow floor(500x100)-150 = 49850, pending list holds 1.
@@ -1248,11 +1261,11 @@ BOOST_AUTO_TEST_CASE( halt_absorbs_shortfall_from_pool_first )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYABS", "HYABSF", share_type( 1 ), uint64_t( 1 ), "M" );
+         "HYABS", "HYABSF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "M" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
    h2j_offset_deposit( *this, bob_id, bob_private_key, d, share_type( 100000 ) );
@@ -1277,11 +1290,11 @@ BOOST_AUTO_TEST_CASE( halt_absorb_dilute_records_remainder )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYDIL", "HYDILF", share_type( 1 ), uint64_t( 1 ), "N" );
+         "HYDIL", "HYDILF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "N" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
    h2j_offset_deposit( *this, bob_id, bob_private_key, d, share_type( 20000 ) );
@@ -1305,11 +1318,11 @@ BOOST_AUTO_TEST_CASE( halt_stands_settled_positions )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 30000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYSTAND", "HYSTANDF", share_type( 1 ), uint64_t( 1 ), "O" );
+         "HYSTAND", "HYSTANDF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "O" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 200000 ), share_type( 1000 ) );
    generate_block(); // reset the door counter (redeem is a second leg)
@@ -1470,11 +1483,11 @@ BOOST_AUTO_TEST_CASE( depth_median_api_reads_live_tripwire_state )
 
    ACTORS( (alice)(bob) );
    fund( alice, asset( 100000000000LL ) );
-   fund( bob, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
 
    const h2j_door d = h2j_open_door(
          *this, alice, alice_private_key, bob, bob_private_key,
-         "HYAPI", "HYAPIF", share_type( 1 ), uint64_t( 1 ), "G" );
+         "HYAPI", "HYAPIF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "G" );
    h2j_mint( *this, alice_id, alice_private_key, d,
              share_type( 20000000000LL ), share_type( 100000000LL ) );
    generate_block();

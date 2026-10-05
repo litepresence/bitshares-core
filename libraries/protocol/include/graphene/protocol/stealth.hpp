@@ -43,7 +43,13 @@ using fc::ecc::range_proof_type;
  * @{
  */
 
-/// Floor ring size: an 11-member ring is the smallest spend the network relays.
+/// Floor ring size: the smallest ring the VERIFIER accepts (wire/verifier
+/// bound, kept for budget math and golden vectors). It is NOT the consensus
+/// floor: Task 6 (R7 C-01) raised the consensus floor to TARGET (16) in all
+/// non-halted states, deep or thin. MIN-11 is reserved for a future
+/// governance-opened thin-pool emergency only (availability fallback when
+/// the pool cannot form target-size rings); no consensus path accepts it
+/// today, and opening it needs its own audit + hardfork gate, not silence.
 constexpr uint32_t GRAPHENE_STEALTH_RING_MIN = 11;
 /// Target ring size: wallets default here; budgets are measured here and up.
 constexpr uint32_t GRAPHENE_STEALTH_RING_TARGET = 16;
@@ -79,10 +85,17 @@ constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
 /// 11 floor) and no 100-block window may contribute more than 25% (not
 /// 40%). Rationale: a $1 Sybil floods a thin pool cheaply (BSIP-2 admits
 /// the attack); small rings over attacker-majority windows are markings,
-/// not anonymity. Above this depth the floor/40% rules apply.
+/// not anonymity. Task 6 (R7 C-01) extended the TARGET floor to deep pools
+/// as well: 16 is the consensus floor everywhere; the thin regime now only
+/// tightens the skew ceiling, not the size.
 /// Auditors may raise any of these; the pre-G1 audit owns the final values.
 constexpr uint32_t GRAPHENE_STEALTH_THIN_POOL_DEPTH = 64;
 constexpr uint32_t GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT = 25;
+/// Pool-depth warning level (Task 6): per-asset unspent depth below this
+/// raises the thin_pool_warn alarm. ALARM ONLY — never a consensus gate
+/// (no FC_ASSERT on any market, fee, or blind path reads it): availability
+/// degrades visibly before the floor halts it.
+constexpr uint32_t GRAPHENE_STEALTH_POOL_WARN_DEPTH = 22;
 
 /// Proof versions. V1 = Borromean range proofs via the fc backend (legacy
 /// proofs verify forever; no forced migration of existing blind balances).
@@ -90,17 +103,33 @@ constexpr uint32_t GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT = 25;
 constexpr uint8_t GRAPHENE_STEALTH_PROOF_V1 = 1;
 constexpr uint8_t GRAPHENE_STEALTH_PROOF_V2 = 2;
 
+/// Ring-scheme versions (Task 6 migration vehicle, R7 C-10). The proof
+/// version above versions the RANGE proofs and nullifier domains; the ring
+/// SCHEME (signature construction: member statement, response count,
+/// message transcript) needs its own forward-migration slot, because a
+/// future scheme break (or improvement) must be deployable without
+/// re-versioning proofs. 1 = the genesis CLSAG-lineage 3-response scheme
+/// (rb, rv, rd per member + pseudo-output binding, dual V1/V2 linkage).
+/// Consensus accepts ONLY known schemes (fail-closed); a new scheme ships
+/// as a new id + its own verifier + dual-verify/turnstile window, never as
+/// a silent reinterpretation of old rings. No PQC scheme exists: this slot
+/// is agility plumbing (BSIP-2 quantum note), not a PQC promise.
+constexpr uint8_t GRAPHENE_STEALTH_RING_SCHEME_V1 = 1;
+
 /// V1 lifetime after activation (proposal: 365 days). At sunset V1 spends
 /// become spend-only-via-turnstile; turnstile G2 IS this date, fixed at
 /// activation per BSIP-2 §1 (never "next hardfork TBD"). Dual-verify window
 /// = [activation, sunset]: both nullifier sets enforced throughout.
 constexpr uint32_t GRAPHENE_STEALTH_V1_LIFETIME_SEC = 31536000;
 
-/// Committee freeze-backup quorum (proposal): distinct committee-member votes
-/// required to (un)halt blind ops. Named-operator role approximation: any
-/// elected member may vote; votes expire after 48h (proposal).
-constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED = 2;
-constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC = 172800;
+/// Committee freeze-backup quorum (Task 6: proposal): THREE distinct
+/// committee-member votes required to (un)halt blind ops (was 2 — a 2-quorum
+/// lets any two colluding members halt alone; 3 forces a wider conspiracy).
+/// Named-operator role approximation: any elected member may vote; votes
+/// expire after 24h (was 48h — shorter auto-expiry so stale intent cannot
+/// linger into a later crisis; Task 6).
+constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED = 3;
+constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC = 86400;
 
 /// Consensus seeds (embedded in code, test-vector pinned in the audit
 /// report; any library with opaque parameters stays rejected per BSIP-2).
@@ -134,6 +163,14 @@ constexpr uint32_t GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS = 500;
 /// space for transparent/market operations. Each subsidized op consumes one
 /// unit; beyond the cap (or with an empty pool) blind fees float to cost.
 constexpr uint32_t GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK = 50;
+/// Parity attestation quorum (Task 6): TWO distinct committee members must
+/// attest the same kind (review or set-report) for the clocks to move. A
+/// single-member attestation is recorded as pending only — it never resets
+/// a clock alone (a lone reporter could otherwise extend subsidies
+/// indefinitely). Pending attestations expire after 24h (same freshness
+/// philosophy as freeze votes).
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_QUORUM_REQUIRED = 2;
+constexpr uint32_t GRAPHENE_STEALTH_PARITY_ATTEST_EXPIRY_SEC = 86400;
 /// Parity-pricing review cadence (proposal: 6 months = 180 days). Past one
 /// full interval with no recorded review, subsidies stop (cost-mode):
 /// blind fees float to cost by rule, never by surprise. Recording is an
@@ -215,9 +252,14 @@ constexpr uint8_t GRAPHENE_STEALTH_REVIEW_SET_REPORT = 1; ///< quarterly anonymi
  */
 struct stealth_ring_input
 {
-   /// Ring of blind-output commitments (real + decoys), size [11, 32],
-   /// all distinct, all currently unspent. Order is consensus-significant
-   /// (it is the signature's member order).
+   /// Ring of blind-output commitments (real + decoys), consensus size
+   /// [16, 32] (TARGET floor everywhere, thin or deep; the [11, 32] verifier
+   /// bound below still accepts 11-rings as pure crypto, reserved for a
+   /// future governance-opened thin-pool emergency). All distinct, all
+   /// currently UNSPENT (Task 6, R7 C-02: spent flags are chain-visible, so
+   /// a spent member could never be the real input — admitting one would
+   /// shrink the plausible set to the unspent remainder). Order is
+   /// consensus-significant (it is the signature's member order).
    vector<commitment_type> ring;
    /// Key image: 33-byte compressed secp256k1 point, unique per spent
    /// opening per version. Enforced in the nullifier set (both version sets
@@ -239,6 +281,13 @@ struct stealth_ring_input
    /// pseudo-output, same outputs/fee, other version's message and image.
    /// Same size rule as ring_sig (32 + 96*n).
    vector<char>            alt_ring_sig;
+   /// Ring-scheme version (appended-last migration vehicle, R7 C-10): the
+   /// signature construction this ring authorizes under. Only
+   /// GRAPHENE_STEALTH_RING_SCHEME_V1 exists; unknown schemes fail closed
+   /// in validate() AND consensus (a future scheme needs its own id,
+   /// verifier, and dual-verify/turnstile window — never silent
+   /// reinterpretation). Wire-default 1 keeps existing constructions valid.
+   uint8_t                 ring_scheme = GRAPHENE_STEALTH_RING_SCHEME_V1;
 };
 
 /**
@@ -294,16 +343,18 @@ struct stealth_transfer_operation : public base_operation
  * @ingroup g1_stealth
  *
  * The tripwire fires this automatically; the human backup is distinct
- * member votes reaching GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED within the
- * 48h expiry. Freeze and resume are symmetric (same quorum both ways) so
- * no minority can hold the halt hostage and no single key can halt alone.
+ * member votes reaching GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED (3) within
+ * the 24h expiry. Freeze and resume are symmetric (same quorum both ways) so
+ * no minority can hold the halt hostage and no small clique can halt alone.
+ * Resume is additionally refused while any asset's supply-divergence set is
+ * non-empty (per-asset halt scope heals asset-by-asset first).
  */
 struct freeze_blind_operation : public base_operation
 {
    // Zero default fee is deliberate (R7C fee floors): the halt switch must stay
    // callable in emergencies (halt path exists before the proofs do); abuse is
    // bounded because only seated committee members may call and each vote is a
-   // 2-quorum/48h record. Committee may price it nonzero by vote at activation.
+   // 3-quorum/24h record. Committee may price it nonzero by vote at activation.
    struct fee_params_t { uint64_t fee = 0; };
 
    asset                 fee;
@@ -360,12 +411,15 @@ struct turnstile_reproof_operation : public base_operation
  * @brief Committee attestation of a parity review or set report (BSIP-2 §2).
  * @ingroup g1_stealth_parity
  *
- * Single-member attestation (any elected committee member): the heartbeat
- * only PERMITS parity to continue, so a false attestation buys nothing but
- * continued subsidies — unlike freeze_blind, which halts the subsystem and
- * therefore needs a quorum. Lying to governance is vote-punishable, not
- * consensus-punishable. Reviews (kind 0) reset the 6-month cost-mode clock;
- * set reports (kind 1) reset the missed-quarterly counter and resume funding.
+ * Two-member attestation (Task 6 quorum: any two DISTINCT elected committee
+ * members attesting the same kind while both attestations are fresh): the
+ * heartbeat only PERMITS parity to continue, so a false attestation buys
+ * nothing but continued subsidies — unlike freeze_blind, which halts the
+ * subsystem and therefore needs a 3-quorum. A lone attestation is recorded
+ * as pending and moves no clock. Lying to governance is vote-punishable,
+ * not consensus-punishable. Reviews (kind 0) reset the 6-month cost-mode
+ * clock; set reports (kind 1) reset the missed-quarterly counter and resume
+ * funding.
  */
 struct parity_review_operation : public base_operation
 {
@@ -389,7 +443,8 @@ struct parity_review_operation : public base_operation
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::stealth_ring_input,
-            (ring)(key_image)(ring_sig)(pseudo_output)(alt_key_image)(alt_ring_sig) )
+            (ring)(key_image)(ring_sig)(pseudo_output)(alt_key_image)(alt_ring_sig)
+            (ring_scheme) )
 FC_REFLECT( graphene::protocol::stealth_blind_output,
             (commitment)(range_proof)(owner) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation,

@@ -58,8 +58,10 @@ using stealth_nullifier_index = generic_index<stealth_nullifier_object, stealth_
 struct stealth_alarm_snapshot
 {
    /// Known-spend-adjusted effective set per asset: unspent decoy-candidate
-   /// blinded balances (spent-but-retained outputs are already excluded by
-   /// the counter, grandfathered ones never counted).
+   /// blinded balances. Spent-but-retained outputs are EXCLUDED (Task 6:
+   /// the counter decrements on every !spent -> spent ring transition, so
+   /// this is the honest fresh set the floor gate measures — exposed to
+   /// wallets/UIs via database_api::get_stealth_effective_set).
    flat_map<asset_id_type, uint32_t> effective_set;
    /// Worst per-asset interval grant/route ratio, percent (100 when grants
    /// exist with no routed inflow; 0 when neither moved).
@@ -69,13 +71,18 @@ struct stealth_alarm_snapshot
    /// True when the youngest 100-block creation window holds more than 40%
    /// of the retained decoy-eligible pool: new rings WILL skew young, so
    /// availability (the pool floor) is about to bind harder. Heuristic over
-   /// the bounded creation histogram (spent outputs stay retained as decoys,
-   /// so the histogram counts created-eligible, not unspent — documented
-   /// approximation; the floor gate, not this flag, enforces).
+   /// the bounded creation histogram (spent outputs stay retained but
+   /// flagged, so the histogram counts created-eligible, not unspent —
+   /// documented approximation; the floor gate, not this flag, enforces).
    bool                  decoy_skew_warn = false;
    /// True while any fresh committee freeze vote is live or blind ops are
    /// halted: exits through the transparent legs may crowd (BSIP-2 §1).
    bool                  mass_exit_warn = false;
+   /// True while any asset's unspent decoy-candidate pool sits below
+   /// GRAPHENE_STEALTH_POOL_WARN_DEPTH (22): availability is degrading
+   /// toward the floor halt. ALARM ONLY — no consensus path asserts on it
+   /// (never FC_ASSERT in any market, fee, or blind evaluation path).
+   bool                  thin_pool_warn = false;
    /// True when parity_share + recorded H2 diversion exceeds the 70% joint
    /// ceiling (BSIP-1 §7b): signal, not halt — governance must rebalance.
    bool                  joint_cap_breach = false;
@@ -93,6 +100,23 @@ struct stealth_freeze_vote
 };
 
 /**
+ * @brief A pending committee parity attestation (Task 6: parity quorum).
+ * @ingroup object
+ *
+ * Single-member attestations no longer move the clocks: a review/report is
+ * recorded only when two DISTINCT members attest the same kind while both
+ * attestations are fresh (see GRAPHENE_STEALTH_PARITY_*). One pending entry
+ * per member (latest wins); stale entries are pruned on every attestation,
+ * so state stays bounded by committee size.
+ */
+struct stealth_parity_vote
+{
+   account_id_type       voter;
+   uint8_t               kind = 0; ///< REVIEW_PARITY or REVIEW_SET_REPORT
+   fc::time_point_sec    voted_at;
+};
+
+/**
  * @brief Singleton consensus state for the stealth subsystem.
  * @ingroup object
  *
@@ -106,8 +130,10 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
 {
    public:
       /// Fail-closed halt flag: while set, all blind ops (39/40/41/104/106)
-      /// reject in do_evaluate. Set by the tripwire (auto) or the freeze
-      /// quorum (manual backup); cleared by the resume quorum.
+      /// reject in do_evaluate. Set by the freeze 3-quorum (manual backup);
+      /// cleared by the resume 3-quorum with an empty diverged_assets set.
+      /// The supply tripwire no longer flaps this flag (Task 6, SUP-07): it
+      /// records diverged_assets per asset instead.
       bool                  blind_halted = false;
       /// Block number that fired the tripwire (0 = never / manual-only).
       uint32_t              tripwire_fire_block = 0;
@@ -134,12 +160,25 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// creation metadata (decoy candidates; age is ruled per-ring by the
       /// decoy policy, not here). Maintained on insert/spend by the blind
       /// evaluators, post-STEALTH only — this is the O(1) backing of
-      /// stealth_pool_depth (no per-evaluate full-pool scan). Spent-but-
-      /// retained ring inputs stay indexed as future decoys but do NOT
-      /// count here (their real value is gone; the floor guards live
-      /// value). Grandfathered (pre-fork, metadata absent) balances never
-      /// count. Zero entries are removed; flat_map is ORDERED.
+      /// stealth_pool_depth (no per-evaluate full-pool scan). Every
+      /// !spent -> spent ring transition decrements it (Task 6: decoys are
+      /// one-time-use, spent outputs are excluded from future rings), so it
+      /// always equals the fresh set — never the retained-spent set.
+      /// Grandfathered (pre-fork, metadata absent) balances never count.
+      /// Zero entries are removed; flat_map is ORDERED.
       flat_map<asset_id_type, uint32_t> unspent_blind_count;
+      /// Per-asset supply-divergence set (Task 6, SUP-07): assets whose
+      /// evaluator-maintained shadow disagrees with live
+      /// confidential_supply. Blind ops of listed assets halt individually
+      /// (per-asset scope — healthy assets keep moving); the committee
+      /// resume quorum is refused while this set is non-empty. Entries heal
+      /// automatically when reconciliation passes for that asset.
+      /// flat_set is ORDERED (consensus law).
+      flat_set<asset_id_type> diverged_assets;
+      /// Pending single-member parity attestations awaiting a second
+      /// distinct member for the same kind (Task 6 parity quorum). One per
+      /// member; pruned to fresh entries on every attestation. ORDERED.
+      flat_map<account_id_type, stealth_parity_vote> pending_parity_votes;
       // --- G1c parity pool (BSIP-2 §2). All appended-last. ---
       /// Per-asset parity pool balances (fee-share inflow minus granted
       /// subsidies). Zero entries removed; ORDERED flat_map. Part of supply
@@ -207,6 +246,8 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::stealth_nullifier_obje
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::stealth_status_object )
 
 FC_REFLECT( graphene::chain::stealth_freeze_vote, (voter)(freeze)(voted_at) )
+FC_REFLECT( graphene::chain::stealth_parity_vote, (voter)(kind)(voted_at) )
 FC_REFLECT( graphene::chain::stealth_alarm_snapshot,
             (effective_set)(burn_rate_pct)(burn_warn)(burn_critical)
-            (decoy_skew_warn)(mass_exit_warn)(joint_cap_breach) )
+            (decoy_skew_warn)(mass_exit_warn)(joint_cap_breach)
+            (thin_pool_warn) )

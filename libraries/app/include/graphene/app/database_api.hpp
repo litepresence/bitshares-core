@@ -1401,6 +1401,19 @@ class database_api
        */
       vector<blinded_balance_object> get_blinded_balances( const flat_set<commitment_type>& commitments )const;
 
+      /**
+       * @brief per-asset honest decoy depth backing the blind-pool floor
+       * (Task 6, BSIP-2 §1 alarms)
+       *
+       * Live copy of the consensus unspent-decoy-candidate counters
+       * (metadata-bearing unspent blinded balances; spent-but-retained
+       * outputs excluded, grandfathered never counted). Read-only: the same
+       * map the maintenance alarm snapshot carries as effective_set.
+       * Empty pre-activation (or when no asset holds blind balances).
+       * @return map from asset id to fresh-decoy count
+       */
+      flat_map<asset_id_type, uint32_t> get_stealth_effective_set()const;
+
       /////////////////
       // Withdrawals //
       /////////////////
@@ -1673,6 +1686,7 @@ FC_API(graphene::app::database_api,
 
    // Blinded balances
    (get_blinded_balances)
+   (get_stealth_effective_set)
 
    // Withdrawals
    (get_withdraw_permissions_by_giver)

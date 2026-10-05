@@ -1017,15 +1017,17 @@ bool stealth_check_decoy_policy( const std::vector<uint32_t>& heights,
                                   uint32_t pool_depth )
 {
    const size_t n = heights.size();
-   // R-04 thin-pool tightening: a shallow unspent pool is Sybil-floodable
-   // (BSIP-2 admits the $1 attack), so thin rings must be target-sized with
-   // a tighter age spread. Bounds stay exact integer math, no floats.
+   // Task 6 (R7 C-01): TARGET (16) is the consensus floor in ALL non-halted
+   // states — deep or thin. The old deep floor-11 accepted rings an
+   // attacker-majority window could mark; MIN-11 survives only as the
+   // verifier bound (and a future governance-opened thin-pool emergency).
+   // The thin regime (< 64) keeps its tighter age spread (25%, R-04).
+   // Bounds stay exact integer math, no floats.
    const bool thin = ( pool_depth < GRAPHENE_STEALTH_THIN_POOL_DEPTH );
-   const size_t min_n = thin ? GRAPHENE_STEALTH_RING_TARGET
-                             : GRAPHENE_STEALTH_RING_MIN;
+   const size_t min_n = GRAPHENE_STEALTH_RING_TARGET;
    if( n != times.size() || n < min_n ||
        n > GRAPHENE_STEALTH_RING_MAX )
-      { err = thin ? "thin-pool ring below target size" : "decoy set size out of bounds"; return false; }
+      { err = thin ? "thin-pool ring below target size" : "deep-pool ring below target size"; return false; }
    for( size_t i = 0; i < n; ++i )
    {
       if( heights[i] == 0 || heights[i] > head_block )

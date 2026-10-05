@@ -61,6 +61,13 @@ void stealth_transfer_operation::validate()const
        FC_ASSERT( in.alt_key_image.size() == 33, "alt key image must be 33 bytes" );
        FC_ASSERT( in.alt_ring_sig.size() == 32 + 96 * in.ring.size(),
                   "alt ring signature size mismatch" );
+       // Task 6 (R7 C-10): the ring-scheme migration slot. Only the genesis
+       // scheme exists; unknown schemes fail here (relay-side) AND in
+       // consensus (proposal-embedded ops bypass validate — the evaluator
+       // re-checks). A future scheme needs its own id, verifier, and
+       // dual-verify/turnstile window, never silent reinterpretation.
+       FC_ASSERT( in.ring_scheme == GRAPHENE_STEALTH_RING_SCHEME_V1,
+                  "unknown ring scheme" );
       // distinct ring members (duplicate decoys shrink the real set).
       // O(n^2) with n <= 32 is bounded (<=1024 compares); the evaluator
       // re-checks (consensus rule; validate() is relay-side early failure).

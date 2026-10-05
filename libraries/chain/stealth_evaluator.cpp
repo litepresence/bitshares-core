@@ -36,8 +36,11 @@ using protocol::GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT;
 using protocol::GRAPHENE_STEALTH_PARITY_BURN_WARN_PCT;
 using protocol::GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS;
 using protocol::GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK;
+using protocol::GRAPHENE_STEALTH_PARITY_ATTEST_EXPIRY_SEC;
+using protocol::GRAPHENE_STEALTH_PARITY_QUORUM_REQUIRED;
 using protocol::GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC;
 using protocol::GRAPHENE_STEALTH_PARITY_REVIEW_INTERVAL_SEC;
+using protocol::GRAPHENE_STEALTH_POOL_WARN_DEPTH;
 using protocol::GRAPHENE_STEALTH_PROOF_V1;
 using protocol::GRAPHENE_STEALTH_PROOF_V2;
 using protocol::GRAPHENE_STEALTH_REVIEW_PARITY;
@@ -92,6 +95,16 @@ bool stealth_blind_halted( const database& db )
    const auto* s = find_stealth_status( db );
    if( !s ) return false;
    return s->blind_halted;
+}
+
+/// Per-asset halt scope (Task 6, SUP-07): true while the asset's supply
+/// shadow diverges from live confidential_supply. Healthy assets keep
+/// moving while a diverged asset's blind ops fail closed.
+bool stealth_asset_halted( const database& db, asset_id_type asset )
+{
+   const auto* s = find_stealth_status( db );
+   if( !s ) return false;
+   return s->diverged_assets.find( asset ) != s->diverged_assets.end();
 }
 
 uint32_t stealth_tripwire_fire_block( const database& db )
@@ -202,11 +215,16 @@ void stealth_reconcile_supplies( database& db )
    if( !stealth_passed( db ) )
       return;
    stealth_maybe_record_activation( db );
-   // Monero-2018 rule: the independent shadow of confidential_supply must
-   // match the live counter EXACTLY for every asset. Any divergence (direct
-   // state edit or a future op that forgets a counter) engages blind_halted
-   // automatically and records the firing block. Fail-closed: while halted,
-   // every blind op rejects in do_evaluate.
+   // Monero-2018 rule, per-asset scope (Task 6, SUP-07): the independent
+   // shadow of confidential_supply must match the live counter EXACTLY for
+   // every asset. A diverged asset is recorded in diverged_assets (instead
+   // of flapping the global blind_halted flag): blind ops OF THAT ASSET
+   // halt individually, healthy assets keep moving, and the committee
+   // resume quorum is refused while the set is non-empty. Entries heal
+   // automatically when reconciliation passes for that asset (no vote
+   // needed to clear honest bookkeeping); the global halt stays a
+   // committee-only action. Fail-closed: while listed, every blind op of
+   // that asset rejects in do_evaluate.
    //
    // SCOPE (Task 5, GC-08 qualification): this is a COUNTER-level tripwire
    // only. It compares the per-asset confidential_supply counter against its
@@ -218,10 +236,10 @@ void stealth_reconcile_supplies( database& db )
    // matter. Operators must not assume this halt detects value forgery;
    // value soundness rests on the ring/BP+/excess verifiers plus the
    // pre-G1 specialist audit, with this tripwire as the accounting backstop.
-   bool diverged = false;
    const auto& assets = db.get_index_type<asset_index>().indices();
    const auto* s = find_stealth_status( db );
    FC_ASSERT( s != nullptr );
+   flat_set<asset_id_type> still_diverged;
    for( const auto& a : assets )
    {
       const auto& dyn = a.dynamic_asset_data_id( db );
@@ -229,16 +247,16 @@ void stealth_reconcile_supplies( database& db )
       share_type shadow = ( itr == s->blinded_supply_shadow.end() )
                           ? share_type( 0 ) : itr->second;
       if( shadow != dyn.confidential_supply )
-      {
-         diverged = true;
-         break;
-      }
+         still_diverged.insert( a.get_id() );
    }
-   if( diverged )
+   // The recomputed set REPLACES the old one: assets are never deleted, so
+   // the iteration above covers every live asset, and a healed asset drops
+   // out by construction (no separate clear path to forget).
+   if( still_diverged != s->diverged_assets )
    {
       db.modify( *s, [&]( stealth_status_object& o ) {
-         o.blind_halted = true;
-         if( o.tripwire_fire_block == 0 )
+         o.diverged_assets = still_diverged;
+         if( !still_diverged.empty() && o.tripwire_fire_block == 0 )
             o.tripwire_fire_block = db.head_block_num();
       } );
    }
@@ -255,6 +273,18 @@ void stealth_check_blind_gate( const database& db )
    FC_ASSERT( !stealth_blind_halted( db ), "Blind operations are halted (tripwire or committee freeze)" );
    FC_ASSERT( stealth_blind_count_this_block( db ) < GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK,
               "Per-block blind-operation budget exhausted" );
+}
+
+/// Per-asset leg of the blind gate (Task 6, SUP-07): called by every blind
+/// op evaluator with the op's asset right after stealth_check_blind_gate.
+/// Deposits are NOT exempt (a diverged asset's books are untrusted until
+/// reconciliation passes for it — fail-closed both directions).
+void stealth_check_asset_gate( const database& db, asset_id_type asset )
+{
+   if( !stealth_passed( db ) )
+      return;
+   FC_ASSERT( !stealth_asset_halted( db, asset ),
+              "Blind operations of this asset are halted (supply divergence — see diverged_assets)" );
 }
 
 void stealth_count_blind_op( database& db )
@@ -340,8 +370,9 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
 { try {
    const database& d = db();
    FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
-              "Stealth transfers are not allowed until the stealth hardfork" );
+               "Stealth transfers are not allowed until the stealth hardfork" );
    stealth_check_blind_gate( d );
+   stealth_check_asset_gate( d, o.asset_id );
 
    FC_ASSERT( o.fee.asset_id == o.asset_id, "Stealth transfer fee must be paid in the transferred asset" );
    FC_ASSERT( o.fee.amount >= 0 );
@@ -435,6 +466,11 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
       FC_ASSERT( in.ring.size() >= GRAPHENE_STEALTH_RING_MIN &&
                  in.ring.size() <= GRAPHENE_STEALTH_RING_MAX,
                  "Ring size out of bounds" );
+      // Task 6 (R7 C-10): ring-scheme migration slot. Only the genesis
+      // scheme verifies here; unknown schemes fail closed (validate() is
+      // relay-side only — proposal-embedded ops bypass it).
+      FC_ASSERT( in.ring_scheme == protocol::GRAPHENE_STEALTH_RING_SCHEME_V1,
+                 "Unknown ring scheme" );
       FC_ASSERT( in.key_image.size() == 33, "Key image must be 33 bytes" );
       FC_ASSERT( in.ring_sig.size() == 32 + 96 * in.ring.size(), "Ring signature size mismatch" );
       // Consensus mirror of the relay-side alt shape checks (validate() is
@@ -460,6 +496,13 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
          FC_ASSERT( itr != bbi.end(), "Ring member is not a live blinded balance" );
          FC_ASSERT( itr->asset_id == o.asset_id, "Ring member asset mismatch" );
          FC_ASSERT( itr->created_block != 0, "Grandfathered outputs are not decoy-eligible" );
+         // Task 6 (R7 C-02): spent outputs are excluded from ring
+         // membership. The spent flag is chain-visible, so a spent member
+         // could never be the real input — admitting one would shrink the
+         // plausible-real set to the unspent remainder (privacy leak, not
+         // just hygiene). Decoys are one-time-use: every ring member of a
+         // successful spend is spent-flagged in do_apply below.
+         FC_ASSERT( !itr->spent, "Ring member already spent (spent outputs are not decoy-eligible)" );
          heights.push_back( itr->created_block );
          times.push_back( itr->created_time );
       }
@@ -541,8 +584,11 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
    // it by conservation), the evaluator framework debits it after do_apply.
    db().adjust_balance( o.fee_payer(), o.fee );
    // Record nullifiers (double-spend set) and create the new blinded balances
-   // with decoy metadata. The real spent inputs stay in the index (needed as
-   // future decoys); re-spend is blocked by the nullifier set.
+   // with decoy metadata. The real spent inputs stay in the index but are
+   // spent-FLAGGED (Task 6, R7 C-02): spent flags are chain-visible, so
+   // flagged outputs are excluded from future rings AND from the explicit
+   // legs — re-spend is blocked by the nullifier set and the membership
+   // gate alike.
    // Task 5 (M05/GC-07): BOTH version legs are nullified (the opening was
    // authorized under both; either leg alone would leave the other spendable).
    const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
@@ -560,26 +606,39 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
          n.proof_version = alt_version;
          n.created = db().head_block_time();
       } );
-      // Task 5 (M04/V-04): mark every ring member spent. The evaluator cannot
-      // identify the real input without breaking ring privacy, so the whole
-      // anonymity set is consumed: the explicit legs (op40/op41/op85) refuse
-      // spent commitments, closing stealth->legacy re-spend. AVAILABILITY
-      // COST (accepted for the release-blocking inflation close; Task 6 owns
-      // the policy): decoy owners lose the transparent exits for consumed
-      // outputs and must exit via op104 (ring membership stays open to spent
-      // outputs in this task); burying a victim's output as a decoy forces it
-      // onto the private path (funds safe, griefing-scoped). The pool-depth
-      // counter is intentionally untouched here (still counts retained
-      // balances as candidates, matching membership); Task 6 reworks both.
-      const auto& bbi = db().get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-      for( const auto& c : in.ring )
-      {
-         auto itr = bbi.find( c );
-         FC_ASSERT( itr != bbi.end() );
-         if( !itr->spent )
-            db().modify( *itr, []( blinded_balance_object& b ) { b.spent = true; } );
-      }
    }
+    // Task 6 (R7 C-02 + Task 5 concern #1): mark every ring member spent,
+    // and consume each newly-spent member from the pool-depth counter. The
+    // evaluator cannot identify the real input without breaking ring
+    // privacy, so the whole anonymity set is consumed: the explicit legs
+    // (op40/op41/op85) refuse spent commitments, closing stealth->legacy
+    // re-spend, AND future rings refuse them (spent flags are public, so
+    // they could never be plausible-real decoys). AVAILABILITY COST
+    // (accepted): each ring spend consumes ring-size fresh outputs from
+    // the counter — the floor gate then halts spends honestly when the
+    // pool runs thin, instead of overstating fresh depth. The counter is
+    // decremented exactly on the !spent -> spent transition (a member
+    // shared across inputs consumes once), so it always equals the
+    // metadata-bearing unspent set the floor gate means to measure.
+    {
+       const auto& bbi = db().get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+       for( const auto& in : o.inputs )
+       for( const auto& c : in.ring )
+       {
+          auto itr = bbi.find( c );
+          FC_ASSERT( itr != bbi.end() );
+          if( !itr->spent )
+          {
+             db().modify( *itr, []( blinded_balance_object& b ) { b.spent = true; } );
+             // Every ring member is metadata-bearing by the membership rule
+             // in do_evaluate, so every transition leaves the unspent set
+             // (this replaces the old inputs.size() decrement, which
+             // overstated fresh depth by counting retained-spent members
+             // as candidates).
+             stealth_pool_count_add( db(), o.asset_id, -1 );
+          }
+       }
+    }
    for( const auto& out : o.outputs )
    {
       db().create<blinded_balance_object>( [&]( blinded_balance_object& b ) {
@@ -597,10 +656,8 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
       FC_ASSERT( obj.confidential_supply >= 0 );
    } );
    stealth_shadow_add( db(), o.asset_id, share_type( -o.fee.amount.value ) );
-   // Pool floor counter: every real input was metadata-bearing (membership
-   // rule), so inputs.size() balances leave the unspent set; the new
-   // outputs (created with metadata below) join it.
-   stealth_pool_count_add( db(), o.asset_id, -(int32_t)o.inputs.size() );
+   // Pool floor counter: the ring-consumption above already removed every
+   // newly-spent member from the unspent set; only the new outputs join it.
    stealth_pool_count_add( db(), o.asset_id, (int32_t)o.outputs.size() );
    // G1c: settle the parity subsidy (pool debit + issuer credit + cap unit),
    // and count the new outputs in the skew histogram window.
@@ -655,7 +712,15 @@ void_result freeze_blind_evaluator::do_apply( const freeze_blind_operation& o )
       if( n_freeze >= GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED )
          st.blind_halted = true;
       else if( n_resume >= GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED )
-         st.blind_halted = false;
+      {
+         // Task 6 (SUP-07): the resume quorum is refused while any asset's
+         // supply divergence is unresolved — the per-asset halt scope heals
+         // asset-by-asset through reconciliation first. The votes stay
+         // recorded (they are fresh); a later resume attempt after healing
+         // clears without re-voting.
+         if( st.diverged_assets.empty() )
+            st.blind_halted = false;
+      }
    } );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -670,6 +735,7 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
               "Turnstile re-proofs are not allowed until the stealth hardfork" );
    stealth_check_blind_gate( d );
+   stealth_check_asset_gate( d, o.asset_id );
 
    FC_ASSERT( o.fee.asset_id == o.asset_id, "Turnstile fee must be paid in the migrated asset" );
    FC_ASSERT( o.fee.amount >= 0 );
@@ -1187,6 +1253,19 @@ void stealth_parity_maintenance( database& db )
       o.alarms.decoy_skew_warn = ( total > 0 && young * 100 > total * 40 );
       // Effective set: live copy of the decoy-candidate counters.
       o.alarms.effective_set = o.unspent_blind_count;
+      // Thin-pool warning (Task 6): any asset below the warn depth arms it.
+      // ALARM ONLY — nothing in consensus asserts on this flag (the pool
+      // floor gate, not this flag, halts; deposits are never gated by it).
+      {
+         bool thin_warn = false;
+         for( const auto& kv : o.unspent_blind_count )
+            if( kv.second < GRAPHENE_STEALTH_POOL_WARN_DEPTH )
+            {
+               thin_warn = true;
+               break;
+            }
+         o.alarms.thin_pool_warn = thin_warn;
+      }
       // Mass exit: halted, or any fresh freeze vote live (no mutation here).
       bool exit_warn = o.blind_halted;
       if( !exit_warn )
@@ -1204,20 +1283,47 @@ void stealth_parity_maintenance( database& db )
    } );
 }
 
-void stealth_record_parity_review( database& db, uint8_t kind )
+void stealth_record_parity_review( database& db, uint8_t kind, account_id_type voter )
 {
    // G3-04: unknown kinds must never be recorded as parity (the old
    // else-branch did exactly that, with only relay-side validate() gating).
    // Consensus asserts 0/1 here AND in parity_review_evaluator::do_apply so
    // a proposal-embedded op 107 with a bad kind fails closed at apply time.
    FC_ASSERT( kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
-              kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
-              "Unknown parity review kind" );
+               kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
+               "Unknown parity review kind" );
    if( !stealth_passed( db ) )
       return;
    const auto& s = get_or_create_stealth_status( db );
    fc::time_point_sec now = db.head_block_time();
    db.modify( s, [&]( stealth_status_object& o ) {
+      // Task 6 quorum: a lone attestation is recorded as PENDING only.
+      // Prune stale pendings (bounded by committee size), record this one
+      // (latest wins per member), then count DISTINCT fresh members for the
+      // same kind — the clocks move only at quorum (2).
+      flat_map<account_id_type, stealth_parity_vote> kept;
+      for( const auto& kv : o.pending_parity_votes )
+      {
+         uint32_t age = ( now.sec_since_epoch() > kv.second.voted_at.sec_since_epoch() )
+            ? (uint32_t)( now.sec_since_epoch() - kv.second.voted_at.sec_since_epoch() ) : 0;
+         if( age <= GRAPHENE_STEALTH_PARITY_ATTEST_EXPIRY_SEC )
+            kept[ kv.first ] = kv.second;
+      }
+      stealth_parity_vote v;
+      v.voter = voter;
+      v.kind = kind;
+      v.voted_at = now;
+      kept[ voter ] = v;
+      o.pending_parity_votes = kept;
+      uint32_t distinct = 0;
+      for( const auto& kv : kept )
+         if( kv.second.kind == kind )
+            ++distinct;
+      if( distinct < GRAPHENE_STEALTH_PARITY_QUORUM_REQUIRED )
+         return; // single-member attestation: pending, clocks untouched
+      // Quorum reached: move the clock, clear this kind's pendings (they
+      // are spent — a third attestation starts a fresh pending, never a
+      // free second quorum).
       if( kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT )
       {
          o.last_set_report_time = now;
@@ -1229,6 +1335,11 @@ void stealth_record_parity_review( database& db, uint8_t kind )
          o.last_parity_review_time = now;
          o.missed_parity_reviews = 0;
       }
+      flat_map<account_id_type, stealth_parity_vote> rest;
+      for( const auto& kv : kept )
+         if( kv.second.kind != kind )
+            rest[ kv.first ] = kv.second;
+      o.pending_parity_votes = rest;
    } );
 }
 
@@ -1266,9 +1377,9 @@ void_result parity_review_evaluator::do_apply( const parity_review_operation& o 
    // G3-04: kind gate in consensus (validate() runs on relays and is not
    // the consensus boundary for proposal-embedded ops).
    FC_ASSERT( o.kind == GRAPHENE_STEALTH_REVIEW_PARITY ||
-              o.kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
-              "Unknown parity review kind" );
-   stealth_record_parity_review( db(), o.kind );
+               o.kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
+               "Unknown parity review kind" );
+   stealth_record_parity_review( db(), o.kind, o.voter );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 

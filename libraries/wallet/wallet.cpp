@@ -1592,8 +1592,7 @@ blind_confirmation wallet_api::transfer_from_blind( const string& from_blind_acc
    conf.trx.validate();
 
    ilog( "about to broadcast" );
-   if( broadcast )
-      blind_broadcast_delay(); // G1c timing defense (BSIP-2 §1)
+   maybe_delay_blind_broadcast( broadcast ); // Task 6 choke point (BSIP-2 §1)
    conf.trx = sign_transaction( conf.trx, broadcast );
 
    if( broadcast && conf.outputs.size() == 2 ) {
@@ -1663,8 +1662,22 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    auto& to_asset_used_idx = my->_wallet.blind_receipts.get<by_to_asset_used>();
    auto start = to_asset_used_idx.lower_bound( std::make_tuple(from_key,amount.asset_id,false)  );
    auto end = to_asset_used_idx.lower_bound( std::make_tuple(from_key,amount.asset_id,true)  );
+   // Task 6 (BSIP-2 §1): enforce the optional N-block mix hold here, at
+   // spend-input selection (consensus never sees wallet receipt age, so the
+   // wallet is the only place the hold can live). Head height comes from the
+   // node; unknown-age receipts (received_block == 0) are ineligible while
+   // any hold is configured. Off (0) by default: no behavior change.
+   const uint32_t min_mix = my->_blind_defaults.min_mix_blocks;
+   uint32_t head_block = 0;
+   if( min_mix > 0 )
+      head_block = get_dynamic_global_properties().head_block_number;
    while( start != end )
    {
+      if( !blind_receipt_mix_eligible( start->received_block, head_block, min_mix ) )
+      {
+         ++start;
+         continue; // too young (or unknown age): never spendable under a hold
+      }
       auto result = my->_remote_db->get_blinded_balances( {start->commitment() } );
       if( result.size() == 0 )
       {
@@ -1785,8 +1798,7 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    confirm.trx.operations.emplace_back( std::move(blind_tr) );
    ilog( "validate before" );
    confirm.trx.validate();
-   if( broadcast )
-      blind_broadcast_delay(); // G1c timing defense (BSIP-2 §1)
+   maybe_delay_blind_broadcast( broadcast ); // Task 6 choke point (BSIP-2 §1)
    confirm.trx = sign_transaction(confirm.trx, broadcast);
 
    if( broadcast )
@@ -1878,8 +1890,7 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
    confirm.trx.operations.push_back( bop );
    my->set_operation_fees( confirm.trx, my->_remote_db->get_global_properties().parameters.get_current_fees());
    confirm.trx.validate();
-   if( broadcast )
-      blind_broadcast_delay(); // G1c timing defense (BSIP-2 §1)
+   maybe_delay_blind_broadcast( broadcast ); // Task 6 choke point (BSIP-2 §1)
    confirm.trx = sign_transaction(confirm.trx, broadcast);
 
    if( broadcast )
@@ -1965,6 +1976,15 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    // my->_wallet.blinded_balances[memo.amount.asset_id][bal.to].push_back( bal );
 
    result.date = fc::time_point::now();
+   // Task 6 (BSIP-2 §1): record the chain height with the receipt so
+   // min_mix_blocks input selection can enforce an N-block hold. Best
+   // effort: 0 (unknown age) when offline or unreachable — and unknown-age
+   // receipts are ineligible while any hold is configured (fail-closed).
+   try {
+      result.received_block = get_dynamic_global_properties().head_block_number;
+   } catch( const fc::exception& ) {
+      result.received_block = 0;
+   }
    my->_wallet.blind_receipts.insert( result );
    my->_keys[child_pubkey] = key_to_wif( child_priv_key );
 
@@ -2041,6 +2061,15 @@ void wallet_api::blind_broadcast_delay()const
       fc::usleep( fc::seconds( secs ) );
 }
 
+void wallet_api::maybe_delay_blind_broadcast( bool broadcast )const
+{
+   // Task 6 choke point: one call per blind broadcast (including retries —
+   // a retry is a new broadcast). broadcast=false paths (build/sign-only)
+   // never sleep: there is no propagation timing to defend.
+   if( broadcast )
+      blind_broadcast_delay();
+}
+
 void wallet_api::set_blind_sleep_hook( std::function<void(uint32_t)> hook )const
 {
    my->_blind_sleep = std::move( hook );
@@ -2080,6 +2109,10 @@ signed_transaction wallet_api::transfer_default( const string& from,
       FC_ASSERT( to_key != public_key_type(),
                  "unknown blind recipient '${r}': register the blind key/label first, "
                  "or pass transparent_opt_out=true", ("r", to_key_or_account) );
+      // The blind leg below broadcasts through transfer_to_blind, which
+      // invokes the Task-6 delay choke point (maybe_delay_blind_broadcast)
+      // when broadcast=true — this path never bypasses the timing defense,
+      // and never double-delays (the choke lives in transfer_to_blind only).
       blind_confirmation conf = transfer_to_blind( from, asset_symbol,
                                                    {{ to_key_or_account, amount }},
                                                    broadcast );

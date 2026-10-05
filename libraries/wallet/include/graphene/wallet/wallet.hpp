@@ -1007,6 +1007,17 @@ class wallet_api
       void blind_broadcast_delay()const;
 
       /**
+       * Single choke point for the broadcast delay (Task 6): every
+       * blind-sending path (transfer_from_blind, blind_transfer_help,
+       * transfer_to_blind — including the transfer_default blind branch,
+       * which routes through transfer_to_blind) calls this instead of
+       * invoking the sleep directly. Sleeps exactly when broadcast=true
+       * (blind_broadcast_delay honors a 0 setting as an explicit off).
+       * Hook-testable: set_blind_sleep_hook observes every path's delay.
+       */
+      void maybe_delay_blind_broadcast( bool broadcast )const;
+
+      /**
        * G3-05 test hook: replace the sleep behind blind_broadcast_delay
        * with a caller-supplied hook (takes whole seconds). Empty hook
        * restores the real fc::usleep. Session-local, never serialized, no

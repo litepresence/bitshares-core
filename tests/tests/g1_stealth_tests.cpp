@@ -41,10 +41,15 @@
 #include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/stealth_evaluator.hpp>
 #include <graphene/chain/transaction_evaluation_state.hpp>
+#include <graphene/app/database_api.hpp>
 #include <graphene/wallet/wallet.hpp>
 
 #include <fc/crypto/digest.hpp>
 #include <fc/io/raw.hpp>
+#include <fc/reflect/variant.hpp>
+
+#include <algorithm>
+#include <random>
 
 #include <openssl/ec.h>
 #include <openssl/bn.h>
@@ -818,6 +823,92 @@ BOOST_AUTO_TEST_CASE( stealth_ops_are_refused_before_the_hardfork )
    BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
 } FC_CAPTURE_AND_RETHROW() }
 
+// Task 6 (R7 C-10): the ring-scheme migration slot fails closed. An unknown
+// scheme refuses at relay-side validate() AND at the consensus gate
+// (proposal-embedded ops bypass validate — dispatch directly to pin it).
+BOOST_AUTO_TEST_CASE( unknown_ring_scheme_refused )
+{ try {
+   auto make_op = []( uint8_t scheme ) {
+      stealth_transfer_operation op;
+      op.fee = asset( 0, asset_id_type() );
+      op.asset_id = asset_id_type();
+      op.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+      stealth_ring_input in;
+      for( int i = 0; i < 16; ++i )
+      {
+         std::vector<unsigned char> raw( 33, 0 );
+         raw[32] = char( i + 1 );
+         in.ring.push_back( T_commitment( raw ) );
+      }
+      in.key_image.assign( 33, 2 );
+      in.ring_sig.assign( 32 + 96 * 16, 0 );
+      in.alt_key_image.assign( 33, 3 );
+      in.alt_ring_sig.assign( 32 + 96 * 16, 0 );
+      in.pseudo_output = in.ring[0];
+      in.ring_scheme = scheme;
+      op.inputs = { in };
+      // Real V1 output (valid range proof): output checks run before the
+      // per-input scheme gate, so a fake proof would mask the assertion
+      // under test.
+      stealth_blind_output out;
+      auto Bo = T_blind_secret( "t6-scheme-out" );
+      auto No = T_secret( "t6-scheme-nout" );
+      out.commitment = fc::ecc::blind( Bo, 990 );
+      out.range_proof = fc::ecc::range_proof_sign( 0, out.commitment, Bo, No, 0, 0, 990 );
+      auto ok = fc::ecc::private_key::generate();
+      out.owner = authority( 1, public_key_type( ok.get_public_key() ), 1 );
+      op.outputs = { out };
+      return op;
+   };
+   // Relay side: unknown scheme fails validate.
+   {
+      auto bad = make_op( 99 );
+      BOOST_CHECK_THROW( bad.validate(), fc::exception );
+      try { bad.validate(); BOOST_FAIL( "unknown scheme must fail validate" ); }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "ring scheme" ) != std::string::npos,
+                              e.to_detail_string() );
+      }
+      // The genesis scheme passes wire-shape validate (consensus gates
+      // below still refuse the fake members — shape is not soundness).
+      BOOST_CHECK_NO_THROW( make_op( GRAPHENE_STEALTH_RING_SCHEME_V1 ).validate() );
+   }
+   // Consensus side: post-fork direct dispatch (validate bypassed) fails at
+   // the scheme gate — before membership/policy/signature math. The pool
+   // floor is satisfied by direct counter setup, and the fee gate by a
+   // seeded parity pool (test-only surgery isolating the gate under test:
+   // neither depth nor fees are what this pins; both have their own tests).
+   // The scheme assert sits before membership, so fake members never matter.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 5000000 );
+   {
+      const auto& st = db.get_index_type<stealth_status_index>().indices().begin();
+      db.modify( *st, [&]( stealth_status_object& o ) {
+         o.unspent_blind_count[ core.get_id() ] = 16;
+      } );
+   }
+   {
+      transaction_evaluation_state es( &db );
+      try
+      {
+         db.apply_operation( es, operation( make_op( 99 ) ) );
+         BOOST_FAIL( "unknown ring scheme must fail closed in do_evaluate" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Unknown ring scheme" )
+                               != std::string::npos, e.to_detail_string() );
+      }
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( ring_vectors_11_and_16 )
 { try {
    // Golden vectors: fixed scalars, no randomness. The consensus verifier
@@ -1080,26 +1171,33 @@ BOOST_AUTO_TEST_CASE( decoy_rules_enforced )
 
    auto now = db.head_block_time();
    std::string err;
-   // policy unit: 11 members all old, spread over windows -> accept (deep
-   // pool: the R-04 thin rule needs an explicit depth, so deep callers pass
-   // one — 1000 selects the floor-11/40% regime).
+   // policy unit: 16 members all old, spread over windows -> accept (deep
+   // pool: the thin rule needs an explicit depth, so deep callers pass one —
+   // 1000 selects the target-16 floor with the 40% skew regime). Task 6
+   // (R7 C-01): the TARGET floor binds deep too; 11-rings throw everywhere
+   // (see thin_pool_decoy_tightening for the pinned boundaries).
    {
-      std::vector<uint32_t> h = { 1, 150, 300, 450, 600, 750, 900, 1050, 1200, 1350, 1500 };
-      std::vector<fc::time_point_sec> t( 11, now - 90000 );
-      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err, 1000 ), err );
+      std::vector<uint32_t> h;
+      for( uint32_t w : { 10u, 20u, 30u, 40u } )
+         for( uint32_t k = 0; k < 4; ++k )
+            h.push_back( w * 100 + k );
+      std::vector<fc::time_point_sec> t( 16, now - 90000 );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 5000, err, 1000 ), err );
    }
    // one under-age decoy (younger than 24h) -> reject
    {
-      std::vector<uint32_t> h( 11, 1900 );
-      std::vector<fc::time_point_sec> t( 11, now - 90000 );
+      std::vector<uint32_t> h( 16, 1900 );
+      std::vector<fc::time_point_sec> t( 16, now - 90000 );
       t[5] = now - 3600;
       BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err, 1000 ),
                            "under-age decoy must reject" );
    }
-   // skew: 6 of 11 decoys inside one 100-block window (>40%) -> reject
+   // skew: 7 of 16 decoys inside one 100-block window (>40%) -> reject
    {
-      std::vector<uint32_t> h = { 1000, 1001, 1002, 1003, 1004, 1005, 2000, 2100, 2200, 2300, 2400 };
-      std::vector<fc::time_point_sec> t( 11, now - 90000 );
+      std::vector<uint32_t> h = { 1000, 1001, 1002, 1003, 1004, 1005, 1006,
+                                  2000, 2100, 2200, 2300, 2400, 2500,
+                                  2600, 2700, 2800 };
+      std::vector<fc::time_point_sec> t( 16, now - 90000 );
       BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2500, err, 1000 ),
                            "skewed ring must reject" );
    }
@@ -1331,21 +1429,25 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
       BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
       trx.clear();
    }
-    // ...and the new outputs exist as blinded balances.
-    // Corrected G1b-3 (review Findings 4-5): the real spent input is NOT
-    // removed — the evaluator cannot identify it without breaking ring
-    // privacy (and removing all members would steal honest decoys). Spent
-    // inputs stay indexed as future decoys; re-spend is blocked by the
-    // nullifier set (proven by the double-spend rejection above).
-    {
-       const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-       BOOST_CHECK( idx.find( so1.commitment ) != idx.end() );
-       BOOST_CHECK( idx.find( so2.commitment ) != idx.end() );
-       BOOST_CHECK( idx.find( commits[s] ) != idx.end() ); // retained as decoy
-    }
-    // Cached pool counter (review Finding 3): 16 funded, 1 real input
-    // consumed, 2 outputs created -> 17 unspent decoy candidates.
-    BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 17u );
+     // ...and the new outputs exist as blinded balances.
+     // Task 6 (R7 C-02): the real spent input is NOT removed — the evaluator
+     // cannot identify it without breaking ring privacy (and removing all
+     // members would steal honest decoys). Spent inputs stay indexed but are
+     // spent-FLAGGED: re-spend is blocked by the nullifier set (proven by the
+     // double-spend rejection above) AND by the ring-membership exclusion
+     // below, so flagged outputs are never decoy-eligible again.
+     {
+        const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+        BOOST_CHECK( idx.find( so1.commitment ) != idx.end() );
+        BOOST_CHECK( idx.find( so2.commitment ) != idx.end() );
+        BOOST_CHECK( idx.find( commits[s] ) != idx.end() ); // retained (spent-flagged)
+     }
+     // Honest pool counter (Task 6 rework): 16 funded, all 16 ring members
+     // consumed (real input unidentifiable — the whole set is spent-flagged
+     // and excluded from future rings), 2 outputs created -> 2 fresh
+     // decoy candidates. Each ring spend consumes its ring: availability
+     // yields to privacy, and the floor gate (not this counter) enforces it.
+     BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 2u );
     BN_free( bs ); BN_free( bprime );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -1868,13 +1970,53 @@ BOOST_AUTO_TEST_CASE( cross_version_double_spend_rejected )
    generate_block();
    BOOST_REQUIRE_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
    // Same opening, fresh outputs, now versioned V2: the V1 leg already
-   // nullified this opening's alternate image, so consensus must refuse.
+   // nullified this opening's alternate image AND spent-flagged every ring
+   // member (Task 6 exclusion), so consensus must refuse — at the spent
+   // ring-member gate (before the nullifier check). Top the pool back over
+   // the floor first (the honest spend consumed its ring: 16 - 16 + 2), with
+   // cost-path deposits and a direct pool top-up — no time jump, so no
+   // maintenance recomputes burn-critical under the attempt.
+   for( int i = 0; i < 14; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( "t5-xv-top-b|" + std::to_string( i ) );
+      auto N = T_secret( "t5-xv-top-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, 1000 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.fee = core.amount( 1000000 ); // cost path
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      generate_block();
+   }
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+   g1c_seed_pool( db, dan_id, core, 5000000 );
    stealth_transfer_operation v2 = t5_build_spend( core, p, 5,
       GRAPHENE_STEALTH_PROOF_V2, "t5-xv-2", 600, 390, 10 );
-   trx.operations = { v2 };
-   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+    trx.operations = { v2 };
+    try
+    {
+       PUSH_TX( db, trx );
+       BOOST_FAIL( "cross-version same-opening spend must reject" );
+    }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "spent" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
    trx.clear();
-   BOOST_CHECK_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
+   // Supply identity: the refused re-spend moved nothing (the 14 cost-path
+   // top-ups added 14x1000 of live value before it).
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), p.funded_total - 10 + 14 * 1000 );
 } FC_CAPTURE_AND_RETHROW() }
 
 // V-05: the surviving post-sunset path, end to end (V2 rings + BP+ outputs).
@@ -1901,8 +2043,10 @@ BOOST_AUTO_TEST_CASE( v2_stealth_transfer_end_to_end )
    const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
    BOOST_CHECK( idx.find( v2.outputs[0].commitment ) != idx.end() );
    BOOST_CHECK( idx.find( v2.outputs[1].commitment ) != idx.end() );
-   BOOST_CHECK( idx.find( p.commits[5] ) != idx.end() ); // retained as decoy
-   BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 17u );
+    BOOST_CHECK( idx.find( p.commits[5] ) != idx.end() ); // retained (spent-flagged)
+    // Honest pool counter (Task 6 rework): 16 funded, all 16 ring members
+    // consumed, 2 outputs created -> 2 fresh decoy candidates.
+    BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 2u );
    BOOST_CHECK_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -1919,20 +2063,23 @@ BOOST_AUTO_TEST_CASE( v1_stealth_transfer_refused_post_sunset )
    generate_block();
    set_expiration( db, trx );
    // The ~1-year jump lapses the parity review: re-arm the subsidized path
-   // (turnstile_migration precedent) so the sunset gate is what rejects.
-   ACTORS( (alice) );
-   upgrade_to_lifetime_member( alice );
-   create_committee_member( alice );
+   // with a two-member review (Task 6 quorum; turnstile_migration precedent)
+   // so the sunset gate is what rejects.
+   ACTORS( (alice)(bob) );
+   upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
+   create_committee_member( alice ); create_committee_member( bob );
    generate_block();
+   for( auto voter : { std::make_pair( alice.id, alice_private_key ),
+                       std::make_pair( bob.id, bob_private_key ) } )
    {
       parity_review_operation r;
-      r.voter = alice.id;
+      r.voter = voter.first;
       r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
       r.note = "parity review ahead of the sunset refusal check";
       signed_transaction tx; tx.operations.push_back( r );
       db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
-      sign( tx, alice_private_key );
+      sign( tx, voter.second );
       PUSH_TX( db, tx );
    }
    set_expiration( db, trx );
@@ -2264,15 +2411,25 @@ BOOST_AUTO_TEST_CASE( tripwire_fires_on_divergence )
       generate_block();
    }
    BOOST_CHECK( !stealth_blind_halted( db ) );
+   BOOST_CHECK( !stealth_asset_halted( db, core.get_id() ) );
    // Induce divergence exactly like a verifier-bug mint would: bump the
    // aggregate counter without creating spendable outputs.
    db.modify( core.dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
       d.confidential_supply += 1000;
    } );
    stealth_reconcile_supplies( db ); // maintenance-interval reconciliation
-   BOOST_CHECK( stealth_blind_halted( db ) );
+   // Task 6 (SUP-07): per-asset scope — the diverged asset is recorded, the
+   // GLOBAL flag does NOT flap (healthy assets keep moving; committee action
+   // stays committee-only).
+   BOOST_CHECK( !stealth_blind_halted( db ) );
+   BOOST_CHECK( stealth_asset_halted( db, core.get_id() ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.diverged_assets.find( core.get_id() ) != st.diverged_assets.end() );
+   }
    BOOST_CHECK( stealth_tripwire_fire_block( db ) > 0 );
-   // While halted, even honest blind ops reject (fail-closed).
+   // While halted, even honest blind ops of the diverged asset reject
+   // (fail-closed at the per-asset gate, before any fee logic).
    transfer_to_blind_operation ttb;
    ttb.amount = core.amount( 100 );
    ttb.from = dan.id;
@@ -2288,7 +2445,16 @@ BOOST_AUTO_TEST_CASE( tripwire_fires_on_divergence )
    set_expiration( db, trx );
    trx.operations = { ttb };
    sign( trx, dan_private_key );
-   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "diverged-asset blind op must reject at the asset gate" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "halted" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
    trx.clear();
    // Cleanup: repair the intentionally-induced divergence so the fixture
    // teardown's supply verification (which runs after every test) sees a
@@ -2297,6 +2463,136 @@ BOOST_AUTO_TEST_CASE( tripwire_fires_on_divergence )
    db.modify( core.dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
       d.confidential_supply -= 1000;
    } );
+   stealth_reconcile_supplies( db ); // healing: the asset leaves the set
+   BOOST_CHECK( !stealth_asset_halted( db, core.get_id() ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.diverged_assets.empty() );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 6 (SUP-07): per-asset halt scope end to end — a diverged UIA halts
+// while CORE blind ops proceed; the committee resume quorum is refused while
+// the diverged set is non-empty and clears after healing.
+BOOST_AUTO_TEST_CASE( per_asset_halt_scope )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (alice)(bob)(carol)(dan) );
+   upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
+   upgrade_to_lifetime_member( carol ); upgrade_to_lifetime_member( dan );
+   create_committee_member( alice ); create_committee_member( bob );
+   create_committee_member( carol ); create_committee_member( dan );
+   generate_block();
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
+   const asset_object& uia = create_user_issued_asset( "HALTUIA" );
+   const asset_id_type uia_id = uia.get_id();
+   issue_uia( dan, uia.amount( 100000000 ) );
+   generate_block();
+   // Baseline: both assets unhalted.
+   BOOST_CHECK( !stealth_asset_halted( db, core_id ) );
+   BOOST_CHECK( !stealth_asset_halted( db, uia_id ) );
+   BOOST_CHECK( !stealth_blind_halted( db ) );
+   // Diverge the UIA only (bump its blind counter with no backing output).
+   // Test-harness note: the fixture verifies liquid+confidential==current
+   // after every push, so current_supply is bumped alongside — the tripwire
+   // input under test is shadow-vs-confidential only (current is irrelevant
+   // to reconciliation); both bumps are repaired on healing below.
+   db.modify( uia.dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
+      d.confidential_supply += 500;
+      d.current_supply += 500;
+   } );
+   stealth_reconcile_supplies( db );
+   BOOST_CHECK( stealth_asset_halted( db, uia_id ) );
+   BOOST_CHECK( !stealth_asset_halted( db, core_id ) );
+   BOOST_CHECK( !stealth_blind_halted( db ) ); // no global flap
+   // The diverged asset's blind ops reject at the asset gate...
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = uia.amount( 100 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_secret( "t6-halt-uia-b" );
+      auto N = T_secret( "t6-halt-uia-n" );
+      o.commitment = fc::ecc::blind( B, 100 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
+      ttb.blinding_factor = B;
+      ttb.fee = uia.amount( 2000000 ); // generous: the asset gate fires first
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   // ...while the healthy asset's blind ops proceed (per-asset scope).
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 100 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_secret( "t6-halt-core-b" );
+      auto N = T_secret( "t6-halt-core-n" );
+      o.commitment = fc::ecc::blind( B, 100 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
+      ttb.blinding_factor = B;
+      ttb.fee = core.amount( 1000000 ); // cost path
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      trx.clear_signatures(); trx.operations.clear();
+      generate_block();
+   }
+   // A full 3-member resume quorum is REFUSED while the set is non-empty:
+   // the test engages the global halt first (freeze quorum), then resumes.
+   auto cast_freeze = [&]( const account_object& who, const private_key_type& key, bool freeze ) {
+      freeze_blind_operation fz;
+      fz.voter = who.id; fz.freeze = freeze; fz.reason = "scope test";
+      signed_transaction tx; tx.operations.push_back( fz );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, key );
+      PUSH_TX( db, tx );
+   };
+   cast_freeze( alice, alice_private_key, true );
+   cast_freeze( bob, bob_private_key, true );
+   cast_freeze( carol, carol_private_key, true );
+   BOOST_REQUIRE( stealth_blind_halted( db ) );
+   cast_freeze( alice, alice_private_key, false );
+   cast_freeze( bob, bob_private_key, false );
+   cast_freeze( carol, carol_private_key, false );
+   BOOST_CHECK( stealth_blind_halted( db ) ); // refused: UIA still diverged
+   // Heal the UIA: repair both bumps + reconcile drops it from the set.
+   // Ordering law (fixture undo sessions): no generate_block may intervene
+   // between a direct db.modify and the quorum re-evaluation below — block
+   // production resets the pending undo session and would roll the heal back
+   // while replaying only pushed transactions. Same-block pushes re-evaluate
+   // immediately, so the fresh fourth member (dan never voted: no duplicate
+   // hazard) re-triggers the quorum on the healed state directly.
+   db.modify( uia.dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
+      d.confidential_supply -= 500;
+      d.current_supply -= 500;
+   } );
+   stealth_reconcile_supplies( db );
+   BOOST_CHECK( !stealth_asset_halted( db, uia_id ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.diverged_assets.empty() );
+   }
+   // The same quorum that was refused while diverged now clears the halt.
+   cast_freeze( dan, dan_private_key, false );
+   BOOST_CHECK( !stealth_blind_halted( db ) );
+   verify_asset_supplies( db );
+   generate_block();
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( freeze_blind_committee_backup )
@@ -2304,39 +2600,34 @@ BOOST_AUTO_TEST_CASE( freeze_blind_committee_backup )
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
-   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED, 2u );
-   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC, 172800u );
-   ACTORS( (alice)(bob)(dan) );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED, 3u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC, 86400u );
+   ACTORS( (alice)(bob)(carol)(dan) );
    upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
+   upgrade_to_lifetime_member( carol );
    create_committee_member( alice ); create_committee_member( bob );
+   create_committee_member( carol );
    generate_block();
    BOOST_CHECK( !stealth_blind_halted( db ) );
+   auto cast_vote = [&]( const account_object& who, const private_key_type& key, bool freeze ) {
+      freeze_blind_operation fz;
+      fz.voter = who.id; fz.freeze = freeze; fz.reason = "quorum test";
+      signed_transaction tx; tx.operations.push_back( fz );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, key );
+      PUSH_TX( db, tx );
+   };
    // One vote is not enough.
-   {
-      freeze_blind_operation fz;
-      fz.voter = alice.id;
-      fz.freeze = true;
-      fz.reason = "suspected verifier anomaly";
-      signed_transaction tx; tx.operations.push_back( fz );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      sign( tx, alice_private_key );
-      PUSH_TX( db, tx );
-      BOOST_CHECK( !stealth_blind_halted( db ) );
-   }
-   // Second distinct member vote engages the halt.
-   {
-      freeze_blind_operation fz;
-      fz.voter = bob.id;
-      fz.freeze = true;
-      fz.reason = "confirming alice";
-      signed_transaction tx; tx.operations.push_back( fz );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      sign( tx, bob_private_key );
-      PUSH_TX( db, tx );
-      BOOST_CHECK( stealth_blind_halted( db ) );
-   }
+   cast_vote( alice, alice_private_key, true );
+   BOOST_CHECK( !stealth_blind_halted( db ) );
+   // Two votes are not enough either (Task 6: 2-vote freeze now refused —
+   // any two colluding members could halt alone under the old quorum).
+   cast_vote( bob, bob_private_key, true );
+   BOOST_CHECK( !stealth_blind_halted( db ) );
+   // Third distinct member vote engages the halt.
+   cast_vote( carol, carol_private_key, true );
+   BOOST_CHECK( stealth_blind_halted( db ) );
    // Non-member votes never count.
    {
       freeze_blind_operation fz;
@@ -2349,25 +2640,14 @@ BOOST_AUTO_TEST_CASE( freeze_blind_committee_backup )
       sign( tx, dan_private_key );
       BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
    }
-   // Two resume votes lift the halt (one is not enough).
-   {
-      freeze_blind_operation fz;
-      fz.voter = alice.id; fz.freeze = false; fz.reason = "all clear";
-      signed_transaction tx; tx.operations.push_back( fz );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      sign( tx, alice_private_key );
-      PUSH_TX( db, tx );
-      BOOST_CHECK( stealth_blind_halted( db ) );
-      fz.voter = bob.id;
-      signed_transaction tx2; tx2.operations.push_back( fz );
-      db.current_fee_schedule().set_fee( tx2.operations.back() );
-      set_expiration( db, tx2 );
-      sign( tx2, bob_private_key );
-      PUSH_TX( db, tx2 );
-      BOOST_CHECK( !stealth_blind_halted( db ) );
-   }
-   // Vote freshness boundary (pure function): 48h fresh, 48h+1 stale.
+   // Three resume votes lift the halt (one or two are not enough).
+   cast_vote( alice, alice_private_key, false );
+   BOOST_CHECK( stealth_blind_halted( db ) );
+   cast_vote( bob, bob_private_key, false );
+   BOOST_CHECK( stealth_blind_halted( db ) );
+   cast_vote( carol, carol_private_key, false );
+   BOOST_CHECK( !stealth_blind_halted( db ) );
+   // Vote freshness boundary (pure function): 24h fresh, 24h+1 stale.
    {
       auto now = db.head_block_time();
       BOOST_CHECK( stealth_vote_fresh( now, now ) );
@@ -2431,24 +2711,26 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
    generate_block();
    set_expiration( db, trx );
    // G1c parity economics (BSIP-2 §2): the ~1-year jump lapses the 6-month
-   // parity review, so subsidies float to cost by rule. A single-member
-   // committee review re-arms the pool-funded path the migration below
-   // exercises (missed quarterly reports halt funding only — the pre-seeded
-   // pool keeps paying). The legacy-spend rejection above needs no subsidy:
-   // the sunset gate throws before any fee logic.
-   ACTORS( (alice) );
-   upgrade_to_lifetime_member( alice );
-   create_committee_member( alice );
+   // parity review, so subsidies float to cost by rule. A two-member
+   // committee review (Task 6 quorum) re-arms the pool-funded path the
+   // migration below exercises (missed quarterly reports halt funding only
+   // — the pre-seeded pool keeps paying). The legacy-spend rejection above
+   // needs no subsidy: the sunset gate throws before any fee logic.
+   ACTORS( (alice)(bob) );
+   upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
+   create_committee_member( alice ); create_committee_member( bob );
    generate_block();
+   for( auto voter : { std::make_pair( alice.id, alice_private_key ),
+                       std::make_pair( bob.id, bob_private_key ) } )
    {
       parity_review_operation r;
-      r.voter = alice.id;
+      r.voter = voter.first;
       r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
       r.note = "parity review ahead of turnstile migration window";
       signed_transaction tx; tx.operations.push_back( r );
       db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
-      sign( tx, alice_private_key );
+      sign( tx, voter.second );
       PUSH_TX( db, tx );
    }
    set_expiration( db, trx );
@@ -3051,19 +3333,32 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
    // Cost-mode with a FUNDED pool: the missed review alone floats to cost.
    withdraw( 0, 490000, false );
    withdraw( 1, 500000, true );
-   // Record the parity review (single-member attestation re-arms subsidies).
-   {
+   // Task 6 quorum: one member's review is recorded as PENDING only and
+   // moves no clock (single-member parity reset refused).
+   auto cast_review = [&]( const account_object& who, const private_key_type& key, uint8_t kind ) {
       parity_review_operation r;
-      r.voter = alice.id;
-      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
-      r.note = "6-month parity review: schedules reaffirmed";
+      r.voter = who.id;
+      r.kind = kind;
+      r.note = "quorum test attestation";
       signed_transaction tx; tx.operations.push_back( r );
       db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
-      sign( tx, alice_private_key );
+      sign( tx, key );
       PUSH_TX( db, tx );
+   };
+   cast_review( alice, alice_private_key, GRAPHENE_STEALTH_REVIEW_PARITY );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.missed_parity_reviews, 1u ); // lone vote: pending only
+      BOOST_CHECK_EQUAL( st.pending_parity_votes.size(), 1u );
+   }
+   withdraw( 0, 490000, false ); // still cost-mode: no quorum yet
+   // Second DISTINCT member for the same kind reaches quorum: the clock moves.
+   cast_review( bob, bob_private_key, GRAPHENE_STEALTH_REVIEW_PARITY );
+   {
       const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
       BOOST_CHECK_EQUAL( st.missed_parity_reviews, 0u );
+      BOOST_CHECK( st.pending_parity_votes.empty() ); // quorum spends its pendings
    }
    withdraw( 2, 490000, true );
    {
@@ -3081,17 +3376,16 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
                          ( acc0 + 100000 ).value );
    }
    verify_asset_supplies( db );
-   // Record the set report: funding resumes.
+   // Record the set report: a lone report is pending-only...
+   cast_review( bob, bob_private_key, GRAPHENE_STEALTH_REVIEW_SET_REPORT );
    {
-      parity_review_operation r;
-      r.voter = bob.id;
-      r.kind = GRAPHENE_STEALTH_REVIEW_SET_REPORT;
-      r.note = "quarterly anonymity-set report published";
-      signed_transaction tx; tx.operations.push_back( r );
-      db.current_fee_schedule().set_fee( tx.operations.back() );
-      set_expiration( db, tx );
-      sign( tx, bob_private_key );
-      PUSH_TX( db, tx );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.parity_funding_halted ); // still halted: no quorum yet
+      BOOST_CHECK_EQUAL( st.missed_set_reports, 2u );
+   }
+   // ...the second distinct member resumes funding.
+   cast_review( alice, alice_private_key, GRAPHENE_STEALTH_REVIEW_SET_REPORT );
+   {
       const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
       BOOST_CHECK( !st.parity_funding_halted );
       BOOST_CHECK_EQUAL( st.missed_set_reports, 0u );
@@ -3340,15 +3634,31 @@ BOOST_AUTO_TEST_CASE( thin_pool_decoy_tightening )
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT, 25u );
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_RING_TARGET, 16u );
 
-   auto now = db.head_block_time();
-   std::string err;
-   // Deep pool (>= 64): the floor-11 / 40%-skew regime is unchanged.
-   {
-      std::vector<uint32_t> h = { 1, 150, 300, 450, 600, 750, 900, 1050, 1200, 1350, 1500 };
-      std::vector<fc::time_point_sec> t( 11, now - 90000 );
-      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err, 64 ), err );
-      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 2000, err, 1000000 ), err );
-   }
+    auto now = db.head_block_time();
+    std::string err;
+    // Deep pool (>= 64): the TARGET-16 floor binds here too (Task 6, R7
+    // C-01): an 11-ring is below the floor even with a perfect age spread.
+    // MIN-11 is reserved for a future governance-opened thin-pool emergency,
+    // never the normal path — so spread-compliant 11-rings throw deep.
+    {
+       std::vector<uint32_t> h = { 1, 150, 300, 450, 600, 750, 900, 1050, 1200, 1350, 1500 };
+       std::vector<fc::time_point_sec> t( 11, now - 90000 );
+       BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err, 64 ),
+                            "deep 11-ring must reject (floor is target-16)" );
+       BOOST_CHECK_MESSAGE( err.find( "target size" ) != std::string::npos, err );
+       BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 2000, err, 1000000 ),
+                            "deep 11-ring must reject at any depth >= 64" );
+    }
+    // Deep pool (>= 64): a 16-ring with a 40%-compliant spread passes.
+    {
+       std::vector<uint32_t> h;
+       for( uint32_t w : { 10u, 20u, 30u, 40u } )
+          for( uint32_t k = 0; k < 4; ++k )
+             h.push_back( w * 100 + k );
+       std::vector<fc::time_point_sec> t( 16, now - 90000 );
+       BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 5000, err, 64 ), err );
+       BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( h, t, now, 5000, err, 1000000 ), err );
+    }
    // Thin pool (< 64): the same spread-compliant 11-ring now rejects —
    // it is below the target size (availability yields to privacy).
    {
@@ -3465,6 +3775,224 @@ BOOST_AUTO_TEST_CASE( thin_pool_decoy_tightening )
    trx.clear();
    // The thin-pool-16 ACCEPT case at op level is stealth_transfer_happy_path
    // (depth 16 < 64, target-size ring, 4x4 windows at exactly 25%).
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 6 (R7 C-02): spent outputs are excluded from ring membership. A ring
+// that reuses even one spent-flagged output refuses at the membership gate —
+// spent flags are chain-visible, so admitting spent members would shrink the
+// plausible-real set to the unspent remainder (privacy leak, not just hygiene).
+BOOST_AUTO_TEST_CASE( spent_ring_member_excluded )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t6-spent", 16, true );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+   // Honest spend consumes the whole 16-ring (Task 6 accounting: 16 - 16 + 2).
+   stealth_transfer_operation first = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t6-spent-1", 600, 390, 10 );
+   trx.operations = { first };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 2u );
+   // Top the pool back over the floor with fresh cost-path deposits (fee 1M
+   // = the n=1 anchor: no subsidy involvement either way). No time jump:
+   // the spent-membership gate fires before any age/policy math, and jumping
+   // would cross a maintenance that recomputes burn-critical from the
+   // spend's interval flow and block the attempt at the fee gate instead.
+   for( int i = 0; i < 16; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( "t6-spent-top-b|" + std::to_string( i ) );
+      auto N = T_secret( "t6-spent-top-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, 1000 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.fee = core.amount( 1000000 ); // cost path: keep the parity pool whole
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      generate_block();
+   }
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
+   // Re-arm the subsidy path deterministically (direct pool top-up: no blocks,
+   // no maintenance, no burn recompute) so the attempt below reaches the
+   // spent-membership gate instead of the fee gate.
+   g1c_seed_pool( db, dan_id, core, 5000000 );
+   // Second spend reusing one spent member (first in the ring, so the
+   // membership loop meets it before any policy math) must refuse there.
+   stealth_transfer_operation second = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t6-spent-2", 600, 390, 10 );
+   trx.operations = { second };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "ring reusing a spent member must reject" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "spent" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
+   trx.clear();
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 6: pool-depth < 22 raises a WARNING alarm (flags only — never a market
+// or blind-path assert), and the effective set is queryable via database_api.
+BOOST_AUTO_TEST_CASE( thin_pool_warn_flag_and_effective_set_api )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 100000000 ) );
+   generate_block();
+   auto deposit_one = [&]( int i ) {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( "t6-warn-b|" + std::to_string( i ) );
+      auto N = T_secret( "t6-warn-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, 1000 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.fee = core.amount( 1000000 ); // cost path: no subsidy involvement
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+   };
+   for( int i = 0; i < 16; ++i ) deposit_one( i );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 16u );
+   stealth_parity_maintenance( db );
+   // 16 < 22: the warning alarm is set, but nothing halts on it.
+   BOOST_CHECK( stealth_current_alarms( db ).thin_pool_warn );
+   // Flags only: deposits (which grow the pool) still clear while warned.
+   BOOST_CHECK_NO_THROW( deposit_one( 100 ) );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 17u );
+   // The effective set is exposed to wallets/UIs through database_api.
+   {
+      graphene::app::database_api db_api( db );
+      flat_map<asset_id_type, uint32_t> eff = db_api.get_stealth_effective_set();
+      auto eitr = eff.find( core_id );
+      BOOST_REQUIRE( eitr != eff.end() );
+      BOOST_CHECK_EQUAL( eitr->second, 17u );
+   }
+   // At/above 22 the warning clears.
+   for( int i = 0; i < 8; ++i ) deposit_one( 200 + i );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 25u );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( !stealth_current_alarms( db ).thin_pool_warn );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 6: ring-sampler rule conformance (BLIND_DEFAULTS_CONTRACT.md §5).
+// The test-side sampler implements the documented normative rule verbatim:
+// uniform-without-replacement over eligible (aged) candidates, TARGET-16
+// size, the depth-appropriate skew cap, bounded retries. Compliant samples
+// must ACCEPT against consensus policy; rule violations (clustered windows,
+// young members) must REJECT — proving the documented rule and the
+// consensus gate agree.
+BOOST_AUTO_TEST_CASE( ring_sampler_rule_conformance )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   auto now = db.head_block_time();
+   // Synthetic eligible pool: 100 candidates, 10 per 100-block window over
+   // 10 windows, all older than 24h (metadata-bearing by construction here;
+   // the metadata/spent gates are op-level, pinned by their own tests).
+   std::vector<uint32_t> pool_h;
+   for( uint32_t w = 0; w < 10; ++w )
+      for( uint32_t k = 0; k < 10; ++k )
+         pool_h.push_back( 1000 + w * 100 + k );
+   std::vector<fc::time_point_sec> pool_t( pool_h.size(), now - 90000 );
+   // Sampler: uniform without replacement (deterministic seed: the rule, not
+   // the entropy, is under test), TARGET-16 size, skew cap checked per draw
+   // with bounded retries (never ship a skewed ring silently).
+   auto sample_compliant = [&]( uint32_t depth, uint32_t seed ) {
+      std::vector<uint32_t> h;
+      std::vector<fc::time_point_sec> t;
+      std::mt19937 rng( seed );
+      for( int attempt = 0; attempt < 50 && h.size() < 16; ++attempt )
+      {
+         std::vector<size_t> idx( pool_h.size() );
+         for( size_t i = 0; i < idx.size(); ++i ) idx[i] = i;
+         std::shuffle( idx.begin(), idx.end(), rng );
+         std::vector<uint32_t> cand_h;
+         for( size_t i = 0; i < 16; ++i ) cand_h.push_back( pool_h[ idx[i] ] );
+         // skew pre-check mirrors the consensus caps (40% deep / 25% thin).
+         const bool thin = ( depth < GRAPHENE_STEALTH_THIN_POOL_DEPTH );
+         bool skewed = false;
+         for( size_t i = 0; i < cand_h.size() && !skewed; ++i )
+         {
+            uint32_t w = cand_h[i] / GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS;
+            size_t count = 0;
+            for( size_t j = 0; j < cand_h.size(); ++j )
+               if( cand_h[j] / GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS == w )
+                  ++count;
+            skewed = thin ? ( count * 4 > 16 ) : ( count * 5 > 2 * 16 );
+         }
+         if( skewed )
+            continue; // resample: never ship a skewed ring silently
+         h = cand_h;
+         t.assign( 16, now - 90000 );
+      }
+      return std::make_pair( h, t );
+   };
+   std::string err;
+   // Deep pool: three independently seeded compliant samples all accept.
+   for( uint32_t s = 1; s <= 3; ++s )
+   {
+      auto pr = sample_compliant( 1000, s );
+      BOOST_REQUIRE_EQUAL( pr.first.size(), 16u );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( pr.first, pr.second,
+         now, 3000, err, 1000 ), "compliant deep sample " << s << ": " << err );
+   }
+   // Thin pool (16): the same rule with the 25% cap accepts.
+   {
+      auto pr = sample_compliant( 16, 7 );
+      BOOST_REQUIRE_EQUAL( pr.first.size(), 16u );
+      BOOST_CHECK_MESSAGE( stealth_check_decoy_policy( pr.first, pr.second,
+         now, 3000, err, 16 ), err );
+   }
+   // Violations reject: 7 of 16 in one window (43.75% > 40% deep)...
+   {
+      std::vector<uint32_t> h = { 1000, 1001, 1002, 1003, 1004, 1005, 1006,
+                                  2000, 2100, 2200, 2300, 2400, 2500,
+                                  2600, 2700, 2800 };
+      std::vector<fc::time_point_sec> t( 16, now - 90000 );
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( h, t, now, 3000, err, 1000 ),
+                           "clustered ring must reject" );
+   }
+   // ...and one young member rejects even in a compliant spread.
+   {
+      auto pr = sample_compliant( 1000, 11 );
+      BOOST_REQUIRE_EQUAL( pr.first.size(), 16u );
+      pr.second[3] = now - 3600;
+      BOOST_CHECK_MESSAGE( !stealth_check_decoy_policy( pr.first, pr.second,
+         now, 3000, err, 1000 ), "young member must reject" );
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
@@ -3847,11 +4375,12 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
    // (b) the consensus kind gate fires without any fork or committee: the
    // record helper rejects unknown kinds even pre-STEALTH (validate() is a
    // relay-side check, not the consensus boundary for proposal-embedded
-   // ops — see parity_review_evaluator::do_apply).
-   BOOST_CHECK_THROW( stealth_record_parity_review( db, 7 ), fc::exception );
+   // ops — see parity_review_evaluator::do_apply). The kind gate fires
+   // before any voter/quorum logic, so the voter here is arbitrary.
+   BOOST_CHECK_THROW( stealth_record_parity_review( db, 7, account_id_type() ), fc::exception );
    try
    {
-      stealth_record_parity_review( db, 7 );
+      stealth_record_parity_review( db, 7, account_id_type() );
       BOOST_FAIL( "unknown review kind must fail closed" );
    }
    catch( const fc::exception& e )
@@ -4093,6 +4622,71 @@ BOOST_AUTO_TEST_CASE( blind_wallet_defaults )
    BOOST_CHECK_THROW(
       w.transfer_default( "alice", "nolabel-no-such-key", "1.00000", "CORE", "", false, false ),
       fc::exception );
+   // (f) Task 6 delay choke point: maybe_delay_blind_broadcast(true) fires
+   // the sleep hook exactly once (the path every blind-sending leg calls);
+   // (false) (build/sign-only) never sleeps.
+   {
+      uint32_t slept = 0;
+      int calls = 0;
+      w.set_blind_sleep_hook( [&]( uint32_t s ) { ++calls; slept = s; } );
+      w.maybe_delay_blind_broadcast( true );
+      BOOST_CHECK_EQUAL( calls, 1 );
+      BOOST_CHECK_EQUAL( slept, 3u );
+      w.maybe_delay_blind_broadcast( false );
+      BOOST_CHECK_EQUAL( calls, 1 ); // no additional sleep
+      auto off = w.get_blind_defaults(); off.min_broadcast_delay_sec = 0;
+      w.set_blind_defaults( off );
+      w.maybe_delay_blind_broadcast( true );
+      BOOST_CHECK_EQUAL( calls, 1 ); // explicit 0 disables
+      auto on = w.get_blind_defaults(); on.min_broadcast_delay_sec = 3;
+      w.set_blind_defaults( on );
+      w.set_blind_sleep_hook( nullptr );
+   }
+   // (g) Task 6 mix-hold rule (pure helper, no node): off by default;
+   // unknown age (0) ineligible under any hold; boundary inclusive;
+   // future receipts ineligible.
+   {
+      using graphene::wallet::blind_receipt_mix_eligible;
+      BOOST_CHECK( blind_receipt_mix_eligible( 0, 0, 0 ) );
+      BOOST_CHECK( blind_receipt_mix_eligible( 123, 456, 0 ) ); // off: always
+      BOOST_CHECK( !blind_receipt_mix_eligible( 0, 1000, 5 ) ); // unknown age
+      BOOST_CHECK( blind_receipt_mix_eligible( 995, 1000, 5 ) ); // exactly held
+      BOOST_CHECK( !blind_receipt_mix_eligible( 996, 1000, 5 ) ); // one short
+      BOOST_CHECK( !blind_receipt_mix_eligible( 1000, 1000, 1 ) ); // newborn
+      BOOST_CHECK( blind_receipt_mix_eligible( 1000, 1000, 0 ) ); // off anyway
+      BOOST_CHECK( !blind_receipt_mix_eligible( 1001, 1000, 5 ) ); // future
+      BOOST_CHECK( blind_receipt_mix_eligible( 500, 1000, 500 ) ); // boundary
+   }
+   // (h) Task 6 blind_by_default end-to-end routing (offline, no node): the
+   // SAME call with and without the transparent opt-out must take visibly
+   // different branches — the blind branch fails at the blind memo guard
+   // (proving blind routing was selected), the transparent branch gets past
+   // it (and fails later at the remote-only transfer leg).
+   {
+      std::string blind_err, transparent_err;
+      try { w.transfer_default( "alice", "somekey", "1.00000", "CORE", "hello", false, false ); }
+      catch( const fc::exception& e ) { blind_err = e.to_detail_string(); }
+      try { w.transfer_default( "alice", "somekey", "1.00000", "CORE", "hello", true, false ); }
+      catch( const fc::exception& e ) { transparent_err = e.to_detail_string(); }
+      BOOST_REQUIRE( !blind_err.empty() );
+      BOOST_REQUIRE( !transparent_err.empty() );
+      BOOST_CHECK_MESSAGE( blind_err.find( "blind legs carry no memo" ) != std::string::npos,
+                           blind_err );
+      BOOST_CHECK_MESSAGE( transparent_err.find( "blind legs carry no memo" ) == std::string::npos,
+                           transparent_err );
+   }
+   // (i) Task 6 receipt schema compat: old wallet files (no received_block
+   // key) load with unknown age 0; new receipts serialize the field.
+   {
+      graphene::wallet::blind_receipt r;
+      fc::variant v;
+      fc::to_variant( r, v, 20 );
+      BOOST_CHECK_EQUAL( v.get_object()[ "received_block" ].as_uint64(), 0u );
+      fc::variant empty_obj = fc::variant( fc::variant_object() );
+      graphene::wallet::blind_receipt back;
+      fc::from_variant( empty_obj, back, 20 );
+      BOOST_CHECK_EQUAL( back.received_block, 0u );
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

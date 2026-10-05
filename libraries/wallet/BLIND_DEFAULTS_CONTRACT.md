@@ -49,13 +49,64 @@ it (mix hold).
 - The delay applies per broadcast, including retries (a retry is a new
   broadcast). Setting 0 is allowed only as an explicit advanced option with
   a warning.
-- `min_mix_blocks` (default 0, off) is RESERVED, not wallet-enforced
-  (G3-05): in-tree blind receipts carry no creation-block height, so input
-  selection cannot filter on age, and consensus never enforces a hold.
-  Wallets MAY enforce an equivalent hold locally, but the field's old
-  "wallet does it" promise was removed — nothing in-tree reads it today.
+- Enforcement point (Task 6): `wallet_api::maybe_delay_blind_broadcast`
+  is the single choke point — all three blind-sending paths
+  (`transfer_from_blind`, `blind_transfer_help`, `transfer_to_blind`) call
+  it, and `transfer_default`'s blind branch routes through
+  `transfer_to_blind`, so no blind path bypasses the delay and none delays
+  twice. Hook-tested (`set_blind_sleep_hook`).
+- `min_mix_blocks` (default 0, off) is ENFORCED by cli_wallet input
+  selection (Task 6): a blind receipt may fund a spend only once
+  `head_block - received_block >= min_mix_blocks`. Receipts recorded
+  offline (or by older wallets) carry `received_block == 0` (unknown age)
+  and are ineligible while any hold is configured — fail-closed. Consensus
+  never enforces a hold (it cannot see wallet receipt age); the wallet is
+  the only place it can live. The balance query (`get_blind_balances`)
+  shows all receipts; only spend selection filters.
 
-## 5. Change and amounts
+## 5. Ring sampler rule (normative for any wallet constructing op 104 rings)
+
+Decoy selection is a privacy decision, not an optimization problem. Wallets
+constructing stealth rings MUST sample as follows (conformance-pinned
+against consensus policy in `g1_stealth_tests`):
+
+- Candidate set: UNSPENT blinded balances of the spent asset carrying
+  post-fork creation metadata (chain-visible `get_blinded_balances` +
+  `get_stealth_effective_set` for depth context). NEVER include
+  spent-flagged outputs (their flags are public — they could never be the
+  real input, so they shrink the plausible set), grandfathered
+  (metadata-absent) outputs, or outputs younger than 24h.
+- Sample UNIFORMLY at random WITHOUT replacement from the candidate set.
+  Never prefer recently-created outputs, never reuse a preferred subset
+  across spends (reuse shrinks the effective set; the chain alarms on it
+  per interval), never stuff the ring with attacker-favorable windows.
+- Size: at least 16 (TARGET floor, thin or deep — consensus rejects smaller
+  rings everywhere); at most 32. Default 16; larger rings cost more verifier
+  time per input (budget ~100 ring-16 worst-case per block).
+- Age spread: no 100-block creation window may contribute more than 40% of
+  members (deep pool, depth ≥ 64) or 25% (thin pool). Resample on violation
+  (bounded retries, then surface pool-thin guidance — never silently ship
+  a skewed ring).
+- In-tree note: cli_wallet does NOT construct op 104 rings (no stealth
+  builder in-tree); this rule binds the browser wallet and any external
+  signer. The conformance test implements this rule over a seeded pool and
+  asserts consensus ACCEPT for compliant rings and REJECT for
+  clustered/under-age/spent-member violations.
+
+## 6. Timing-analysis residual + dandelion (future p2p work, NOT consensus)
+
+The broadcast delay is hygiene, not a guarantee: an observer watching few
+DPOS producers can still correlate first-seen propagation with block
+inclusion, and no wallet behavior fixes that — it needs network-layer
+diffusion (dandelion-style stem/fluff relay, currently NOT implemented;
+see the `node_impl::broadcast` comment in `libraries/net/node.cpp`).
+Disposition (R7 C-03): tracked as p2p future work with honest residual
+documentation, never as a consensus gate (consensus must not depend on
+relay timing). What the delay buys: it removes the cheapest link (sign →
+instant broadcast); what it does not buy: unlinkability against a
+network-wide observer. The UI MUST NOT promise the latter.
+
+## 7. Change and amounts
 
 - Blinded change is the default (new transfers create blinded change, not
   transparent change).
@@ -65,7 +116,7 @@ it (mix hold).
   endpoints (DEX trade, exchange deposit) — it sells peer-to-peer leg
   privacy (BSIP-2 §2, honest scope note).
 
-## 6. Non-goals (rejected with prejudice, BSIP-2 §3)
+## 8. Non-goals (rejected with prejudice, BSIP-2 §3)
 
 No mandatory blindness for any operation class; no blind order books, margin
 positions, pool shares, or vault/oracle/issuance accounting; no blind asset

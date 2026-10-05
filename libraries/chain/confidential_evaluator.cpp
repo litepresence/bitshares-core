@@ -51,6 +51,7 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
    {
       stealth_check_blind_gate( d );
+      stealth_check_asset_gate( d, o.amount.asset_id );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "No new V1 blind balances past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
@@ -133,6 +134,7 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
    {
       stealth_check_blind_gate( d );
+      stealth_check_asset_gate( d, o.amount.asset_id );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       // G1c parity float rule: withdrawals carry no blind outputs (n = 0).
@@ -208,6 +210,7 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
    {
       stealth_check_blind_gate( d );
+      stealth_check_asset_gate( d, o.fee.asset_id );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );

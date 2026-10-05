@@ -201,6 +201,8 @@ class database_api_impl : public std::enable_shared_from_this<database_api_impl>
 
       // Blinded balances
       vector<blinded_balance_object> get_blinded_balances( const flat_set<commitment_type>& commitments )const;
+      // Task 6: honest per-asset decoy depth for wallets/UIs (read-only).
+      flat_map<asset_id_type, uint32_t> get_stealth_effective_set()const;
 
       // Withdrawals
       vector<withdraw_permission_object> get_withdraw_permissions_by_giver( const std::string account_id_or_name,

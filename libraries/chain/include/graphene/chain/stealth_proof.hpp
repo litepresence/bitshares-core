@@ -193,6 +193,9 @@ size_t stealth_bp_proof_size( uint8_t m );
 
 /**
  * Returns false when the ring's decoy set violates BSIP-2 §1 rules:
+ * - fewer than GRAPHENE_STEALTH_RING_TARGET members (Task 6, R7 C-01:
+ *   the TARGET floor binds deep or thin; MIN-11 is a verifier bound and
+ *   a future governance-opened emergency, never accepted here), or
  * - any member younger than GRAPHENE_STEALTH_DECOY_MIN_AGE_SEC, or
  * - any 100-block window contributes > 40% of members (deep pool) or
  *   > 25% of members (thin pool, R-04).
@@ -201,8 +204,7 @@ size_t stealth_bp_proof_size( uint8_t m );
  * as decoys at all — enforced by the caller refusing absent metadata before
  * calling here (availability yields to privacy, explicitly).
  * pool_depth is the caller's per-asset unspent count (stealth_pool_depth):
- * below GRAPHENE_STEALTH_THIN_POOL_DEPTH the ring floor rises to
- * GRAPHENE_STEALTH_RING_TARGET and the skew ceiling tightens to
+ * below GRAPHENE_STEALTH_THIN_POOL_DEPTH the skew ceiling tightens to
  * GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT. No default: every caller passes its
  * asset's depth explicitly so thin-vs-deep is never assumed.
  */

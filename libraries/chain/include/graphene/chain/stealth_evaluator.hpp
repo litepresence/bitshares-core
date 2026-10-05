@@ -15,15 +15,18 @@ namespace graphene { namespace chain {
  *
  * Junior-dev map: `stealth_transfer` is the private payment itself (ring +
  * Bulletproofs+, verified in consensus, not in wallets); the other three are
- * the safety rails — `freeze_blind` halts all blind ops on a 2-quorum within
- * 48h (zero-fee so the halt is always callable), `turnstile_reproof`
+ * the safety rails — `freeze_blind` halts all blind ops on a 3-quorum within
+ * 24h (zero-fee so the halt is always callable), `turnstile_reproof`
  * migrates V1 outputs to V2 range proofs before the V1 sunset, and
  * `parity_review` records committee attestations that keep fee-parity and
  * set-report clocks current (kind 0 = parity review, kind 1 = set report;
  * zero-fee so attestations are never taxed). Every blind op first passes
  * `stealth_check_blind_gate` (hardfork active, not halted, block budget left)
- * and increments the per-block counter in apply only. Rings are floor 11
- * (pool halt below), cap 32; decoys must be 24h old with skew guards.
+ * and increments the per-block counter in apply only. Rings are consensus
+ * floor 16 (TARGET everywhere, thin or deep; pool halt below 11, warning
+ * below 22), cap 32; members must be unspent (spent outputs are excluded —
+ * their flags are public, so they could never be plausible-real decoys);
+ * decoys must be 24h old with skew guards.
  * Markets, margin, pools, settlement, vaults, and oracles stay transparent —
  * blindness never touches price discovery or coverage accounting.
  */
@@ -49,10 +52,11 @@ class stealth_transfer_evaluator : public evaluator<stealth_transfer_evaluator>
 
 /**
  * Emergency blind halt (zero-fee).
- * Two-quorum within 48h freezes all blind ops (freeze wins ties); thaw needs
- * a second quorum. Fail-closed by default: expiry of votes without quorum
- * leaves the freeze in place. Callable by anyone — the zero fee exists so
- * the halt can never be priced out.
+ * Three-quorum within 24h freezes all blind ops (freeze wins ties); thaw
+ * needs a second 3-quorum AND an empty supply-divergence set. Fail-closed
+ * by default: expiry of votes without quorum leaves the freeze in place.
+ * Callable by anyone — the zero fee exists so the halt can never be
+ * priced out.
  */
 class freeze_blind_evaluator : public evaluator<freeze_blind_evaluator>
 {
@@ -102,6 +106,9 @@ class parity_review_evaluator : public evaluator<parity_review_evaluator>
 
 /// True while blind ops must fail closed (tripwire or freeze quorum).
 bool stealth_blind_halted( const database& db );
+/// True while an asset's blind ops must fail closed (supply divergence:
+/// the asset is listed in diverged_assets until reconciliation passes).
+bool stealth_asset_halted( const database& db, asset_id_type asset );
 /// Nonzero block that fired the tripwire (0 = never).
 uint32_t stealth_tripwire_fire_block( const database& db );
 /// Blind ops counted against the cap in the currently-pending block.
@@ -110,7 +117,7 @@ uint32_t stealth_blind_count_this_block( const database& db );
 /// counter, maintained on insert/spend by the blind evaluators; see
 /// stealth_pool_count_add). Spent-but-retained outputs do not count.
 uint32_t stealth_pool_depth( const database& db, asset_id_type asset );
-/// Vote freshness: voted_at within the 48h expiry at head-block time.
+/// Vote freshness: voted_at within the 24h expiry at head-block time.
 bool stealth_vote_fresh( fc::time_point_sec now, fc::time_point_sec voted_at );
 /// V1 sunset / turnstile G2 recorded at activation (0 pre-activation).
 fc::time_point_sec stealth_v1_sunset_time( const database& db );
@@ -119,8 +126,9 @@ fc::time_point_sec stealth_turnstile_g2_time( const database& db );
 /**
  * Maintenance-interval reconciliation (Monero-2018 rule, BSIP-2 §1):
  * for every asset, the evaluator-maintained shadow of confidential_supply
- * must equal the live counter EXACTLY. Any divergence engages blind_halted
- * automatically and records the firing block.
+ * must equal the live counter EXACTLY. Any divergence records the asset in
+ * diverged_assets (per-asset halt scope, SUP-07 — NOT the global flag) and
+ * records the firing block; entries heal when reconciliation passes.
  * Called from perform_chain_maintenance (post-STEALTH only) and tests.
  *
  * Honesty note (review Finding 2): this detects DIVERGENCE between two
@@ -249,10 +257,13 @@ void stealth_parity_maintenance( database& db );
 
 /**
  * Record a committee attestation (called by parity_review_evaluator):
- * kind 0 resets the parity-review clock, kind 1 resets the set-report clock
- * (clearing funding-halted). head-block time only.
+ * the attestation is stored as pending; the clocks move only when two
+ * DISTINCT members have attested the same kind within the attest-expiry
+ * window (Task 6 quorum). Kind 0 moves the 6-month parity-review clock,
+ * kind 1 moves the set-report clock (clearing funding-halted).
+ * head-block time only. Unknown kinds fail closed.
  */
-void stealth_record_parity_review( database& db, uint8_t kind );
+void stealth_record_parity_review( database& db, uint8_t kind, account_id_type voter );
 
 /// Read the last computed alarm snapshot (queryable via the status object).
 stealth_alarm_snapshot stealth_current_alarms( const database& db );
@@ -271,6 +282,9 @@ void stealth_window_count_add( database& db, uint32_t n );
  * - stealth_count_blind_op: counter increment (apply path only)
  */
 void stealth_check_blind_gate( const database& db );
+/// Per-asset leg of the blind gate (SUP-07): every blind op evaluator calls
+/// this with its asset right after stealth_check_blind_gate. No-op pre-fork.
+void stealth_check_asset_gate( const database& db, asset_id_type asset );
 void stealth_count_blind_op( database& db );
 /// Post-STEALTH only (pre-fork no-op): move the per-asset confidential-supply
 /// shadow by the same delta applied to asset_dynamic_data_object.
@@ -281,9 +295,10 @@ void stealth_shadow_add( database& db, asset_id_type asset, share_type delta );
  * Positive delta on creation of a balance WITH post-fork metadata;
  * negative delta on consumption of such a balance (callers check
  * created_block != 0 for explicitly-consumed balances, which may be
- * grandfathered). Stealth spends consume inputs.size() real balances
- * (every real ring member is metadata-bearing by consensus rule) and
- * create outputs.size() new ones. Bounded: zero entries are removed.
+ * grandfathered). Stealth spends consume every newly-spent ring member
+ * (the whole anonymity set is spent-flagged — the real input is
+ * unidentifiable — and flagged outputs leave the unspent set) and create
+ * outputs.size() new ones. Bounded: zero entries are removed.
  */
 void stealth_pool_count_add( database& db, asset_id_type asset, int32_t delta );
 /**

@@ -102,6 +102,13 @@ struct blind_receipt
    stealth_confirmation::memo_data data;
    bool                            used = false;
    stealth_confirmation            conf;
+   /// Head-block number when this receipt was recorded (best-effort: 0 when
+   /// the wallet was offline or the remote was unreachable = unknown age).
+   /// Task 6: input selection enforces min_mix_blocks against this field —
+   /// unknown-age receipts are ineligible while a hold is configured
+   /// (fail-closed; 0 with min_mix_blocks == 0 (default off) behaves as
+   /// before). Appended-last: old wallet files load with 0.
+   uint32_t                        received_block = 0;
 };
 
 struct by_from;
@@ -341,13 +348,35 @@ struct blind_transfer_defaults
    /// when broadcast=true; 0 disables (explicit, logged choice).
    uint32_t min_broadcast_delay_sec = 3;
    /// Optional N-block holding before a received blind output is spent.
-   /// RESERVED, not enforced by cli_wallet (G3-05): blind receipts carry
-   /// no creation-block height, so input selection cannot filter on age
-   /// without a wallet-schema change; consensus never enforces it either.
-   /// Wallets MAY enforce an equivalent hold locally, but nothing in-tree
-   /// reads this field today. 0 = off (the default).
+   /// ENFORCED by cli_wallet input selection (Task 6): a receipt may fund a
+   /// blind spend only once head_block - received_block >= min_mix_blocks;
+   /// receipts with unknown age (received_block == 0, e.g. recorded offline
+   /// or by an older wallet) are ineligible while the hold is configured.
+   /// Consensus never enforces a hold (it cannot see wallet receipt age).
+   /// 0 = off (the default).
    uint32_t min_mix_blocks = 0;
 };
+
+/**
+ * Mix-hold eligibility (Task 6, BSIP-2 §1): pure decision rule behind
+ * min_mix_blocks, unit-testable without a node. head_block comes from the
+ * remote database_api; received_block from the receipt (0 = unknown age).
+ * - min_mix_blocks == 0 (default off): everything eligible (legacy path).
+ * - otherwise: eligible iff received_block != 0 (known age, fail-closed)
+ *   AND head_block - received_block >= min_mix_blocks (no underflow: a
+ *   receipt from the future is ineligible).
+ * No consensus effect.
+ */
+inline bool blind_receipt_mix_eligible( uint32_t received_block,
+                                        uint32_t head_block,
+                                        uint32_t min_mix_blocks )
+{
+   if( min_mix_blocks == 0 )
+      return true;
+   if( received_block == 0 || received_block > head_block )
+      return false;
+   return ( head_block - received_block ) >= min_mix_blocks;
+}
 
 /**
  * Number of RPC round-trips needed to cover n decoy candidates at
@@ -400,7 +429,8 @@ FC_REFLECT( graphene::wallet::exported_account_keys, (account_name)(encrypted_pr
 FC_REFLECT( graphene::wallet::exported_keys, (password_checksum)(account_keys) )
 
 FC_REFLECT( graphene::wallet::blind_receipt,
-            (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf) )
+            (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf)
+            (received_block) )
 
 FC_REFLECT( graphene::wallet::approval_delta,
    (active_approvals_to_add)

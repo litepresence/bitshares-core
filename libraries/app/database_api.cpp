@@ -29,6 +29,7 @@
 #include <graphene/app/util.hpp>
 #include <graphene/chain/get_config.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/protocol/pts_address.hpp>
 #include <graphene/protocol/restriction_predicate.hpp>
 
@@ -2906,6 +2907,21 @@ vector<blinded_balance_object> database_api_impl::get_blinded_balances(
          result.push_back( *itr );
    }
    return result;
+}
+
+flat_map<asset_id_type, uint32_t> database_api::get_stealth_effective_set()const
+{
+   return my->get_stealth_effective_set();
+}
+
+flat_map<asset_id_type, uint32_t> database_api_impl::get_stealth_effective_set()const
+{
+   // Read-only copy of the consensus counters (empty pre-activation: the
+   // singleton may not exist on old databases replaying without it).
+   const auto& idx = _db.get_index_type<stealth_status_index>().indices();
+   if( idx.empty() )
+      return flat_map<asset_id_type, uint32_t>();
+   return idx.begin()->unspent_blind_count;
 }
 
 //////////////////////////////////////////////////////////////////////

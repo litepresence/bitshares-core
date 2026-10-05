@@ -2718,6 +2718,64 @@ BOOST_AUTO_TEST_CASE( t7f_two_smartcoins_share_one_oracle )
                 == price( asset( 1, mia2_id ), asset( 30, asset_id_type() ) ) );
 } FC_LOG_AND_RETHROW() }
 
+/// T7g (MUSE-R01 H2 latch/sunset): once an asset has carried an explicit
+/// binding, the expiry-free legacy path closes for it permanently. Unbind
+/// explicit, then rebind legacy (the recorded expiry dodge) is refused, and
+/// the latch survives the unbind; a never-explicit asset still binds legacy
+/// (t9d boundary kept).
+BOOST_AUTO_TEST_CASE( t7g_legacy_rebind_after_explicit_is_refused )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+   const asset_object& mia = create_bitasset( "MIALATCH", alice_id );
+   const auto mia_id = mia.get_id();
+   const auto mia_ref = rev2_create_reference( *this, alice_id, alice_private_key, "MIAL", 2 );
+   rev2_declare_mapping_1to1( *this, mia, alice_id, alice_private_key, mia_ref );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers = 1;
+   const auto oid = rev2_make_oracle( *this, alice_id, alice_private_key, "LATCH.CORE",
+                                      mia_ref, bts_ref, rev2_single_mid_series(), opts );
+   rev2_publish( *this, oid, carol_id, carol_private_key, { rv( 1, 10 ) } );
+
+   // Explicit first bind latches the asset...
+   rev2_bind_explicit( *this, mia_id(db), alice_id, alice_private_key, oid, 0 );
+   BOOST_REQUIRE( mia_id(db).bitasset_data(db).options.extensions.value
+                  .explicit_oracle_bound_once.valid() );
+   BOOST_REQUIRE( *mia_id(db).bitasset_data(db).options.extensions.value
+                  .explicit_oracle_bound_once );
+   // ...unbind keeps the latch (the feed nulls, the history does not)...
+   generate_block();
+   set_expiration( db, trx );
+   rev2_unbind_all( *this, mia_id(db), alice_id, alice_private_key );
+   BOOST_REQUIRE( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+   BOOST_REQUIRE( *mia_id(db).bitasset_data(db).options.extensions.value
+                  .explicit_oracle_bound_once );
+   // ...and the legacy rebind (the expiry dodge) is refused.
+   generate_block();
+   set_expiration( db, trx );
+   GRAPHENE_REQUIRE_THROW( rev2_bind_legacy( *this, mia_id(db), alice_id, alice_private_key, oid ),
+                           fc::exception );
+   const auto& exts = mia_id(db).bitasset_data(db).options.extensions.value;
+   BOOST_CHECK( !exts.price_oracle_id.valid() );
+   BOOST_CHECK( !exts.price_oracle_binding.valid() );
+
+   // Control: a never-explicit asset still binds legacy (t9d boundary kept).
+   const asset_object& mia2 = create_bitasset( "MIALATCH2", alice_id );
+   const auto mia2_id = mia2.get_id();
+   rev2_declare_mapping_1to1( *this, mia2, alice_id, alice_private_key, mia_ref );
+   rev2_bind_legacy( *this, mia2_id(db), alice_id, alice_private_key, oid );
+   BOOST_REQUIRE( mia2_id(db).bitasset_data(db).options.extensions.value
+                  .price_oracle_id.valid() );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE( oracle_wire_format_task7_tests )
@@ -2796,6 +2854,27 @@ BOOST_AUTO_TEST_CASE( uia_reference_mapping_has_a_stable_extension_tag )
    BOOST_CHECK( back.value.reference_asset_mapping->reference == reference_asset_id_type( 1 ) );
    BOOST_CHECK_EQUAL( back.value.reference_asset_mapping->asset_amount.value, 100 );
    BOOST_CHECK_EQUAL( back.value.reference_asset_mapping->reference_amount.value, 1 );
+}
+
+/**
+ * explicit_oracle_bound_once was appended LAST to bitasset_options::ext (tag 9,
+ * after price_oracle_binding at 8). Same rule: the tag must never shift, and the
+ * earlier tags are untouched by the append.
+ */
+BOOST_AUTO_TEST_CASE( explicit_latch_has_a_stable_extension_tag )
+{
+   bitasset_options o;
+   o.extensions.value.explicit_oracle_bound_once = true;
+
+   auto bytes = fc::raw::pack( o.extensions );
+   BOOST_REQUIRE( bytes.size() >= 2 );
+   BOOST_CHECK_EQUAL( int( bytes[0] ), 1 );
+   BOOST_CHECK_EQUAL( int( bytes[1] ), 9 );
+
+   auto back = fc::raw::unpack<bitasset_options>( fc::raw::pack( o ) );
+   BOOST_REQUIRE( back.extensions.value.explicit_oracle_bound_once.valid() );
+   BOOST_CHECK_EQUAL( *back.extensions.value.explicit_oracle_bound_once, true );
+   BOOST_CHECK( !back.extensions.value.price_oracle_id.valid() );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

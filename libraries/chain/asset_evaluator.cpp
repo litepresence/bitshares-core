@@ -27,6 +27,7 @@
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/exceptions.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
@@ -140,6 +141,13 @@ namespace detail {
        FC_ASSERT( !options.extensions.value.price_oracle_id.valid()
                   || HARDFORK_ORACLE_PASSED( block_time ),
                   "A BitAsset's price oracle cannot be set before the oracle hardfork" );
+       // H2 latch/sunset (MUSE-R01): the explicit-bound latch is H2-gated
+       // state, so it must be absent before the H2 bonds leg (covers create,
+       // update, and proposal paths through this one check: all three call
+       // it). Post-leg the latch is set and read by the bind evaluator.
+       FC_ASSERT( !options.extensions.value.explicit_oracle_bound_once.valid()
+                  || HARDFORK_H2_BONDS_PASSED( block_time ),
+                  "The explicit-binding latch cannot be set before the H2 bonds hardfork" );
        FC_ASSERT( !options.extensions.value.price_oracle_binding.valid()
                   || HARDFORK_ORACLE_PASSED( block_time ),
                   "A BitAsset's price oracle cannot be set before the oracle hardfork" );
@@ -882,15 +890,17 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
    // while price_oracle names {oracle, series} explicitly. The granular asserts below
    // mirror is_smartcoin_binding_valid(); keep them in sync.
    //
-   // Expiry (H1-EXP): only the explicit binding carries a consensus expiry height, and
-   // only it is gated on it. The legacy price_oracle_id path is PINNED, not closed: it
-   // keeps its historical behavior byte-identical (single-series only, no expiry, read
-   // path untouched) for the pre-H1 consumers it was built for. It is out of scope for
-   // the expiry guarantee -- unbinding an explicit binding to rebind legacy dodges
-   // expiry, and stays possible by this decision (see the H1-EXP report: recorded,
-   // test-pinned, recommended for H2 sunset). What no path permits is extending a live
-   // explicit binding: while set it is immutable, past expiry it reads null, and no
-   // operation or chain parameter touches the height after binding.
+    // Expiry (H1-EXP): only the explicit binding carries a consensus expiry height, and
+    // only it is gated on it. The legacy price_oracle_id path keeps its historical
+    // behavior byte-identical (single-series only, no expiry, read path untouched)
+    // for assets that NEVER carried an explicit binding. The H2 latch/sunset
+    // (MUSE-R01) closes the residual dodge: once an asset has carried an
+    // explicit binding (sticky explicit_oracle_bound_once flag, set on bind
+    // and on unbind, H2-bonds-gated), rebinding legacy is refused -- unbinding
+    // an explicit binding to rebind legacy no longer dodges expiry. What no
+    // path permits is extending a live explicit binding: while set it is
+    // immutable, past expiry it reads null, and no operation or chain
+    // parameter touches the height after binding.
    const auto& new_ext = op.new_options.extensions.value;
    const auto& old_ext = current_bitasset_data.options.extensions.value;
    FC_ASSERT( !( new_ext.price_oracle_binding.valid() && new_ext.price_oracle_id.valid() ),
@@ -979,13 +989,28 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
                  "Oracle '${n}' is quoted with quote reference ${q}, but must be quoted against "
                  "the backing asset's reference (${s})",
                  ("n", o.name)("q", o.quote)("s", backing_mapping->reference) );
-      FC_ASSERT( o.subscribers.size() < size_t( GRAPHENE_ORACLE_MAX_SUBSCRIBERS )
-                 || o.subscribers.count( op.asset_to_update ) > 0,
-                 "Oracle '${n}' already has the maximum of ${m} subscribed assets",
-                 ("n", o.name)("m", GRAPHENE_ORACLE_MAX_SUBSCRIBERS) );
-   }
+       FC_ASSERT( o.subscribers.size() < size_t( GRAPHENE_ORACLE_MAX_SUBSCRIBERS )
+                  || o.subscribers.count( op.asset_to_update ) > 0,
+                  "Oracle '${n}' already has the maximum of ${m} subscribed assets",
+                  ("n", o.name)("m", GRAPHENE_ORACLE_MAX_SUBSCRIBERS) );
+       // H2 latch/sunset (MUSE-R01): once an asset has carried an explicit
+       // price_oracle_binding, the expiry-free legacy path closes for it
+       // permanently -- unbinding explicit to rebind legacy would dodge the
+       // consensus expiry. Both the sticky latch (binds post-dating it) and
+       // a currently-live explicit binding (binds pre-dating the latch,
+       // replaced in this same op) refuse. Never-explicit assets bind legacy
+       // exactly as before. Gated on the H2 bonds leg: pre-leg history
+       // replays identically (no latch state can exist there).
+       if( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ) )
+          FC_ASSERT( ( !old_ext.explicit_oracle_bound_once.valid()
+                       || !*old_ext.explicit_oracle_bound_once )
+                     && !old_ext.price_oracle_binding.valid(),
+                     "Asset carried an explicit price_oracle_binding; legacy "
+                     "price_oracle_id rebind refused (H2 latch/sunset: the "
+                     "consensus expiry cannot be dodged)" );
+    }
 
-   // check if BSRM will change
+    // check if BSRM will change
    const auto old_bsrm = current_bitasset_data.get_black_swan_response_method();
    const auto new_bsrm = op.new_options.get_black_swan_response_method();
    if( old_bsrm != new_bsrm )
@@ -1271,12 +1296,23 @@ void_result asset_update_bitasset_evaluator::do_apply(const asset_update_bitasse
           new_eff = *new_ext.price_oracle_id;
        const bool binding_changed = ( old_ext.price_oracle_binding != new_ext.price_oracle_binding )
              || ( old_ext.price_oracle_id != new_ext.price_oracle_id );
+       // H2 latch/sunset input (MUSE-R01): an explicit binding observed on
+       // either side latches the asset once the H2 bonds leg passes. Set on
+       // first bind AND on unbind (an unbind observes a pre-latch bind whose
+       // set predates the flag) so the dodge sequence always trips it.
+       const bool latch_now = HARDFORK_H2_BONDS_PASSED( db_conn.head_block_time() )
+             && ( old_ext.price_oracle_binding.valid()
+                  || new_ext.price_oracle_binding.valid() );
 
       db_conn.modify( *bitasset_to_update,
-                      [&op, &to_check_call_orders, &db_conn, this]( asset_bitasset_data_object& bdo )
+                      [&op, &to_check_call_orders, &db_conn, this, latch_now]( asset_bitasset_data_object& bdo )
       {
          to_check_call_orders = update_bitasset_object_options( op, db_conn, bdo, *asset_to_update,
                                                                 update_feeds_due_to_bsrm_change );
+         // Monotonic: once latched, no op clears it (an issuer-supplied
+         // options copy with the flag cleared still latches here).
+         if( latch_now )
+            bdo.options.extensions.value.explicit_oracle_bound_once = true;
       });
 
        if( binding_changed )

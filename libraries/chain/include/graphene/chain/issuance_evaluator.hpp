@@ -26,6 +26,8 @@
 
 #include <graphene/protocol/issuance_ops.hpp>
 
+#include <vector>
+
 namespace graphene { namespace chain {
 
    class reserve_object;
@@ -52,13 +54,19 @@ namespace graphene { namespace chain {
     * shortfalls) — each direction is named at its call site.
     */
 
-   /**
-    * Mint FX stable against BTS collateral (tag 99).
-    * Burns the conversion fee into the reserve, escrows the payout for 24h
-    * vesting, mints FXR to the reserve coin holder burn-first. Refuses when
-    * the door cap, rmin coverage, or the bonded price fail. Sets
-    * `_creates_reserve` when this mint opens the pair's reserve.
-    */
+    /**
+     * Mint FX stable against BTS collateral (tag 99).
+     * The conversion fee slice stays in the reserve (retained, never burned:
+     * it backs the book while buying no stable -- the request must be
+     * covered by the NET deposit). The stable pays out IMMEDIATELY (no mint
+     * vesting; the 24h vesting escrow belongs to the redeem leg only). FXR
+     * mints here to the minter on surplus-raising deposits only; FXR burns
+     * nowhere on this path -- the burn-first rule lives on the wind-down
+     * junior claim path (winddown_claim_evaluator, issuance pairs only).
+     * Refuses when the door cap, rmin coverage, the genesis secure ratio,
+     * a standing uncovered shortfall, or the bonded price fail. Sets
+     * `_creates_reserve` when this mint opens the pair's reserve.
+     */
    class hybrid_mint_evaluator : public evaluator<hybrid_mint_evaluator>
    {
       public:
@@ -114,12 +122,14 @@ namespace graphene { namespace chain {
          bool                       _creates_pool = false;
    };
 
-   /**
-    * Claim a vested offset-pool payout (tag 102, ISSUANCE-2).
-    * Pays only after the 7-day vest (`OFFSET_VEST_SEC`); premature, stranger,
-    * or over-claims are refused. At most 64 claimants per pair (the 65th is
-    * refused, never pruned).
-    */
+    /**
+     * Claim a vested offset-pool payout (tag 102, ISSUANCE-2).
+     * Pays only after the 7-day vest (`OFFSET_VEST_SEC`); premature, stranger,
+     * or over-claims are refused. At most 64 claimants per pair (a 65th
+     * distinct deposit prunes the smallest matured claim, paid liquid at
+     * prune time; with no matured claim it is refused, never silently
+     * dropped).
+     */
    class offset_claim_evaluator : public evaluator<offset_claim_evaluator>
    {
       public:
@@ -177,8 +187,16 @@ namespace graphene { namespace chain {
     */
    uint32_t h2_issue_coverage_bps( share_type value_face, share_type supply_face );
 
-   /// @return the issuance reserve for @p pair, or null when none exists.
-   const reserve_object* h2_find_reserve( const database& d, asset_id_type pair );
+    /// @return the issuance reserve for @p pair, or null when none exists.
+    const reserve_object* h2_find_reserve( const database& d, asset_id_type pair );
+
+    /**
+     * Band vector invariant: @p bands holds exactly GRAPHENE_H2_ISSUE_N_BANDS
+     * entries (fresh zeros when absent; a partial vector is a consensus bug
+     * and is refused, never silently zeroed). Shared with the terminal
+     * wind-down sweep (ISS-13), which re-partitions bands on extinction.
+     */
+    void h2_issue_ensure_bands( std::vector<share_type>& bands );
 
    /// @return the offset pool for @p pair, or null when none exists.
    const offset_pool_object* h2_find_offset_pool( const database& d, asset_id_type pair );
@@ -234,19 +252,24 @@ namespace graphene { namespace chain {
     * - fixed DOS ceiling (ISSUANCE-1 semantics, unchanged): the SHARED
     *   per-block counter still bounds mint deposits plus redeem payouts at
     *   GRAPHENE_H2_ISSUE_DOOR_CAP_BTS (used + leg, 256-bit).
-    * - headroom extraction bound (skipped when @p reserve is null --
-    *   genesis bootstrap: no standing headroom exists; the rmin gate alone
-    *   guards creation): the MARGINAL leg alone must not exceed the
-    *   standing headroom, floor(max(0, bts - ceil(supply*base*rmin /
-    *   (quote*10000))) * k1 / 10000) with k1 = UNITY (load-bearing: any
-    *   k1 < 1 refuses healthy half-book redeems and at-headroom top-ups).
-    *   The required-BTS ceiling favors the protocol (smaller headroom,
-    *   tighter bound); the leg floors (tighter bound).
-    * - depth flow bound (skipped when no tripwire state exists for @p pair
-    *   -- pre-pool bootstrap): the marginal leg alone must not exceed
-    *   floor(qualified two-window volume * k2 / 10000). When a tripwire
-    *   state EXISTS but its windows are unqualified (thin or single-pool),
-    *   the door refuses outright (fail-closed: impact cannot be priced).
+     * - headroom extraction bound (skipped when @p reserve is null --
+     *   genesis bootstrap: no standing headroom exists; the rmin gate alone
+     *   guards creation): the MARGINAL leg alone must not exceed the
+     *   standing headroom, floor(max(0, bts - ceil(supply*base*rmin /
+     *   (quote*10000))) * k1 / 10000) with k1 = UNITY (load-bearing: any
+     *   k1 < 1 refuses healthy half-book redeems and at-headroom top-ups).
+     *   Runs at zero standing supply too (ISS-05): the required BTS computes
+     *   to 0 and the bound is the standing BTS balance (only genesis skips).
+     *   The required-BTS ceiling favors the protocol (smaller headroom,
+     *   tighter bound); the leg floors (tighter bound).
+     * - depth flow bound (skipped when no tripwire state exists for @p pair
+     *   -- pre-pool bootstrap, and NOTE the skip is attacker-selectable: a
+     *   pair nobody trades never grows tripwire state, so untraded pairs --
+     *   including every fresh pilot pair -- door on the fixed ceiling plus
+     *   the bond meter alone): the marginal leg alone must not exceed
+     *   floor(qualified two-window volume * k2 / 10000). When a tripwire
+     *   state EXISTS but its windows are unqualified (thin or single-pool),
+     *   the door refuses outright (fail-closed: impact cannot be priced).
     * k1/k2 derivation: see the constant comments (PfC bounded per window by
     * guard-band x secured book; k1 bounds single-conversion extraction at
     * the standing buffer, k2 keeps flow inside demonstrated absorption).
@@ -276,20 +299,23 @@ namespace graphene { namespace chain {
     */
    void h2_issue_maintenance( database& d );
 
-   /**
-    * Halt/wind-down entry (called FIRST from h2_create_winddown before the
-    * outstanding snapshot, and from pair_freeze apply): runs the
-    * REVERT-vs-ABSORB state machine on @p pair. No reserve: returns
-    * immediately (legacy path byte-identical). Otherwise, in order:
-    * 1. prune matured/missing pending vestings (STAND: settled positions are
-    *    never repriced);
-    * 2. REVERT every still-unvested door output (cancel escrow, BTS to the
-    *    reserve, face back to owner/supply/outstanding);
-    * 3. ABSORB the residual shortfall, if the trigger reads below 100% at
-    *    the bonded price (offset pool first, remainder recorded as
-    *    uncovered_shortfall for the rmax junior path); no bonded price
-    *    holds everything fail-closed (no revert, no absorb).
-    */
+    /**
+     * Halt/wind-down entry (called FIRST from h2_create_winddown before the
+     * outstanding snapshot, and from pair_freeze apply): runs the
+     * REVERT-vs-ABSORB state machine on @p pair. No reserve: returns
+     * immediately (legacy path byte-identical). Wound-down vaults: returns
+     * immediately (extinguished at creation; never re-run). Otherwise:
+     * 1. prune matured/missing pending vestings (STAND: settled positions are
+     *    never repriced);
+     * 2. REVERT every still-unvested door output (cancel escrow, BTS to the
+     *    reserve, face back to owner/supply/outstanding);
+     * 3. ABSORB the residual shortfall, if the trigger reads below 100% at
+     *    the bonded price (offset pool first, remainder recorded as
+     *    uncovered_shortfall, which halts the mint door while nonzero); no
+     *    bonded price holds everything fail-closed (no revert, no absorb).
+     * Terminal wind-down additionally refunds queued exits to face and sweeps
+     * the reserve BTS into the segregated remainder (see h2_create_winddown).
+     */
    void h2_issue_on_pair_halt( database& d, asset_id_type pair );
 
 } } // graphene::chain

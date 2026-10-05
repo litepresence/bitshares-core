@@ -25,6 +25,7 @@
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/bond_evaluator.hpp>
+#include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
@@ -252,6 +253,35 @@ void_result oracle_delete_evaluator::do_evaluate( const oracle_delete_operation&
 
    _oracle = &op.oracle_id(d);
    FC_ASSERT( _oracle->owner == op.owner, "Only the oracle's owner may delete it" );
+
+   // X-08 lifecycle seam: H2 legs reference the oracle by id, and deletion
+   // would strand state no path can repair (a vault's bound_oracle pins with
+   // no rebind path; dispute/vault economics read the object itself).
+   // Refuse while any of the four legs is live. No extra hardfork gate: every
+   // leg below is H2-created state (disputes, bound vaults, producer bonds,
+   // forfeit pools cannot predate the H2 legs), so pre-H2 history replays
+   // identically. Mirrors the open-dispute refusal on the update (:194) and
+   // unfreeze (:456) paths.
+   FC_ASSERT( _oracle->open_disputes == 0,
+              "Oracle '${n}' carries open disputes; deletion refused until resolution",
+              ("n", _oracle->name) );
+   for( const vault_object& v : d.get_index_type<vault_index>().indices() )
+      FC_ASSERT( !v.bound_oracle.valid() || *v.bound_oracle != _oracle->get_id(),
+                 "Vault ${v} is canonically bound to oracle '${n}'; deletion refused",
+                 ("v", v.id)("n", _oracle->name) );
+   {
+      const auto& pb_idx = d.get_index_type<producer_bond_index>()
+                              .indices().get<by_oracle_producer>();
+      const auto pitr = pb_idx.lower_bound(
+            boost::make_tuple( _oracle->get_id(), account_id_type() ) );
+      FC_ASSERT( pitr == pb_idx.end() || pitr->oracle != _oracle->get_id(),
+                 "Oracle '${n}' still secures producer bonds; deletion refused",
+                 ("n", _oracle->name) );
+   }
+   FC_ASSERT( _oracle->forfeit_pool_balance == share_type( 0 ),
+              "Oracle '${n}' holds an undistributed forfeit pool; deletion refused "
+              "until the reward sweep settles it",
+              ("n", _oracle->name) );
 
    // Deleting an oracle a smartcoin depends on would leave that asset with no price source,
    // unable to margin call or force-settle. Deletion is refused while any subscriber's

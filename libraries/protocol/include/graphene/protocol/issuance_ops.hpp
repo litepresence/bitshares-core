@@ -87,20 +87,29 @@ namespace graphene { namespace protocol {
    /// uneconomic by construction (7-day lock plus door conversion fees plus
    /// exit haircuts on re-entry), never by provenance tracking.
    constexpr uint32_t GRAPHENE_H2_ISSUE_OFFSET_VEST_SEC = 604800;
-   /// State bound: claimants per offset pool. Refuse-or-prune choice: REFUSE
-   /// (a deposit naming a 65th distinct claimant is refused; existing claims
-   /// merge by owner, so honest repeat deposits never hit the bound).
+    /// State bound: claimants per offset pool. Refuse-or-prune choice: PRUNE
+    /// (a deposit naming a 65th distinct claimant drops the smallest MATURED
+    /// claim, paid liquid at prune time, so the shock absorber can never be
+    /// locked shut by dust; with no matured claim the deposit refuses).
+    /// Existing claims merge by owner, so honest repeat deposits never hit
+    /// the bound.
    constexpr uint32_t GRAPHENE_H2_ISSUE_OFFSET_MAX_CLAIMANTS = 64;
    /// State bound: pending door-vesting records per reserve. Redeems prune
    /// matured entries first; a redeem that still overflows the list is
    /// refused fail-closed (inflow is already bounded by the door cap, so the
    /// list cannot grow without bound between prunes).
    constexpr uint32_t GRAPHENE_H2_ISSUE_PENDING_VEST_CAP = 64;
-   /// Batch-exit queue bounds (both constants, either one binds): at most 8
-   /// open requests per pair, and at most 1e11 BTS of queued value (~$1,000
-   /// pilot-basis) at the current bonded price. New requests past either cap
-   /// are refused; while EITHER cap is reached, FXR minting suspends (the
-   /// mint still admits when it prices no FXR).
+    /// Batch-exit queue bounds (both constants, either one binds): at most 8
+    /// open requests per pair, and at most 1e11 BTS of queued value (~$1,000
+    /// pilot-basis) at the current bonded price. New requests past either cap
+    /// are refused; while EITHER cap is reached, FXR minting suspends (the
+    /// mint still admits when it prices no FXR). Hostage window (LL-10): face
+    /// burns at request time but BTS pays only in a maintenance batch priced
+    /// through the bonded read, so a frozen oracle holds queued face
+    /// unsettleable until the price resumes. That hold is an EXPLICIT vault
+    /// halt (the maintenance sweep freezes the door while a queue waits on a
+    /// dead price), never a silent stall; terminal wind-down refunds queued
+    /// face for wind-down claiming instead of settling it.
    constexpr uint32_t GRAPHENE_H2_ISSUE_EXIT_QUEUE_MAX_COUNT = 8;
    constexpr uint64_t GRAPHENE_H2_ISSUE_EXIT_QUEUE_MAX_BTS = 100000000000ULL;
    /// Cap-function k1 proposal: the headroom leg is floor(headroom x 10000 /
@@ -134,29 +143,17 @@ namespace graphene { namespace protocol {
    /// the pair skips the depth leg (pre-pool bootstrap); a tripwire state
    /// with UNQUALIFIED windows (thin or single-pool) refuses the door
    /// outright (fail-closed: impact cannot be priced, so no flow).
-   constexpr uint32_t GRAPHENE_H2_ISSUE_CAP_K2_BPS = 5000;
+    constexpr uint32_t GRAPHENE_H2_ISSUE_CAP_K2_BPS = 5000;
 
-   /// Band edge i (i = 0..7) in bps of the anchor price. Eight edges bound
-   /// seven bands: {9000,9500,9750,10000,10250,10500,11000,11500}. The anchor
-   /// sits at edges[3] (= 10000, the par boundary); bands 0..2 hold discount
-   /// backing, bands 4..6 premium backing. Minimum spacing 250bps.
-   inline uint16_t h2_issue_band_edge_bps( uint32_t i )
-   {
-      switch( i )
-      {
-         case 0: return 9000;
-         case 1: return 9500;
-         case 2: return 9750;
-         case 3: return 10000;
-         case 4: return 10250;
-         case 5: return 10500;
-         case 6: return 11000;
-         default: return 11500;
-      }
-   }
+    // NOTE (LL-02): no band-edge grid lives here anymore. The seven bands
+    // are an accounting partition with spend order only (see
+    // h2_issue_ensure_bands / h2_issue_bands_spend); no price is ever
+    // compared to a band edge in consensus, so the dead grid was deleted
+    // rather than wired into any gate (wiring it would be new consensus
+    // behavior behind a fresh hardfork gate and re-audit).
 
-   /**
-    * @brief Locks BTS into the pair reserve and receives senior stable.
+    /**
+     * @brief Locks BTS into the pair reserve and receives senior stable.
     * @ingroup operations
     *
     * The minter names BOTH legs: the BTS deposit and the face stable
@@ -180,8 +177,10 @@ namespace graphene { namespace protocol {
        // PLUS N locked over-collateralized deposits for no protocol loss.
        struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
 
-      asset           fee;
-      account_id_type minter;       ///< Pays the fee, locks the deposit, receives stable (+FXR)
+       asset           fee;
+       account_id_type minter;       ///< Pays the fee, locks the deposit, receives stable (+FXR).
+                                    ///< Stranger-mint closed: the minter must be a named member
+                                    ///< of the vault's vault_authority (evaluator-enforced).
       vault_id_type   vault;        ///< Target vault: names the pair, the binding, the door
       asset           deposit;      ///< BTS locked into the reserve, > 0 (genesis: BTS-only)
       share_type      stable_amount;///< Face stable requested, > 0, covered at the bonded price

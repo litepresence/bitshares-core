@@ -31,6 +31,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
@@ -434,6 +435,9 @@ void h2_apply_challenge_resolution( database& d, const vault_challenge_object& c
          m.finder = m.challenger;
          m.state = GRAPHENE_H2_CHALLENGE_SUSTAINED;
       } );
+      // ISS-08 halt coherence: run the REVERT-vs-ABSORB transition before the
+      // door closes (bonded price still live: this path freezes no oracle).
+      h2_issue_on_pair_halt( d, vault.vault_pair );
       d.modify( vault, []( vault_object& v ) {
          v.open_challenges -= 1;
          v.frozen = true; // fail-closed: sustained theft/failure halts mints
@@ -617,14 +621,33 @@ void process_expired_h2_challenges( database& d )
       if( itr->state != GRAPHENE_H2_CHALLENGE_OPEN )
          continue;
       const vault_object& vault = itr->vault(d);
-      d.adjust_balance( itr->challenger, asset( itr->challenge_bond, asset_id_type() ) );
+      // Expiry is inconclusive, never exoneration: the challenger's escrow
+      // forfeits through the standard 80/15/finder split instead of
+      // returning in full (cartel abstention past the deadline must never
+      // equal vindication, and a costless freeze is a griefing primitive).
+      // No decisive voter exists, so the finder slice returns to the
+      // challenger; the pool slice accrues to the vault's forfeit pool; the
+      // burn leaves supply. The vault still freezes fail-closed and still
+      // resolves exit-only through vault_resolve.
+      share_type burn, pool, finder;
+      h2_split_forfeit( itr->challenge_bond, itr->challenge_bond_usd_cents,
+                        burn, pool, finder );
+      const asset_dynamic_data_object& core_data = d.get_core_dynamic_data();
+      d.modify( core_data, [&burn]( asset_dynamic_data_object& data ) {
+         data.current_supply -= burn;
+      } );
+      d.adjust_balance( itr->challenger, asset( finder, asset_id_type() ) );
+      // ISS-08 halt coherence: REVERT-vs-ABSORB before the door closes
+      // (bonded price still live: this loop freezes no oracle).
+      h2_issue_on_pair_halt( d, vault.vault_pair );
+      d.modify( vault, [&pool]( vault_object& v ) {
+         v.open_challenges -= 1;
+         v.forfeit_pool_balance = v.forfeit_pool_balance + pool;
+         v.frozen = true;
+      } );
       d.modify( *itr, []( vault_challenge_object& c ) {
          c.state = GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN;
          c.finder = c.challenger;
-      } );
-      d.modify( vault, []( vault_object& v ) {
-         v.open_challenges -= 1;
-         v.frozen = true;
       } );
    }
 
@@ -636,14 +659,27 @@ void process_expired_h2_challenges( database& d )
       if( itr->state != GRAPHENE_H2_CHALLENGE_OPEN )
          continue;
       const oracle_object& oracle = itr->oracle(d);
-      d.adjust_balance( itr->challenger, asset( itr->challenger_bonds, asset_id_type() ) );
+      // Same inconclusive-expiry rule as the vault leg above: the
+      // challenger's escrow forfeits through the split (finder slice back to
+      // the challenger, pool slice to the oracle's forfeit pool, burn out of
+      // supply). The defender's escrow returns in full -- the defender did
+      // not open the inconclusive round.
+      share_type burn, pool, finder;
+      h2_split_forfeit( itr->challenger_bonds, itr->challenger_bonds_usd_cents,
+                        burn, pool, finder );
+      const asset_dynamic_data_object& core_data = d.get_core_dynamic_data();
+      d.modify( core_data, [&burn]( asset_dynamic_data_object& data ) {
+         data.current_supply -= burn;
+      } );
+      d.adjust_balance( itr->challenger, asset( finder, asset_id_type() ) );
       d.adjust_balance( itr->defender, asset( itr->defender_bonds, asset_id_type() ) );
       d.modify( *itr, []( oracle_dispute_object& x ) {
          x.state = GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN;
          x.finder = x.challenger;
       } );
-      d.modify( oracle, []( oracle_object& o ) {
+      d.modify( oracle, [&pool]( oracle_object& o ) {
          o.open_disputes -= 1;
+         o.forfeit_pool_balance = o.forfeit_pool_balance + pool;
          // R-02: expiry freeze is challenge-set like sustain: owner
          // oracle_update MUST NOT clear it (refused); committee
          // oracle_unfreeze clears after resolution.

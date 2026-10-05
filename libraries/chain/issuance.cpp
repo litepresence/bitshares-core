@@ -26,6 +26,7 @@
 
 #include <graphene/chain/account_object.hpp>
 #include <graphene/chain/asset_object.hpp>
+#include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
@@ -42,6 +43,26 @@
 #include <fc/uint128.hpp>
 
 namespace graphene { namespace chain {
+
+/// Band vector invariant: exactly N_BANDS entries (fresh zeros when absent).
+/// Pre-ISSUANCE-2 reserves cannot exist on any live chain (ISSUANCE-1 never
+/// activated); in-test reserves always build through the creators below, so
+/// this is belt-and-suspenders, never a migration. External linkage (not in
+/// the anonymous helpers below): the terminal wind-down sweep in
+/// vault_lifecycle_evaluator.cpp re-partitions bands on the same invariant.
+void h2_issue_ensure_bands( vector<share_type>& bands )
+{
+   FC_ASSERT( bands.size() == 0 || bands.size() == GRAPHENE_H2_ISSUE_N_BANDS,
+              "Band partition must hold exactly N_BANDS entries (or be absent); "
+              "a partial vector is a consensus bug, never silently zeroed" );
+   if( bands.size() != GRAPHENE_H2_ISSUE_N_BANDS )
+   {
+      bands.clear();
+      bands.reserve( GRAPHENE_H2_ISSUE_N_BANDS );
+      for( uint32_t i = 0; i < GRAPHENE_H2_ISSUE_N_BANDS; ++i )
+         bands.push_back( share_type( 0 ) );
+   }
+}
 
 namespace {
 
@@ -63,7 +84,6 @@ using graphene::protocol::GRAPHENE_H2_ISSUE_PENDING_VEST_CAP;
 using graphene::protocol::GRAPHENE_H2_ISSUE_REDEEM_VEST_SEC;
 using graphene::protocol::GRAPHENE_H2_ISSUE_RMIN_BPS;
 using graphene::protocol::GRAPHENE_H2_ISSUE_TARGET_BPS;
-using graphene::protocol::h2_issue_band_edge_bps;
 
 /// Conversion-fee slice (declared, floored, exact): floor(amount * 30 /
 /// 10000) in 256-bit with one truncating division. The slice never leaves
@@ -154,24 +174,6 @@ share_type h2_issue_door_used( const reserve_object* reserve, uint32_t head_bloc
    if( reserve == nullptr || reserve->door_block != head_block )
       return share_type( 0 );
    return reserve->door_used_bts;
-}
-
-/// Band vector invariant: exactly N_BANDS entries (fresh zeros when absent).
-/// Pre-ISSUANCE-2 reserves cannot exist on any live chain (ISSUANCE-1 never
-/// activated); in-test reserves always build through the creators below, so
-/// this is belt-and-suspenders, never a migration.
-void h2_issue_ensure_bands( vector<share_type>& bands )
-{
-   FC_ASSERT( bands.size() == 0 || bands.size() == GRAPHENE_H2_ISSUE_N_BANDS,
-              "Band partition must hold exactly N_BANDS entries (or be absent); "
-              "a partial vector is a consensus bug, never silently zeroed" );
-   if( bands.size() != GRAPHENE_H2_ISSUE_N_BANDS )
-   {
-      bands.clear();
-      bands.reserve( GRAPHENE_H2_ISSUE_N_BANDS );
-      for( uint32_t i = 0; i < GRAPHENE_H2_ISSUE_N_BANDS; ++i )
-         bands.push_back( share_type( 0 ) );
-   }
 }
 
 /// Spend @p amount from @p bands center-outward (order 3,4,2,5,1,6,0:
@@ -481,10 +483,14 @@ bool h2_issue_door_admits( const database& d,
        > uint256_t( GRAPHENE_H2_ISSUE_DOOR_CAP_BTS ) )
       return false;
    // Headroom extraction bound on the MARGINAL leg (genesis skips: no
-   // standing headroom; rmin guards creation). Required-BTS ceilings,
+   // standing headroom; rmin guards creation). Runs at zero standing supply
+   // too (ISS-05): with no supply the required BTS computes to 0 and the
+   // headroom is the standing BTS balance -- the semantically correct bound
+   // (a second trigger that skips here would widen the door to the fixed
+   // ceiling after every full-book exit). Required-BTS ceilings,
    // leg floors: both favor the protocol.
    if( reserve != nullptr && price.base_amount > share_type( 0 )
-       && price.quote_amount > share_type( 0 ) && reserve->stable_supply > share_type( 0 ) )
+       && price.quote_amount > share_type( 0 ) )
    {
       const uint256_t req_num = uint256_t( uint64_t( reserve->stable_supply.value ) )
                               * uint256_t( uint64_t( price.base_amount.value ) )
@@ -547,9 +553,23 @@ void h2_issue_maintenance( database& d )
       const auto vitr = vault_by_pair.find( pair );
       if( vitr == vault_by_pair.end() )
          continue;
+      if( vitr->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN )
+         continue; // terminal: backing swept into the wind-down at creation
+                   // (queued face refunded there); no absorb, no settle --
+                   // the offset pool never drains into an extinguished book
       const auto price = h2_read_pair_price( d, *vitr, 0, now );
       if( !price.valid() )
+      {
+         // LL-10 frozen-oracle explicit halt: a queue the sweep cannot settle
+         // is an EXPLICIT vault halt, never a silent stall. The door reads
+         // frozen so explorers and follow-on gates observe the hostage state;
+         // the queue and the shortfall record sit intact for the live-price
+         // resume (or the terminal wind-down refund path). Covered books with
+         // no queue stay untouched (no gratuitous freeze).
+         if( !reserve->exit_queue.empty() && !vitr->frozen )
+            d.modify( *vitr, []( vault_object& v ) { v.frozen = true; } );
          continue; // dual-stale: hold queue + shortfall fail-closed
+      }
       // 1. Absorb residual shortfalls (offset pool first, remainder recorded
       //    for the rmax junior path). Instant on detection, every pass.
       h2_issue_absorb_pair( d, *reserve, *vitr, *price );
@@ -640,6 +660,8 @@ void h2_issue_on_pair_halt( database& d, asset_id_type pair )
    const auto vitr = vault_by_pair.find( pair );
    if( vitr == vault_by_pair.end() )
       return;
+   if( vitr->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN )
+      return; // terminal: extinguished at wind-down creation; never re-run
    const time_point_sec now = d.head_block_time();
    const auto price = h2_read_pair_price( d, *vitr, 0, now );
    if( !price.valid() )
@@ -767,7 +789,16 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
    _vault = d.find( op.vault );
    FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
    FC_ASSERT( _vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
-              "Vault is wound down; exits go through wind-down claims, never mints" );
+               "Vault is wound down; exits go through wind-down claims, never mints" );
+   // Stranger-mint closed: mint authority sits with the vault authority,
+   // never with whoever funds a deposit. The minter must be a named member
+   // of the vault's threshold custody set (the fee-payer signature rule
+   // already binds the minter's key to this transaction).
+   FC_ASSERT( _vault->vault_authority.account_auths.find( op.minter )
+               != _vault->vault_authority.account_auths.end(),
+               "Minter ${m} is not a member of the vault authority; "
+               "mints into a foreign vault are refused",
+               ("m", op.minter) );
    // The door hold blocks mints (vault_object contract: while frozen, mint
    // blocked). Exits are the redeem path, never this op.
    FC_ASSERT( !_vault->frozen,
@@ -872,10 +903,48 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
    const share_type post_supply = h2_issue_sat_add(
          _creates_reserve ? share_type( 0 ) : _reserve->stable_supply, op.stable_amount );
    FC_ASSERT( h2_issue_meets_rmin( post_bts, post_supply, *price,
-                                   GRAPHENE_H2_ISSUE_RMIN_BPS ),
-              "Post-mint reserve ratio breaks the rmin floor (${r}bps); "
-              "over-collateralize or reduce the request",
-              ("r", GRAPHENE_H2_ISSUE_RMIN_BPS) );
+                                    GRAPHENE_H2_ISSUE_RMIN_BPS ),
+               "Post-mint reserve ratio breaks the rmin floor (${r}bps); "
+               "over-collateralize or reduce the request",
+               ("r", GRAPHENE_H2_ISSUE_RMIN_BPS) );
+    // Genesis secure-ratio gate (H2-07/SUP-12, wired): the vault's live
+    // vault bonds gate the mint at the genesis-committed secure_ratio_bps.
+    // Only live-covered bonds count (Task 3 predicate: unseized, vesting
+    // present in BTS, balance still covering the encumbered amount --
+    // seized or drawn-down bonds secure nothing). rmin above prices the
+    // RESERVE book through the bonded price; this gate meters the VAULT's
+    // bonded custody against the liabilities it secures.
+    {
+       share_type live_bonds( 0 );
+       const auto& bond_idx = d.get_index_type<vault_bond_index>()
+                                 .indices().get<by_bond_vault>();
+       const auto range = bond_idx.equal_range( op.vault );
+       for( auto itr = range.first; itr != range.second; ++itr )
+       {
+          if( itr->seized )
+             continue;
+          const vesting_balance_object* vb = d.find( itr->vesting_balance );
+          if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+              || vb->balance.amount < itr->bond_amount )
+             continue;
+          live_bonds = h2_issue_sat_add( live_bonds, itr->bond_amount );
+       }
+       FC_ASSERT( _vault->mint_within_secure_ratio(
+                     live_bonds, _vault->outstanding + op.stable_amount ),
+                  "Post-mint vault coverage breaks the genesis secure ratio "
+                  "(${r}bps); bond more custody or reduce the request",
+                  ("r", _vault->secure_ratio_bps) );
+    }
+   // Coverage honesty (ISS-11/SUP-04): while the absorb pass records an
+   // uncovered shortfall the book is underwater past the offset pool, and no
+   // new senior may print into it. Genesis creation skips (no absorb history
+   // can exist before the reserve does). The record clears on the next
+   // covered absorb computation, reopening the door.
+   if( !_creates_reserve )
+      FC_ASSERT( _reserve->uncovered_shortfall == share_type( 0 ),
+                 "Reserve carries an uncovered shortfall of ${s}; mints halt "
+                 "until the offset pool absorbs it",
+                 ("s", _reserve->uncovered_shortfall) );
    // Supply headroom (asset_issue precedent): consensus never mints past max.
    {
       const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
@@ -905,8 +974,9 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
    // weakly REDUCE surplus (adding ~1:1 value-to-face against a >100%
    // target), so they mint no FXR; over-collateralized deposits (and the
    // fee slice inside every deposit) lift it and mint. FXR_price is the
-   // pre-mint surplus per FXR (floored; genesis parity 1:1); a floored-0
-   // price mints nothing (fail-closed, never divide-by-zero). Cap: the
+   // pre-mint surplus per FXR (CEILED; genesis parity 1:1); a zero price
+   // (reachable only at exactly zero pre-mint surplus with standing supply)
+   // mints nothing (fail-closed, never divide-by-zero). Cap: the
    // fee slice already sits inside the door-counted deposit, so the FXR
    // leg rides the same door cap by construction.
    _fxr_to_mint = share_type( 0 );
@@ -919,12 +989,24 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
             r_before, s_before, *price, GRAPHENE_H2_ISSUE_TARGET_BPS );
       const uint256_t surplus_new = h2_issue_surplus_face(
             post_bts, post_supply, *price, GRAPHENE_H2_ISSUE_TARGET_BPS );
-      if( surplus_new > surplus_pre )
-      {
-         const uint256_t contrib = surplus_new - surplus_pre;
-         uint256_t fxr_price = uint256_t( GRAPHENE_H2_ISSUE_FXR_GENESIS_PARITY );
-         if( fxr_supply_before > share_type( 0 ) )
-            fxr_price = surplus_pre / uint256_t( uint64_t( fxr_supply_before.value ) );
+       if( surplus_new > surplus_pre )
+       {
+          const uint256_t contrib = surplus_new - surplus_pre;
+          uint256_t fxr_price = uint256_t( GRAPHENE_H2_ISSUE_FXR_GENESIS_PARITY );
+          if( fxr_supply_before > share_type( 0 ) )
+          {
+             // ISS-09: the junior price rounds UP (ceiling), favoring the
+             // protocol and existing holders. A floored price understates
+             // value and over-mints juniors -- and floors to zero permanently
+             // once surplus_pre < fxr_supply_before (silent halt: the
+             // `fxr_price > 0` gate below then refuses every future FXR
+             // mint, and FXR never burns outside wind-down, so nothing
+             // recovers). Ceiling keeps every positive surplus priced at >=
+             // 1. The zero-surplus corner (surplus_pre == 0 with standing
+             // supply) still prices 0 and skips fail-closed, documented.
+             const uint256_t den = uint256_t( uint64_t( fxr_supply_before.value ) );
+             fxr_price = ( surplus_pre + den - uint256_t( 1 ) ) / den;
+          }
          if( fxr_price > uint256_t( 0 ) )
          {
             const uint256_t fxr = contrib / fxr_price;
@@ -1283,7 +1365,12 @@ void_result offset_deposit_evaluator::do_evaluate( const offset_deposit_operatio
    FC_ASSERT( _vault->vault_pair != asset_id_type(),
               "The bond asset never owns an offset pool" );
 
-   // Bounded ledger (refuse past the cap; merges by owner never hit it).
+   // Bounded ledger (ISS-12): the cap PRUNES, never refuses honest
+   // absorbers out of the shock absorber. Merges by owner never hit it; a
+   // 65th distinct claimant prunes the smallest matured claim (paid liquid
+   // at prune time in apply: matured means already claimable, so nothing
+   // strands). With no matured claim to prune, the deposit refuses
+   // fail-closed (retry after claims settle).
    _pool = h2_find_offset_pool( d, _vault->vault_pair );
    _creates_pool = ( _pool == nullptr );
    if( !_creates_pool )
@@ -1295,10 +1382,19 @@ void_result offset_deposit_evaluator::do_evaluate( const offset_deposit_operatio
             known = true;
             break;
          }
-      if( !known )
-         FC_ASSERT( _pool->claims.size() < GRAPHENE_H2_ISSUE_OFFSET_MAX_CLAIMANTS,
-                    "Offset claim ledger is full for this pair; "
-                    "retry after claims settle" );
+      if( !known && _pool->claims.size() >= GRAPHENE_H2_ISSUE_OFFSET_MAX_CLAIMANTS )
+      {
+         bool matured = false;
+         for( const h2_offset_claim& c : _pool->claims )
+            if( c.available_after <= now )
+            {
+               matured = true;
+               break;
+            }
+         FC_ASSERT( matured,
+                    "Offset claim ledger is full for this pair with no matured "
+                    "claim to prune; retry after claims settle" );
+      }
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -1330,7 +1426,7 @@ object_id_type offset_deposit_evaluator::do_apply( const offset_deposit_operatio
    }
    else
    {
-      d.modify( *_pool, [&]( offset_pool_object& p ) {
+       d.modify( *_pool, [&]( offset_pool_object& p ) {
          p.balance += op.deposit.amount;
          bool merged = false;
          for( h2_offset_claim& c : p.claims )
@@ -1346,8 +1442,23 @@ object_id_type offset_deposit_evaluator::do_apply( const offset_deposit_operatio
             }
          if( !merged )
          {
-            FC_ASSERT( p.claims.size() < GRAPHENE_H2_ISSUE_OFFSET_MAX_CLAIMANTS,
-                       "Offset claim ledger overflow inside deposit apply" );
+            if( p.claims.size() >= GRAPHENE_H2_ISSUE_OFFSET_MAX_CLAIMANTS )
+            {
+               // Prune path (evaluate proved a matured claim exists): drop
+               // the smallest matured claim and pay it liquid on the way
+               // out, so pruning strands nothing and the balance still sums
+               // the ledger exactly.
+               auto victim = p.claims.end();
+               for( auto itr = p.claims.begin(); itr != p.claims.end(); ++itr )
+                  if( itr->available_after <= now
+                      && ( victim == p.claims.end() || itr->amount < victim->amount ) )
+                     victim = itr;
+               FC_ASSERT( victim != p.claims.end(),
+                          "Offset claim ledger overflow with no matured claim to prune" );
+               p.balance -= victim->amount;
+               d.adjust_balance( victim->owner, asset( victim->amount, core ) );
+               p.claims.erase( victim );
+            }
             h2_offset_claim c;
             c.owner = op.depositor;
             c.amount = op.deposit.amount;

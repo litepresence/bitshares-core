@@ -42,6 +42,8 @@
 #include <fc/io/raw.hpp>
 #include <fc/uint128.hpp>
 
+#include <algorithm>
+
 namespace graphene { namespace chain {
 
 const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault )
@@ -54,6 +56,45 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
    // never segregated bond.
    h2_issue_on_pair_halt( d, vault.vault_pair );
    share_type segregated( 0 );
+   // ISS-13 terminal disposition (issuance pairs only): the reserve's BTS
+   // backing follows the liability into the segregated remainder (holders'
+   // backstop), and the reserve extinguishes around a frozen liability
+   // record. Queued exits refund to face FIRST (the request-time burn
+   // reverses on all four mirrors) so the outstanding snapshot below lets
+   // queued holders claim in the wind-down like everyone else; without this
+   // their face would stay burned and unpaid (the post-wind-down maintenance
+   // sweep never settles). Offset pools are NOT swept: funded claims pay
+   // liquid even in wind-down.
+   if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
+   {
+      for( const h2_exit_request& q : r->exit_queue )
+      {
+         d.adjust_balance( q.requester, asset( q.face, vault.vault_pair ) );
+         const asset_object& pair_asset = vault.vault_pair( d );
+         const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
+         d.modify( pair_dyn, [&q]( asset_dynamic_data_object& data ) {
+            data.current_supply += q.face;
+         } );
+         d.modify( vault, [&q]( vault_object& v ) { v.outstanding += q.face; } );
+         d.modify( *r, [&q]( reserve_object& res ) {
+            res.stable_supply += q.face;
+            h2_issue_ensure_bands( res.band_stable );
+            res.band_stable[3] += q.face;
+         } );
+      }
+      if( !r->exit_queue.empty() )
+         d.modify( *r, []( reserve_object& res ) { res.exit_queue.clear(); } );
+      const share_type swept = r->bts_balance;
+      d.modify( *r, [&]( reserve_object& res ) {
+         h2_issue_ensure_bands( res.band_bts );
+         std::fill( res.band_bts.begin(), res.band_bts.end(), share_type( 0 ) );
+         res.bts_balance = share_type( 0 );
+         res.uncovered_shortfall = share_type( 0 );
+         res.last_ratio_bps = 0;
+         res.snapshot_block = d.head_block_num();
+      } );
+      segregated += swept;
+   }
    const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
    const auto range = bond_idx.equal_range( vault_id_type( vault.id ) );
    for( auto itr = range.first; itr != range.second; ++itr )
@@ -123,6 +164,27 @@ bool h2_vault_meets_maintenance( database& d, const vault_object& vault )
    }
    if( covered <= share_type( 0 ) )
       return false;
+   // Priced book (Step 2): a BOUND vault converts live-covered bonds through
+   // the bonded price before comparing to outstanding (face terms, floored
+   // against the vault -- favors the protocol). Raw parity below is the
+   // legacy H2c behavior for unbound vaults, byte-identical. Dual-stale (or
+   // degenerate) reads fail closed to breach: no live price, no clean bill.
+   if( vault.bound_oracle.valid() )
+   {
+      const auto price = h2_read_pair_price( d, vault, 0, d.head_block_time() );
+      if( !price.valid() || price->base_amount <= share_type( 0 )
+          || price->quote_amount <= share_type( 0 ) )
+         return false;
+      const share_type covered_face = h2_issue_bts_to_face( covered, *price );
+      if( covered_face <= share_type( 0 ) )
+         return false;
+      // covered_face / outstanding >= 15000 / 10000, cross-multiplied in 128-bit.
+      const fc::uint128_t lhs = fc::uint128_t( uint64_t( covered_face.value ) )
+                              * fc::uint128_t( 10000 );
+      const fc::uint128_t rhs = fc::uint128_t( uint64_t( vault.outstanding.value ) )
+                              * fc::uint128_t( GRAPHENE_H2_MAINTENANCE_TRIGGER_BPS );
+      return lhs >= rhs;
+   }
    // covered / outstanding >= 15000 / 10000, cross-multiplied in 128-bit.
    const fc::uint128_t lhs = fc::uint128_t( uint64_t( covered.value ) )
                            * fc::uint128_t( 10000 );
@@ -179,6 +241,11 @@ void process_h2_vault_maintenance( database& d )
       }
       if( !meets )
       {
+         // ISS-08 halt coherence: the REVERT-vs-ABSORB transition runs BEFORE
+         // the door closes because it reads the bonded price, and a frozen
+         // oracle reads absent (fail-closed hold). The bonded price is still
+         // live here: this path freezes no oracle.
+         h2_issue_on_pair_halt( d, itr->vault_pair );
          d.modify( *itr, [&now]( vault_object& v ) {
             v.maintenance_state = GRAPHENE_H2_VAULT_TOPUP;
             v.frozen = true; // mint halt; redemptions continue pro-rata

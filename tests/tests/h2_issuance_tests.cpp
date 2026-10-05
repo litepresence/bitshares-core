@@ -294,11 +294,18 @@ h2i_door h2i_open_door(
     h2i_lock_producer_bond( f, bob.get_id(), bob_key, oid, vb, oracle_bond,
                             GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS );
 
-   const asset_id_type pair = h2i_create_uia( f, alice.get_id(), alice_key, pair_sym );
-   const asset_id_type fxr = h2i_create_uia( f, alice.get_id(), alice_key, fxr_sym );
-   authority vault_auth( 1, alice.get_id(), 1 );
-   const vault_id_type vid = h2i_register_vault(
-         f, alice.get_id(), alice_key, vault_auth, min_bond, min_bond_usd, pair );
+    const asset_id_type pair = h2i_create_uia( f, alice.get_id(), alice_key, pair_sym );
+    const asset_id_type fxr = h2i_create_uia( f, alice.get_id(), alice_key, fxr_sym );
+    authority vault_auth( 1, alice.get_id(), 1 );
+    const vault_id_type vid = h2i_register_vault(
+          f, alice.get_id(), alice_key, vault_auth, min_bond, min_bond_usd, pair );
+    // Vault bond (mint-gate book): one full-size live-covered bond, so every
+    // door mint below inherits a 200%-gated book. Owner is the oracle
+    // producer (a stranger to the vault authority may bond; only minting is
+    // authority-gated).
+    const auto bond_vest = h2i_make_cdd_vesting( f, bob.get_id(), bob_key, min_bond );
+    h2i_lock_vault_bond( f, bob.get_id(), bob_key, vid, bond_vest, min_bond,
+                         min_bond_usd );
 
    h2i_freeze( f, alice.get_id(), alice_key, vid, oid );
    BOOST_REQUIRE( vid( f.db ).bound_oracle.valid() );
@@ -384,6 +391,22 @@ void h2i_redeem_throws(
    set_expiration( f.db, tx );
    tx.sign( key, f.db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( f.db, tx ), fc::exception );
+}
+
+void h2i_exit_request(
+      database_fixture& f, account_id_type who, const fc::ecc::private_key& key,
+      const h2i_door& d, share_type face )
+{
+   issuance_exit_request_operation op;
+   op.requester = who;
+   op.vault     = d.vault;
+   op.face      = face;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
 }
 
 const reserve_object* h2i_find_reserve( database_fixture& f, asset_id_type pair )
@@ -875,7 +898,11 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    const winddown_vault_id_type wdid {
       db.get_index_type<winddown_vault_index>().indices().begin()->id };
    BOOST_REQUIRE( wdid( db ).total_claims == share_type( 950000000000LL ) );
-   BOOST_REQUIRE( wdid( db ).segregated_bond == bond );
+   // Two full-size vault bonds seized (the door bond plus the top-up bond
+   // below), PLUS the extinguished reserve's 1.5e12 BTS backing swept into
+   // the remainder (ISS-13 terminal disposition): 2.68e12 + 1.5e12.
+   BOOST_REQUIRE( wdid( db ).segregated_bond
+                  == H2I_VAULT_RAW + H2I_VAULT_RAW + share_type( 1500000000000LL ) );
 
    // Senior first: 1e6 face -> min(850000 haircut leg, 1410526 pro-rata).
    // The full-size bond overcollateralizes the share leg, so the haircut binds.
@@ -943,6 +970,331 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
    PUSH_TX( db, dtx );
    BOOST_CHECK( db.get_balance( dave_id, asset_id_type() ).amount
                 == dave_before + share_type( 850000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Secure-ratio mint gate (H2-07/SUP-12): the vault's live-covered bonds
+/// gate every mint at the genesis 20000bps pin. At price (1,100) one
+/// full-size bond (1.34e12) covers at most 6.7e11 face: S=6.73e11 reads
+/// 199.1% and refuses (rmin and net-of-fee both pass, isolating the gate),
+/// while S=6.6e11 reads 203% and mints.
+BOOST_AUTO_TEST_CASE( mint_below_secure_ratio_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSEC", "HYSECF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+   BOOST_REQUIRE_EQUAL( d.vault( db ).secure_ratio_bps, 20000u );
+
+   // Unit BTS-expensive price: 1 BTS buys 100 face (rmin needs D >= 1.3S/100,
+   // the door admits D <= 2e11, both satisfiable at 6e11 face).
+   h2i_publish( *this, d.oracle, bob_id, bob_private_key, 1, 100 );
+   BOOST_REQUIRE( h2_read_pair_price( db, d.vault( db ), 0, db.head_block_time() ).valid() );
+
+   // 199.1% coverage refuses: rmin (8.8e11 face value vs 8.749e11 required)
+   // and net-of-fee (8.7736e11 vs 6.73e11) both pass, so only the gate throws.
+   h2i_mint_throws( *this, alice_id, alice_private_key, d,
+                    share_type( 8800000000LL ), share_type( 673000000000LL ) );
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair ) == nullptr );
+
+   // 203% control mints: gate, rmin (8.6e11 vs 8.58e11), net, door all pass.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+            share_type( 8600000000LL ), share_type( 660000000000LL ) );
+   const reserve_object* r = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->stable_supply == share_type( 660000000000LL ) );
+   BOOST_CHECK( d.vault( db ).outstanding == share_type( 660000000000LL ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 0 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Genesis secure-ratio pin: registrations below 20000bps refuse at
+/// validate() time (10001 = old floor + 1; 19999 = pin - 1). 20000 itself
+/// registers (every other test in this suite is the passing pin).
+BOOST_AUTO_TEST_CASE( register_below_genesis_secure_ratio_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice) );
+   fund( alice, asset( 30000000000LL ) );
+
+   auto try_register = [&]( uint32_t ratio )
+   {
+      vault_register_operation op;
+      op.registrar            = alice_id;
+      op.pair                 = asset_id_type();
+      op.vault_authority      = authority( 1, alice_id, 1 );
+      op.min_bond             = H2I_VAULT_RAW;
+      op.min_bond_usd_cents   = H2I_VAULT_USD_CENTS;
+      op.bond_asset           = asset_id_type();
+      op.secure_ratio_bps     = ratio;
+      op.challenge_window_sec = GRAPHENE_H2_BOND_UNBOND_DELAY_SEC;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   };
+   BOOST_CHECK_THROW( try_register( 10001 ), fc::exception );
+   BOOST_CHECK_THROW( try_register( 19999 ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// Stranger-mint closed: the mint authorization sits with the vault
+/// authority, never with whoever funds a deposit. Bob (bonded producer and
+/// vault bonder, but no authority member) names the foreign vault and
+/// refuses on a book that admits alice's identical mint.
+BOOST_AUTO_TEST_CASE( stranger_mint_to_foreign_vault_rejected )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSTR", "HYSTRF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+   BOOST_REQUIRE( d.vault( db ).vault_authority.account_auths.find( bob_id )
+                  == d.vault( db ).vault_authority.account_auths.end() );
+
+   h2i_mint_throws( *this, bob_id, bob_private_key, d,
+                    share_type( 200000 ), share_type( 1000 ) );
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair ) == nullptr );
+
+   // Authority-member control: alice's identical mint admits.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+            share_type( 200000 ), share_type( 1000 ) );
+   BOOST_REQUIRE( h2i_find_reserve( *this, d.pair ) != nullptr );
+   BOOST_CHECK( d.vault( db ).outstanding == share_type( 1000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Coverage honesty (ISS-11/SUP-04): while the absorb pass records an
+/// uncovered shortfall the book is underwater past the offset pool, and no
+/// new senior may print into it (RED: pre-fix uncovered_shortfall is
+/// write-only and mints admit regardless).
+BOOST_AUTO_TEST_CASE( mint_halted_while_uncovered_shortfall_stands )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSHORT", "HYSHORTF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // 200% book: D=200000/M=1000. A follow-up D=50000/M=100 admits on every
+   // other gate (net 498 covers, post 250000/1100 well above rmin, headroom
+   // 70000 covers the leg), isolating the shortfall gate below.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000 ), share_type( 1000 ) );
+   BOOST_REQUIRE( h2i_find_reserve( *this, d.pair )->uncovered_shortfall
+                  == share_type( 0 ) );
+
+   // A standing uncovered shortfall (as the absorb pass records it) halts
+   // mints; clearing it reopens the door.
+   db.modify( *h2i_find_reserve( *this, d.pair ), []( reserve_object& r ) {
+      r.uncovered_shortfall = share_type( 1 );
+   } );
+   h2i_mint_throws( *this, alice_id, alice_private_key, d,
+                    share_type( 50000 ), share_type( 100 ) );
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair )->stable_supply
+                == share_type( 1000 ) );
+   db.modify( *h2i_find_reserve( *this, d.pair ), []( reserve_object& r ) {
+      r.uncovered_shortfall = share_type( 0 );
+   } );
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 50000 ), share_type( 100 ) );
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair )->stable_supply
+                == share_type( 1100 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// FXR junior leg rounds in the protocol's favour (ISS-09): the junior price
+/// ceils, so a surplus below one FXR still prices at >= 1 and later surplus
+/// mints keep minting (RED: pre-fix floor(2100/3000) = 0 silently halts all
+/// future FXR). Three surplus-raising mints with a diluting mint between the
+/// second and third: per-raising-mint FXR is non-increasing and nonzero.
+BOOST_AUTO_TEST_CASE( fxr_price_ceils_and_never_silently_halts )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYFXR3", "HYFXR3F", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // Mint 1 (surplus-raising): D=400000/M=1000 at (100,1) -> face 4000 over
+   // supply 1000, surplus 2000, genesis parity -> 2000 FXR.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 400000 ), share_type( 1000 ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 2000 ) );
+
+   // Mint 2 (surplus-raising): D=200000/M=500 -> surplus 3000, contrib 1000
+   // at price 1 -> 1000 FXR.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000 ), share_type( 500 ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 3000 ) );
+
+   // Diluting mint: D=110000/M=1000 lifts the book to surplus 2100 against
+   // 3000 FXR (ratio 0.7) and mints nothing.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 110000 ), share_type( 1000 ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 3000 ) );
+
+   // Mint 3 (surplus-raising): D=200000/M=500 -> contrib 1000 at ceil price
+   // ceil(2100/3000) = 1 -> 1000 FXR. Pre-fix the floored price is 0 and this
+   // mints nothing, permanently (FXR never burns outside wind-down). Sealed
+   // into its own block: the byte-identical Mint 2 above shares head time
+   // and expiration, so without a block between they are the same signed
+   // transaction and the second push is refused as a duplicate (fixture
+   // mechanics, never enforcement).
+   generate_block();
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000 ), share_type( 500 ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 4000 ) );
+   // Raising-mint deltas non-increasing: 2000, 1000, 1000.
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair )->fxr_supply
+                == share_type( 4000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Cap-function k1 runs at zero supply (ISS-05): after an exact full-book
+/// exit the standing headroom is the retained-fee BTS, and a mint above it
+/// refuses while one inside it admits (RED: pre-fix the leg skips at zero
+/// supply and any deposit up to the $2,000 ceiling admits).
+BOOST_AUTO_TEST_CASE( k1_headroom_binds_after_full_book_exit )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYK1", "HYK1F", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000 ), share_type( 1000 ) );
+   h2i_redeem( *this, alice_id, alice_private_key, d, share_type( 1000 ) );
+   const reserve_object* r0 = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r0 != nullptr );
+   BOOST_REQUIRE( r0->stable_supply == share_type( 0 ) );
+   // Standing headroom is the retained fee: 200000 - 99700 = 100300.
+   BOOST_REQUIRE( r0->bts_balance == share_type( 100300 ) );
+
+   // D=130000/M=1000 passes net, rmin, and the secure gate but exceeds the
+   // 100300 standing headroom: refused.
+   h2i_mint_throws( *this, alice_id, alice_private_key, d,
+                    share_type( 130000 ), share_type( 1000 ) );
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair )->stable_supply
+                == share_type( 0 ) );
+
+   // Inside headroom: D=50000/M=100 admits (net 498, post 150300/100).
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 50000 ), share_type( 100 ) );
+   const reserve_object* r1 = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r1 != nullptr );
+   BOOST_CHECK( r1->stable_supply == share_type( 100 ) );
+   BOOST_CHECK( r1->bts_balance == share_type( 150300 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Terminal disposition (ISS-13): on wind-down the reserve's BTS backing
+/// follows the liability into the segregated remainder (holders' backstop),
+/// queued face refunds for wind-down claiming, and the reserve extinguishes
+/// (RED: pre-fix the backing sits frozen in the reserve, readable by nobody,
+/// while the reserve still reports a solvent book for a settled liability).
+BOOST_AUTO_TEST_CASE( winddown_sweeps_reserve_backing_and_refunds_queue )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYTERM", "HYTERMF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // Book: D=700000/M=1000, then a 200-face batch exit queued (supply and
+   // outstanding 800, alice holds 800 face).
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 700000 ), share_type( 1000 ) );
+   generate_block();
+   // Keep the imminent maintenance out of the stale landing below: a live
+   // read against the surgical book would TOPUP (intended) but ALSO
+   // batch-settle the queue (nothing left to refund). With a healthy book
+   // and no queue yet the sweep is a no-op either way.
+   if( ( db.get_dynamic_global_properties().next_maintenance_time
+         - db.head_block_time() ).to_seconds() < 900 )
+      generate_blocks( db.head_block_time() + 1200 );
+   h2i_exit_request( *this, alice_id, alice_private_key, d, share_type( 200 ) );
+   // Seal the door flow into a block: a bare db.modify issued while pushed
+   // transactions are still open records into the pending undo session, and
+   // the next block rebuilds pending state from transactions only -- the
+   // surgical book below would be silently discarded (h2s_set_books
+   // precedent). Sealed, the modify lands on base state and persists.
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).outstanding == share_type( 800 ) );
+
+   // Breach far past the 150% priced edge (surgical liabilities, no new
+   // economics: the maintenance read itself is what this exercises).
+    db.modify( d.vault( db ), []( vault_object& v ) {
+      v.outstanding = share_type( 10000000000LL );
+    } );
+   // Land past the print lifetime in one leap: maintenance runs once on the
+   // stale bonded read, so the vault TOPUPs fail-closed while the issuance
+   // batch HOLDS (never settles) the queued exit for the wind-down refund
+   // below. A live read would settle the queue first, leaving nothing to
+   // refund (LL-10: the hold, not the settle, is what this test needs).
+   const auto seal_time = db.head_block_time();
+   const uint32_t print_lifetime = d.oracle( db ).options.value_lifetime_sec;
+   generate_blocks( seal_time + print_lifetime + 600 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+   generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+
+    // The queued 200 refunded to face (alice whole again), the 700000 reserve
+   // BTS joined the seized full-size bond in the segregated remainder, and
+   // the reserve extinguished around a frozen liability record.
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+    BOOST_CHECK( wdid( db ).total_claims == share_type( 10000000200LL ) );
+   BOOST_CHECK( wdid( db ).segregated_bond
+                == H2I_VAULT_RAW + share_type( 700000 ) );
+   BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 1000 ) );
+   const reserve_object* r = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->bts_balance == share_type( 0 ) );
+   BOOST_CHECK( r->exit_queue.empty() );
+   BOOST_CHECK( r->uncovered_shortfall == share_type( 0 ) );
+   BOOST_CHECK( r->stable_supply == share_type( 1000 ) );
+   for( const share_type& b : r->band_bts )
+      BOOST_CHECK( b == share_type( 0 ) );
+   BOOST_CHECK_EQUAL( r->last_ratio_bps, 0u );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

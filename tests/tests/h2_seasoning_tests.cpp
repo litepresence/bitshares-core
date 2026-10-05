@@ -308,11 +308,23 @@ h2s_covered_pair h2s_make_covered_pair(
          h2s_make_cdd_vesting( f, alice_id, alice_key, H2S_VAULT_RAW ) );
    oracle_options opts;
    opts.producers[bob_id] = oracle_producer_entry( 1 );
+   // 120-day print lifetime: the 90-day clock crosses ~90 maintenances, and
+   // every sweep must read live (stale reads breach fail-closed).
+   opts.value_lifetime_sec = 120 * 86400;
    const oracle_id_type oid = h2s_make_oracle(
          f, alice_id, alice_key, oracle_name, bts_ref, usd_ref, opts );
    h2s_lock_producer_bond( f, bob_id, bob_key, oid,
          h2s_make_cdd_vesting( f, bob_id, bob_key, H2S_ORACLE_RAW ) );
    h2s_freeze( f, alice_id, alice_key, vid, oid );
+   // Live price leg (priced-maintenance fixture): the binding above freezes
+   // the oracle, so reopen both flags and publish (1,1) -- at unit price the
+   // priced book matches the raw-parity books below exactly. The lifetime
+   // spans the 90-day clock (republished value would need a sweep-synchronous
+   // helper; a long-lived print keeps every sweep live instead).
+   f.generate_block();
+   f.db.modify( vid( f.db ), []( vault_object& v ) { v.frozen = false; } );
+   f.db.modify( oid( f.db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   h2s_publish( f, oid, bob_id, bob_key, 1, 1 );
    return h2s_covered_pair{ pair, vid, oid };
 }
 
@@ -707,18 +719,31 @@ BOOST_AUTO_TEST_CASE( complete_flag_end_to_end_on_real_time_travel )
    h2s_verify( *this, alice_id, alice_private_key, good.pair );
    const fc::time_point_sec start = h2s_find_record( *this, good.pair ).window_start;
 
-   generate_blocks( start + 30 * 86400 );
+   // The bonded-live gate needs now < producer-bond unlock, and each publish
+   // advances unlock by only ADVANCE (1d): a silent producer's read lapses
+   // ~8 days after its last print, and the vault fail-closes (TOPUP, then
+   // wind-down), resetting the clock. An active producer publishes ~daily,
+   // so the 90-day clock hops day-by-day with a fresh (1,1) print on both
+   // oracles. Same-day prints name different oracles and day-apart prints
+   // carry different head times, so no two signed publishes collide as
+   // duplicates. The twin stays live-but-unverified: identical books, no
+   // verifier, never completes.
+   for( int day = 1; day <= 91; ++day )
+   {
+      h2s_publish( *this, good.oracle, bob_id, bob_private_key, 1, 1 );
+      h2s_publish( *this, twin.oracle, bob_id, bob_private_key, 1, 1 );
+      generate_blocks( db.head_block_time() + 86400 );
+      if( day == 30 || day == 60 )
+      {
+         h2s_run_maintenance( *this );
+         BOOST_CHECK_EQUAL( h2s_find_record( *this, good.pair ).complete, false );
+         BOOST_CHECK( !h2_seasoning_complete( db, good.pair ) );
+      }
+   }
    h2s_run_maintenance( *this );
-   BOOST_CHECK_EQUAL( h2s_find_record( *this, good.pair ).complete, false );
-   BOOST_CHECK( !h2_seasoning_complete( db, good.pair ) );
-
-   generate_blocks( start + 60 * 86400 );
-   h2s_run_maintenance( *this );
-   BOOST_CHECK_EQUAL( h2s_find_record( *this, good.pair ).complete, false );
-   BOOST_CHECK( !h2_seasoning_complete( db, good.pair ) );
-
-   generate_blocks( start + GRAPHENE_H2_SEASONING_WINDOW_SEC + 86400 );
-   h2s_run_maintenance( *this );
+   // The clock really traveled: head sits past start + the 90-day window,
+   // so the flag below reflects a full continuous hold, not a short clock.
+   BOOST_REQUIRE( db.head_block_time() >= start + GRAPHENE_H2_SEASONING_WINDOW_SEC );
    BOOST_CHECK_EQUAL( h2s_find_record( *this, good.pair ).complete, true );
    BOOST_CHECK( h2_seasoning_complete( db, good.pair ) );
    // Identical books, no verifier: never completes.

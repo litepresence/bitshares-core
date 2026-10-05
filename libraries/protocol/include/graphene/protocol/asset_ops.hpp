@@ -177,6 +177,14 @@ namespace graphene { namespace protocol {
            /// asset_update_bitasset, never at creation. Appended last: extension tags are
            /// append-only.
            fc::optional<price_oracle> price_oracle_binding;
+           /// H2 latch/sunset (MUSE-R01): once an asset has carried an explicit
+           /// price_oracle_binding, the expiry-free legacy price_oracle_id path
+           /// closes for it permanently (unbind-then-rebind-legacy would dodge
+           /// the consensus expiry). Set monotonically by the bind evaluator
+           /// (never by issuers directly: apply forces it whenever an explicit
+           /// binding is set or cleared); read by the legacy-bind refusal.
+           /// Appended last: extension tags are append-only (tag 9).
+           fc::optional<bool> explicit_oracle_bound_once;
         };
 
       /// Time before a price feed expires
@@ -675,6 +683,7 @@ FC_REFLECT( graphene::protocol::bitasset_options::ext,
              (price_oracle_id)
              (reference_asset_mapping)
              (price_oracle_binding)
+             (explicit_oracle_bound_once)
            )
 
 FC_REFLECT( graphene::protocol::bitasset_options,

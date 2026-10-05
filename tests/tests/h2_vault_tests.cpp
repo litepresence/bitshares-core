@@ -37,6 +37,7 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
@@ -64,6 +65,7 @@ static_assert( uint64_t( H2C_RAW_PER_USD_CENT ) == GRAPHENE_H2_USD_BASIS_RAW_PER
                "H2c pilot-basis mirror must equal the protocol escrow basis" );
 constexpr uint64_t H2C_VAULT_USD_CENTS = 1340000;    // $13,400 vault min_bond
 constexpr uint64_t H2C_FLOOR_USD_CENTS = 83750;      // $837.50 challenge floor
+constexpr uint64_t H2C_ORACLE_USD_CENTS = 1005000;   // $10,050 oracle min_bond
 constexpr uint64_t H2C_GRIEF_USD_CENTS = 8375;       // $83.75 griefing/direction
 // H2c F2: the suite mirror above is pinned to the protocol proposal, so the
 // griefing constant can never drift silently (it has no consensus reader:
@@ -74,6 +76,8 @@ const share_type H2C_VAULT_RAW =
       share_type( int64_t( H2C_VAULT_USD_CENTS ) * H2C_RAW_PER_USD_CENT );
 const share_type H2C_ROUND1_RAW =
       share_type( int64_t( H2C_FLOOR_USD_CENTS ) * H2C_RAW_PER_USD_CENT );
+const share_type H2C_ORACLE_RAW =
+      share_type( int64_t( H2C_ORACLE_USD_CENTS ) * H2C_RAW_PER_USD_CENT );
 const share_type H2C_GRIEF_RAW =
       share_type( int64_t( H2C_GRIEF_USD_CENTS ) * H2C_RAW_PER_USD_CENT );
 
@@ -284,6 +288,78 @@ asset_id_type h2c_create_uia(
    tx.sign( key, f.db.get_chain_id() );
    return asset_id_type {
       PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
+}
+
+producer_bond_id_type h2c_lock_producer_bond(
+      database_fixture& f, account_id_type producer, const fc::ecc::private_key& key,
+      oracle_id_type oracle, vesting_balance_id_type vesting,
+      share_type amount, uint64_t usd_cents )
+{
+   oracle_bond_lock_operation op;
+   op.producer          = producer;
+   op.oracle            = oracle;
+   op.vesting_balance   = vesting;
+   op.bond_amount       = amount;
+   op.bond_usd_cents    = usd_cents;
+   op.bootstrap_weight  = 0;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return producer_bond_id_type {
+      PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
+}
+
+void h2c_publish(
+      database_fixture& f, oracle_id_type oid,
+      account_id_type who, const fc::ecc::private_key& key,
+      int64_t base_amount, int64_t quote_amount )
+{
+   oracle_publish_operation op;
+   op.producer  = who;
+   op.oracle_id = oid;
+   op.values    = { oracle_value( base_amount, quote_amount ) };
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void h2c_freeze(
+      database_fixture& f, account_id_type freezer, const fc::ecc::private_key& key,
+      vault_id_type vault, oracle_id_type oracle )
+{
+   pair_freeze_operation op;
+   op.freezer = freezer;
+   op.vault   = vault;
+   op.oracle  = oracle;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+/**
+ * Cross the next maintenance with a live bonded price (issuance-suite
+ * precedent): approach the boundary, republish (same value at a new time IS
+ * a new promotion record), then cross, so the sweep reads live.
+ */
+void h2c_cross_maintenance_with_price(
+      database_fixture& f, vault_id_type vid, oracle_id_type oid,
+      account_id_type who, const fc::ecc::private_key& key,
+      int64_t base_amount, int64_t quote_amount )
+{
+   f.generate_blocks( f.db.get_dynamic_global_properties().next_maintenance_time - 300 );
+   h2c_publish( f, oid, who, key, base_amount, quote_amount );
+   BOOST_REQUIRE( h2_read_pair_price( f.db, vid( f.db ), 0,
+                                      f.db.head_block_time() ).valid() );
+   f.generate_blocks( f.db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   f.generate_block();
 }
 
 } // namespace
@@ -1382,6 +1458,117 @@ BOOST_AUTO_TEST_CASE( subvault_bond_cap_64 )
    set_expiration( db, tx );
    tx.sign( alice_private_key, db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+} FC_LOG_AND_RETHROW() }
+
+/// Priced maintenance: a BOUND vault converts live-covered bonds through the
+/// bonded price before comparing to outstanding. At (100,1) the 1.34e12 bond
+/// prices 1.34e10 face against 1e10 outstanding (134% < 150%: TOPUP plus
+/// Recovery suspension), where raw parity would read 13400% healthy.
+BOOST_AUTO_TEST_CASE( vault_maintenance_prices_bonds_at_bonded_price )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   const auto bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "BTSP", 5 );
+   const auto usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "USDP", 4 );
+   oracle_options opts;
+   opts.producers[ bob_id ] = oracle_producer_entry( 1 );
+   const oracle_id_type oid = h2c_make_oracle(
+         *this, alice_id, alice_private_key, "H2C.USD", bts_ref, usd_ref, opts );
+   const auto obvest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_ORACLE_RAW );
+   h2c_lock_producer_bond( *this, bob_id, bob_private_key, oid, obvest,
+                           H2C_ORACLE_RAW, H2C_ORACLE_USD_CENTS );
+
+   const asset_id_type pair = h2c_create_uia( *this, alice_id, alice_private_key, "PRICED" );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   // Bind through the freeze, then surgically reopen (issuance-suite
+   // precedent): the binding persists, the test needs a live price leg.
+   h2c_freeze( *this, alice_id, alice_private_key, vid, oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   // 1e10 face: raw parity reads 13400% (healthy); priced at (100,1) it is
+   // 134% (breach). Maintenance must read the priced book.
+   h2c_set_outstanding( *this, vid, share_type( 10000000000LL ) );
+   h2c_cross_maintenance_with_price( *this, vid, oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+   // Recovery prices the same book: 1.34e10 face collateral over 1e10 face
+   // debt suspends new debt.
+   const auto& rec_idx = db.get_index_type<recovery_state_index>().indices();
+   BOOST_REQUIRE( !rec_idx.empty() );
+   BOOST_CHECK_EQUAL( rec_idx.begin()->new_debt_suspended, true );
+} FC_LOG_AND_RETHROW() }
+
+/// Fail-closed maintenance on dual-stale: a bound vault whose bonded price
+/// expired reads breach even at tiny outstanding (live-priced 1.34e6%
+/// healthy; raw parity agrees). No live price, no clean bill.
+BOOST_AUTO_TEST_CASE( vault_maintenance_fails_closed_on_dual_stale )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   const auto bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "BTSS", 5 );
+   const auto usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "USDS", 4 );
+   oracle_options opts;
+   opts.producers[ bob_id ] = oracle_producer_entry( 1 );
+   opts.value_lifetime_sec = 7200; // 2h: age past it without a week-long jump
+   const oracle_id_type oid = h2c_make_oracle(
+         *this, alice_id, alice_private_key, "H2C.STALE", bts_ref, usd_ref, opts );
+   const auto obvest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_ORACLE_RAW );
+   h2c_lock_producer_bond( *this, bob_id, bob_private_key, oid, obvest,
+                           H2C_ORACLE_RAW, H2C_ORACLE_USD_CENTS );
+
+   const asset_id_type pair = h2c_create_uia( *this, alice_id, alice_private_key, "STALE" );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault(
+         *this, alice_id, alice_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   h2c_freeze( *this, alice_id, alice_private_key, vid, oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   // 1e6 face: live-priced 1.34e6% healthy. Age the print past its lifetime,
+   // then cross a maintenance with no live price: TOPUP, never a clean bill.
+   h2c_set_outstanding( *this, vid, share_type( 1000000 ) );
+   h2c_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_REQUIRE( h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+   const auto pub_time = db.head_block_time();
+   generate_blocks( pub_time + 7200 + 600 );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   BOOST_REQUIRE( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+   // Recovery counts the stale book at zero collateral: suspends.
+   const auto& rec_idx = db.get_index_type<recovery_state_index>().indices();
+   BOOST_REQUIRE( !rec_idx.empty() );
+   BOOST_CHECK_EQUAL( rec_idx.begin()->new_debt_suspended, true );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

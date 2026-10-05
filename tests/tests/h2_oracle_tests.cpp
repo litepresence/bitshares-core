@@ -464,6 +464,36 @@ asset_id_type h2e_create_uia(
       PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
 }
 
+void h2e_delete_oracle(
+      database_fixture& f, account_id_type owner, const fc::ecc::private_key& key,
+      oracle_id_type oid )
+{
+   oracle_delete_operation op;
+   op.owner     = owner;
+   op.oracle_id = oid;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void h2e_delete_oracle_throws(
+      database_fixture& f, account_id_type owner, const fc::ecc::private_key& key,
+      oracle_id_type oid )
+{
+   oracle_delete_operation op;
+   op.owner     = owner;
+   op.oracle_id = oid;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( f.db, tx ), fc::exception );
+}
+
 const tripwire_state_object* h2e_find_tripwire( database_fixture& f, asset_id_type pair )
 {
    const auto& idx = f.db.get_index_type<tripwire_index>().indices().get<by_tripwire_pair>();
@@ -2778,6 +2808,88 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
    pass_window();
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+} FC_LOG_AND_RETHROW() }
+
+/// X-08 lifecycle seam: deleting an oracle with an open dispute is refused
+/// (RED: pre-fix only market-issued subscribers block, disputes do not).
+/// After a fast-reject resolution the forfeit pool leg still refuses: the
+/// undistributed pool must settle through the reward sweep first.
+BOOST_AUTO_TEST_CASE( delete_with_open_dispute_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTSD", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USDD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "DEL.USD", bts_ref, usd_ref, opts );
+   h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   const oracle_dispute_id_type did = h2e_post_dispute(
+         *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+         h2e_evidence( "delete-dispute" ) );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 1u );
+
+   // Open dispute: refused, oracle still present.
+   h2e_delete_oracle_throws( *this, alice_id, alice_private_key, oid );
+   BOOST_CHECK( db.find( oid ) != nullptr );
+
+   // Resolve by fast-reject: the dispute closes but the forfeit pool holds
+   // the 15% slice until the reward sweep settles it -- deletion still
+   // refused on the pool leg.
+   h2e_fast_reject_from_genesis( *this, object_id_type( did ) );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_FAST_REJECTED );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+   BOOST_REQUIRE( oid( db ).forfeit_pool_balance > share_type( 0 ) );
+   h2e_delete_oracle_throws( *this, alice_id, alice_private_key, oid );
+   BOOST_CHECK( db.find( oid ) != nullptr );
+} FC_LOG_AND_RETHROW() }
+
+/// X-08 lifecycle seam: deleting an oracle a vault is canonically bound to
+/// (and which still secures a producer bond) is refused (RED: pre-fix the
+/// delete path checks only market-issued subscribers and strands the
+/// bound_oracle pin with no rebind path).
+BOOST_AUTO_TEST_CASE( delete_with_bound_vault_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTSB", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USDB", 4 );
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "BINDDEL.USD", bts_ref, usd_ref, opts );
+   // Producer bond live on the oracle (third refuse leg).
+   const auto obvest = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, oid, obvest,
+                           H2E_ORACLE_RAW, H2E_ORACLE_USD_CENTS );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2e_register_vault_default(
+         *this, alice_id, alice_private_key, vault_auth );
+   h2e_freeze( *this, alice_id, alice_private_key, vid, oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+
+   // Bound vault (and live producer bond): refused, oracle still present.
+   h2e_delete_oracle_throws( *this, alice_id, alice_private_key, oid );
+   BOOST_CHECK( db.find( oid ) != nullptr );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

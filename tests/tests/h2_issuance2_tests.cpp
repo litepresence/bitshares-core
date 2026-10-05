@@ -294,11 +294,18 @@ h2j_door h2j_open_door(
    h2j_lock_producer_bond( f, bob.get_id(), bob_key, oid, vb, oracle_bond,
                            GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS );
 
-   const asset_id_type pair = h2j_create_uia( f, alice.get_id(), alice_key, pair_sym );
-   const asset_id_type fxr = h2j_create_uia( f, alice.get_id(), alice_key, fxr_sym );
-   authority vault_auth( 1, alice.get_id(), 1 );
-   const vault_id_type vid = h2j_register_vault(
-         f, alice.get_id(), alice_key, vault_auth, min_bond, min_bond_usd, pair );
+    const asset_id_type pair = h2j_create_uia( f, alice.get_id(), alice_key, pair_sym );
+    const asset_id_type fxr = h2j_create_uia( f, alice.get_id(), alice_key, fxr_sym );
+    authority vault_auth( 1, alice.get_id(), 1 );
+    const vault_id_type vid = h2j_register_vault(
+          f, alice.get_id(), alice_key, vault_auth, min_bond, min_bond_usd, pair );
+    // Vault bond (mint-gate book): one full-size live-covered bond, so every
+    // door mint below inherits a 200%-gated book. Owner is the oracle
+    // producer (a stranger to the vault authority may bond; only minting is
+    // authority-gated).
+    const auto bond_vest = h2j_make_cdd_vesting( f, bob.get_id(), bob_key, min_bond );
+    h2j_lock_vault_bond( f, bob.get_id(), bob_key, vid, bond_vest, min_bond,
+                         min_bond_usd );
 
    h2j_freeze( f, alice.get_id(), alice_key, vid, oid );
    BOOST_REQUIRE( vid( f.db ).bound_oracle.valid() );
@@ -549,15 +556,9 @@ BOOST_AUTO_TEST_CASE( band_move_predicate_pins )
    BOOST_CHECK( h2_issue_price_moved( oracle_value( 80, 1 ), oracle_value( 82, 1 ) ) );
    BOOST_CHECK( !h2_issue_price_moved( oracle_value( 0, 0 ), oracle_value( 100, 1 ) ) );
    BOOST_CHECK( !h2_issue_price_moved( oracle_value( 100, 1 ), oracle_value( 0, 1 ) ) );
-   // Band grid pins: eight edges, anchor at par, 250bps minimum spacing.
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 0 ), 9000 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 1 ), 9500 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 2 ), 9750 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 3 ), 10000 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 4 ), 10250 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 5 ), 10500 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 6 ), 11000 );
-   BOOST_CHECK_EQUAL( h2_issue_band_edge_bps( 7 ), 11500 );
+   // (LL-02: the band-edge grid was dead consensus code -- no price was ever
+   // compared to an edge -- so it was deleted, with its pins, rather than
+   // wired into any gate.)
    BOOST_CHECK_EQUAL( GRAPHENE_H2_ISSUE_N_BANDS, 7u );
 } FC_LOG_AND_RETHROW() }
 
@@ -856,6 +857,11 @@ BOOST_AUTO_TEST_CASE( cap_function_qualified_depth_binds )
     BOOST_REQUIRE( db.find( p1_id ) != nullptr );
     BOOST_REQUIRE( db.find( p2_id ) != nullptr );
     // Rotate: old window takes round 1 (evaluation stays clean: ~1% moves).
+    // The opening publish aged on the way, so approach, republish, then
+    // cross: the sweep must read a live bonded price (stale reads breach
+    // fail-closed), and publishing touches no tripwire window.
+    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 300 );
+    h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
     generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
     generate_block();
     BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
@@ -991,14 +997,23 @@ BOOST_AUTO_TEST_CASE( offset_pool_absorbs_claims_vest_and_refuse_theft )
    BOOST_CHECK( p2->claims[0].available_after >= avail0 );
    h2j_offset_claim_throws( *this, bob_id, bob_private_key, d, share_type( 59001 ) );
 
-   // After the 7-day vesting the claim pays liquid and the entry closes.
-   generate_blocks( db.head_block_time() + GRAPHENE_H2_ISSUE_OFFSET_VEST_SEC + 100 );
-   generate_block();
-   const share_type bob_before = db.get_balance( bob_id, asset_id_type() ).amount;
-   h2j_offset_claim( *this, bob_id, bob_private_key, d, share_type( 59000 ) );
-   BOOST_CHECK( db.get_balance( bob_id, asset_id_type() ).amount
-                == bob_before + share_type( 59000 ) );
-   BOOST_CHECK( h2j_find_pool( *this, d.pair )->claims.empty() );
+    // After the 7-day vesting the claim pays liquid and the entry closes.
+    // (The jump crosses ~7 maintenances on an expired price: the vault tops
+    // up, then winds down fail-closed mid-jump. The funded pool is untouched
+    // -- absorbs hold without a bonded price -- so the matured claim still
+    // pays in full; wind-down claims are the separate terminal path.)
+    generate_blocks( db.head_block_time() + GRAPHENE_H2_ISSUE_OFFSET_VEST_SEC + 100 );
+    generate_block();
+    const share_type bob_before = db.get_balance( bob_id, asset_id_type() ).amount;
+    h2j_offset_claim( *this, bob_id, bob_private_key, d, share_type( 59000 ) );
+    BOOST_CHECK( db.get_balance( bob_id, asset_id_type() ).amount
+                 == bob_before + share_type( 59000 ) );
+    BOOST_CHECK( h2j_find_pool( *this, d.pair )->claims.empty() );
+
+    // Re-live the price and cross once: the jump's stale sweeps suspended
+    // Recovery (zero priced collateral), and the second door below registers
+    // new debt -- it must observe a live book, not the stale jump.
+    h2j_cross_maintenance_with_price( *this, d, bob_id, bob_private_key, 201, 1 );
 
    // No pool, no claim: the reserveless door refuses.
    const h2j_door e = h2j_open_door(
@@ -1516,6 +1531,142 @@ BOOST_AUTO_TEST_CASE( depth_median_api_reads_live_tripwire_state )
    BOOST_REQUIRE( api_depth.valid() );
    BOOST_CHECK_EQUAL( *chain_depth, 0u );
    BOOST_CHECK_EQUAL( *api_depth, 0u );
+} FC_LOG_AND_RETHROW() }
+
+/// LL-10 frozen-oracle explicit halt: a queued exit the maintenance sweep
+/// cannot settle (no bonded live price) is an EXPLICIT vault halt, never a
+/// silent stall (RED: pre-fix the sweep `continue`s with the vault untouched).
+/// Isolation: the vault carries zero outstanding, so the coverage sweep meets
+/// and never top-ups -- HEALTHY throughout proves the freeze below comes
+/// from the issuance sweep alone, not the TOPUP path.
+BOOST_AUTO_TEST_CASE( frozen_oracle_holds_queued_exits_as_explicit_halt )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYHALT", "HYHALTF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "H" );
+
+   // Book: D=700000/M=1000 at (100,1). Queue a 600-face batch exit (supply
+   // and outstanding fall to 400), then take the exact full-book redeem path
+   // for the remaining 400: supply and outstanding reach 0 while the queued
+   // 600 (face already burned) waits for its maintenance batch.
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 700000 ), share_type( 1000 ) );
+   h2j_exit_request( *this, alice_id, alice_private_key, d, share_type( 600 ) );
+   BOOST_REQUIRE( d.vault( db ).outstanding == share_type( 400 ) );
+   h2j_redeem( *this, alice_id, alice_private_key, d, share_type( 400 ) );
+   BOOST_REQUIRE( d.vault( db ).outstanding == share_type( 0 ) );
+   BOOST_REQUIRE( h2j_find_reserve( *this, d.pair )->exit_queue.size() == 1u );
+
+   // Shorten the print lifetime (owner path, no dispute standing), then cross
+   // the next maintenance with the print aged far past it: the sweep reads
+   // no bonded price. The approach crosses no maintenance (queue-safe); the
+   // final crossing lands 600s past the grid with print age >> 120s.
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 1800 );
+   {
+      oracle_update_operation uop;
+      uop.owner     = alice_id;
+      uop.oracle_id = d.oracle;
+      oracle_options live = d.oracle( db ).options;
+      live.value_lifetime_sec = 120;
+      uop.new_options = live;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 600 );
+   generate_block();
+
+   // Premise: the bonded read is absent at the sweep.
+   BOOST_REQUIRE( !h2_read_pair_price( db, d.vault( db ), 0, db.head_block_time() ).valid() );
+   // Explicit halt, not silent stall: the door reads frozen while the queue
+   // sits intact for the live-price resume.
+   BOOST_CHECK_EQUAL( d.vault( db ).frozen, true );
+   BOOST_CHECK_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_REQUIRE( r->exit_queue.size() == 1u );
+   BOOST_CHECK( r->exit_queue.front().face == share_type( 600 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Offset ledger honesty (ISS-12): the 64-claimant cap PRUNES, never refuses
+/// honest absorbers out of the shock absorber (RED: pre-fix the 65th
+/// distinct deposit is refused, so 64 dust accounts lock every honest
+/// depositor out of the pool for 7 days). The victim is the smallest MATURED
+/// claim, paid liquid at prune time (matured = already claimable, so nothing
+/// strands); with no matured claim the 65th still refuses fail-closed.
+BOOST_AUTO_TEST_CASE( offset_ledger_prunes_smallest_matured_claim )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPRUNE", "HYPRUNEF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "P" );
+
+   // 65 distinct depositors (no mints on this pair: the vault carries no
+   // outstanding, so the 7-day jump below crosses maintenances safely).
+   vector<account_id_type> fillers;
+   vector<fc::ecc::private_key> fill_keys;
+   for( int i = 0; i < 65; ++i )
+   {
+      const string name = string( "prunefill" ) + fc::to_string( i );
+      const fc::ecc::private_key key = generate_private_key( name );
+      const account_object& acct = create_account( name, key.get_public_key() );
+      fund( acct, asset( 10000000 ) );
+      fillers.push_back( acct.get_id() );
+      fill_keys.push_back( key );
+   }
+   for( int i = 0; i < 64; ++i )
+      h2j_offset_deposit( *this, fillers[i], fill_keys[i], d, share_type( 1000 ) );
+   const offset_pool_object* p0 = h2j_find_pool( *this, d.pair );
+   BOOST_REQUIRE( p0 != nullptr );
+   BOOST_REQUIRE_EQUAL( p0->claims.size(), 64u );
+
+   // Nothing matured yet: the 65th refuses fail-closed (no prune candidate).
+   h2j_offset_deposit_throws( *this, fillers[64], fill_keys[64], d, share_type( 1000 ) );
+
+   // Past the 7-day vest every claim matured: the 65th admits, pruning the
+   // smallest matured claim (all equal here: the first, fill00) with a
+   // liquid payout, so no funds strand and the ledger stays bounded.
+   generate_blocks( db.head_block_time() + GRAPHENE_H2_ISSUE_OFFSET_VEST_SEC + 600 );
+   generate_block();
+   const share_type victim_before =
+         db.get_balance( fillers[0], asset_id_type() ).amount;
+   h2j_offset_deposit( *this, fillers[64], fill_keys[64], d, share_type( 1000 ) );
+   const offset_pool_object* p1 = h2j_find_pool( *this, d.pair );
+   BOOST_REQUIRE( p1 != nullptr );
+   BOOST_CHECK_EQUAL( p1->claims.size(), 64u );
+   BOOST_CHECK( p1->balance == share_type( 64000 ) );
+   bool victim_gone = true, newcomer_present = false;
+   for( const h2_offset_claim& c : p1->claims )
+   {
+      if( c.owner == fillers[0] )
+         victim_gone = false;
+      if( c.owner == fillers[64] )
+      {
+         newcomer_present = true;
+         BOOST_CHECK( c.amount == share_type( 1000 ) );
+      }
+   }
+   BOOST_CHECK( victim_gone );
+   BOOST_CHECK( newcomer_present );
+   BOOST_CHECK( db.get_balance( fillers[0], asset_id_type() ).amount
+                == victim_before + share_type( 1000 ) );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -120,9 +120,12 @@ class reserve_object : public abstract_object<reserve_object, protocol_ids, rese
       /// entries and EXIT_QUEUE_MAX_BTS of queued value (both refuse).
       vector<h2_exit_request> exit_queue;
       /// Residual shortfall after the offset pool absorbed what it could
-      /// (BTS units, overwritten each computation, 0 when covered). The
-      /// remainder dilutes through the existing rmax junior path at claim
-      /// time -- this record is the handoff, never a second ledger.
+      /// (BTS units, overwritten each computation, 0 when covered). While
+      /// nonzero the pair's mint door halts (coverage honesty: no new senior
+      /// prints into an underwater book); the record clears on the next
+      /// covered computation. Diagnostic per-computation state, never a
+      /// second ledger -- and NOT an rmax handoff (the wind-down junior path
+      /// never reads it).
       share_type     uncovered_shortfall;
 };
 
@@ -155,14 +158,16 @@ using reserve_index = generic_index<reserve_object, reserve_multi_index_type>;
  * record per pair ever exists. balance is pool-owned BTS (supply-visible in
  * the fixture audit, reserve precedent). claims is the per-account ledger
  * {owner -> amount, available_after}: bounded at OFFSET_MAX_CLAIMANTS
- * entries (refuse past the cap), merged by owner, non-transferable by
+ * entries (the cap PRUNES: a 65th distinct claimant drops the smallest
+ * matured claim, paid liquid at prune time; with no matured claim the
+ * deposit refuses), merged by owner, non-transferable by
  * construction (no operation but offset_claim names a claim, and it requires
  * the owner plus maturity). Absorbs haircut claims pro-rata by the same
  * factor as the balance (floored; absorbers take the first loss), so
  * sum(claims) <= balance holds by construction. The pool absorbs residual
  * shortfalls instantly when a position reads below 100% after bands (exact
  * predicate in h2_offset_should_absorb); the remainder is recorded on the
- * reserve as uncovered_shortfall for the rmax junior path.
+ * reserve as uncovered_shortfall (which halts the mint door while nonzero).
  */
 struct h2_offset_claim
 {

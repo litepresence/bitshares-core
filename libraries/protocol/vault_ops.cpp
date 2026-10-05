@@ -43,8 +43,10 @@ void vault_register_operation::validate()const
    // core asset statically.
    FC_ASSERT( bond_asset == asset_id_type(),
               "Vault bond asset is BTS-only at genesis" );
-   FC_ASSERT( secure_ratio_bps > 10000,
-              "Secure ratio must exceed 100% (10000 bps)" );
+   FC_ASSERT( secure_ratio_bps >= 20000,
+               "Secure ratio must be at least 20000bps (200% genesis pin): "
+               "vault bonds gate mints at this ratio, and a lower commitment "
+               "could never clear its own mint gate" );
    FC_ASSERT( challenge_window_sec > 0,
               "Challenge window must be positive" );
    FC_ASSERT( challenge_window_sec <= GRAPHENE_H2_VAULT_MAX_CHALLENGE_WINDOW_SEC,

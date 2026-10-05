@@ -33,6 +33,7 @@
 #include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -567,15 +568,41 @@ BOOST_AUTO_TEST_CASE( missed_deadline_expires_frozen_without_votes )
    BOOST_CHECK_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
    BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
    // The vault halts mints and the oracle stops promoting values, but both
-   // keep aggregating transparently; the challenger is not punished for the
-   // committee's silence, so escrow returns in full.
+   // keep aggregating transparently. Expiry is inconclusive, never
+   // exoneration (cartel abstention must not equal vindication), so both
+   // challenger escrows forfeit through the standard 80/15/finder split
+   // instead of returning in full: the 80% burn leaves supply, the 15%
+   // accrues to the forfeit pools, the ~5% finder slice returns to the
+   // challenger (no decisive voter exists to pay).
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
    BOOST_CHECK_EQUAL( vid( db ).open_challenges, 0u );
    BOOST_CHECK_EQUAL( oid( db ).open_disputes, 0u );
-   // Both escrows (one challenge bond + one round-1 dispute bond) return in
-   // full: only fees are gone, never a forfeit.
-   BOOST_CHECK( db.get_balance( bob_id, asset_id_type() ).amount > bob_before - H2D_ROUND1_RAW * 2 );
+   // Exact split on the base-size bond (finder 5% = $41.88 under the $83.75
+   // cap, so no cap burn): burn 67000000000, pool 12562500000, finder
+   // 4187500000 per escrow. Bob posted two escrows and receives two finder
+   // slices; everything else stays forfeited.
+   const share_type pool_expect = share_type( 12562500000LL );
+   const share_type finder_expect = share_type( 4187500000LL );
+   BOOST_CHECK( db.get_balance( bob_id, asset_id_type() ).amount
+                == bob_before - H2D_ROUND1_RAW * 2
+                   - db.current_fee_schedule().calculate_fee(
+                        graphene::protocol::operation( vault_challenge_operation() ) ).amount
+                   - db.current_fee_schedule().calculate_fee(
+                        graphene::protocol::operation( oracle_dispute_operation() ) ).amount
+                   + finder_expect * 2 );
+   // Vault leg: the vault is unbound, so its accrual waits on the vault
+   // (never crosses pairs); the oracle leg sweeps into the reward pool the
+   // same maintenance (carol published but never bonded, so the pool holds
+   // it instead of paying it out).
+   BOOST_CHECK( vid( db ).forfeit_pool_balance == pool_expect );
+   {
+      const auto& pool_idx = db.get_index_type<reward_pool_index>()
+                                .indices().get<by_pool_oracle>();
+      const auto pitr = pool_idx.find( oid );
+      BOOST_REQUIRE( pitr != pool_idx.end() );
+      BOOST_CHECK( pitr->balance == pool_expect );
+   }
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( same_authority_pairings_are_refused )

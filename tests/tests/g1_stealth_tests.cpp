@@ -765,9 +765,31 @@ std::vector<char> T_bp_prove( const fc::ecc::commitment_type& C,
 // The float rule itself is covered by the parity_* cases below. Seeding is
 // supply-neutral (fee legs mirror pay_market_fees exactly: the nominal never
 // moves inside pay_market_fees, so only the fee amount leaves the payer).
+// Task 7 legacy gate (BSIP-2 §2, GP-01/GP-02): the parity fee-share routes
+// only for assets whose issuer set additional_asset_options
+// .parity_fee_share_enabled (absent == false, the state of every legacy
+// asset). Cases below fund the pool through the real routing leg
+// (pay_market_fees / stealth_parity_route_fee), so they opt the fee asset
+// in first. Test-setup direct write (same standing as the fee-scale pins
+// above — CORE's issuer is the committee account, which has no test key):
+// the issuer-signed production opt-in path, including its pre-fork
+// refusal, is pinned separately by g1_parity_legacy_tests.
+static void g1c_opt_in_parity( database& db, asset_id_type aid )
+{
+   const asset_object& a = aid( db );
+   const auto& e = a.options.extensions.value.parity_fee_share_enabled;
+   if( e.valid() && *e )
+      return;
+   db.modify( a, []( asset_object& o ) {
+      o.options.extensions.value.parity_fee_share_enabled = true;
+   } );
+}
+
 static void g1c_seed_pool( database& db, account_id_type payer,
                            const asset_object& core, int64_t need )
 {
+   // Task 7 legacy gate: pool funding routes only for opted-in assets.
+   g1c_opt_in_parity( db, core.get_id() );
    const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
    auto itr = st.parity_pool.find( core.get_id() );
    share_type have = ( itr == st.parity_pool.end() ) ? share_type( 0 ) : itr->second;
@@ -2501,7 +2523,11 @@ BOOST_AUTO_TEST_CASE( per_asset_halt_scope )
    // after every push, so current_supply is bumped alongside — the tripwire
    // input under test is shadow-vs-confidential only (current is irrelevant
    // to reconciliation); both bumps are repaired on healing below.
-   db.modify( uia.dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
+   // Re-fetch by id (Task 7 note): block production resets the pending undo
+   // session, destroying pending-created objects and recreating them at new
+   // addresses — a db.get const-ref captured before a generate_block may
+   // dangle after it. IDs stay valid; refs do not.
+   db.modify( uia_id( db ).dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
       d.confidential_supply += 500;
       d.current_supply += 500;
    } );
@@ -2510,9 +2536,10 @@ BOOST_AUTO_TEST_CASE( per_asset_halt_scope )
    BOOST_CHECK( !stealth_asset_halted( db, core_id ) );
    BOOST_CHECK( !stealth_blind_halted( db ) ); // no global flap
    // The diverged asset's blind ops reject at the asset gate...
+   // (uia re-fetched by id — see the pending-session note above).
    {
       transfer_to_blind_operation ttb;
-      ttb.amount = uia.amount( 100 );
+      ttb.amount = uia_id( db ).amount( 100 );
       ttb.from = dan.id;
       auto k = fc::ecc::private_key::generate();
       blind_output o;
@@ -2522,7 +2549,7 @@ BOOST_AUTO_TEST_CASE( per_asset_halt_scope )
       o.commitment = fc::ecc::blind( B, 100 );
       o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
       ttb.blinding_factor = B;
-      ttb.fee = uia.amount( 2000000 ); // generous: the asset gate fires first
+      ttb.fee = uia_id( db ).amount( 2000000 ); // generous: the asset gate fires first
       ttb.outputs = { o };
       set_expiration( db, trx );
       trx.operations = { ttb };
@@ -2578,7 +2605,8 @@ BOOST_AUTO_TEST_CASE( per_asset_halt_scope )
    // while replaying only pushed transactions. Same-block pushes re-evaluate
    // immediately, so the fresh fourth member (dan never voted: no duplicate
    // hazard) re-triggers the quorum on the healed state directly.
-   db.modify( uia.dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
+   // (uia re-fetched by id — see the pending-session note above.)
+   db.modify( uia_id( db ).dynamic_asset_data_id( db ), []( asset_dynamic_data_object& d ) {
       d.confidential_supply -= 500;
       d.current_supply -= 500;
    } );
@@ -2928,6 +2956,9 @@ BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )
    // Seal-then-modify (see negative_mint_rejected): the routing legs below
    // are direct db modifications and must survive block-production replay.
    generate_block();
+   // Task 7 legacy gate: this case funds CORE's pool through the real
+   // routing leg, so opt CORE in first (production path pinned separately).
+   g1c_opt_in_parity( db, core_id );
 
    // --- fee-share routing through the single choke point (market + ---
    // --- settlement fees both land in database::pay_market_fees)      ---
@@ -3092,6 +3123,8 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
       itr->get<transfer_from_blind_operation::fee_params_t>().fee = 499000;
    } );
    BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 499000 ) ).value, 1000 );
+   // Task 7 legacy gate: opt CORE in so the seeding below routes.
+   g1c_opt_in_parity( db, core_id );
    // Seed exactly 50 subsidies: route 1M nominal (5% = 50000).
    db.adjust_balance( dan_id, core.amount( -1000000 ) );
    db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
@@ -3260,6 +3293,8 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
       itr->get<transfer_from_blind_operation::fee_params_t>().fee = 490000;
    } );
    // Seed the pool BEFORE the clock jumps (funding works while current).
+   // Task 7 legacy gate: opt CORE in so the seeding below routes.
+   g1c_opt_in_parity( db, core_id );
    db.adjust_balance( dan_id, core.amount( -1000000 ) );
    db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
    {
@@ -3514,6 +3549,8 @@ BOOST_AUTO_TEST_CASE( parity_alarms_computed_and_queryable )
       trx.clear_signatures(); trx.operations.clear();
    };
    // Route 20M nominal (pool +1M), grant one 500000 subsidy (zeroed schedule).
+   // Task 7 legacy gate: opt CORE in so the seeding below routes.
+   g1c_opt_in_parity( db, core_id );
    db.adjust_balance( dan_id, core.amount( -20000000 ) );
    db.pay_market_fees( nullptr, core, core.amount( 20000000 ), true, core.amount( 20000000 ) );
    withdraw( 0 );
@@ -3610,6 +3647,8 @@ BOOST_AUTO_TEST_CASE( parity_joint_cap_with_h2 )
    {
       // Routing still books while breached (signal, not halt): mirror the
       // pay_market_fees legs exactly (offset + accumulate the remainder).
+      // Task 7 legacy gate: opt CORE in so the routing below books.
+      g1c_opt_in_parity( db, core.get_id() );
       db.adjust_balance( dan_id, core.amount( -100000 ) );
       share_type inc = 100000;
       share_type routed = stealth_parity_route_fee( db, core.get_id(), inc );
@@ -4020,6 +4059,8 @@ BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
    } );
    BOOST_REQUIRE_EQUAL( stealth_parity_gap_core( db, 0, share_type( 490000 ) ).value, 10000 );
    // Seed the pool (5% of 1M = 50000) BEFORE forcing the halt.
+   // Task 7 legacy gate: opt CORE in so the seeding below routes.
+   g1c_opt_in_parity( db, core_id );
    db.adjust_balance( dan_id, core.amount( -1000000 ) );
    db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
    BOOST_REQUIRE_EQUAL(
@@ -4153,8 +4194,11 @@ BOOST_AUTO_TEST_CASE( parity_uia_cer_gap_bound )
    // accumulated credited — direct pool writes would break
    // verify_asset_supplies, which counts the pool). 1502 covers gap 1001
    // exactly; gap 1002 needs ceil(1002*3/2) = 1503 and is short.
-   db.adjust_balance( dan_id, uia.amount( -30040 ) );
-   db.pay_market_fees( nullptr, uia, uia.amount( 30040 ), true, uia.amount( 30040 ) );
+   // Task 7 legacy gate: opt the UIA in so the seeding below routes.
+   // (Re-fetched by id — see the pending-session note in per_asset_halt_scope.)
+   g1c_opt_in_parity( db, uia_id );
+   db.adjust_balance( dan_id, uia_id( db ).amount( -30040 ) );
+   db.pay_market_fees( nullptr, uia_id( db ), uia_id( db ).amount( 30040 ), true, uia_id( db ).amount( 30040 ) );
    {
       const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
       BOOST_REQUIRE_EQUAL( st.parity_pool.find( uia_id )->second.value, 1502 );
@@ -4291,6 +4335,9 @@ BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
    // Supply-neutral mirroring (G3-07): every routed increment is funded by
    // a balance debit, the remainder credited to accumulated_fees — the same
    // legs pay_market_fees runs, so verify_asset_supplies holds.
+   // Task 7 legacy gate: opt CORE in — the dust boundary math below
+   // applies to opted-in assets (dust still routes zero by rule).
+   g1c_opt_in_parity( db, core_id );
    {
       const auto& st0 = *db.get_index_type<stealth_status_index>().indices().begin();
       BOOST_CHECK( st0.parity_pool.find( core_id ) == st0.parity_pool.end() );

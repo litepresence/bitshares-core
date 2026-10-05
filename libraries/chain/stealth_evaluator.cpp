@@ -79,6 +79,20 @@ bool stealth_passed( const database& db )
    return HARDFORK_STEALTH_PASSED( db.head_block_time() );
 }
 
+// Task 7 legacy coexistence (BSIP-2 §2, GP-01/GP-02): the parity fee-share
+// routes ONLY for assets whose issuer opted in via
+// additional_asset_options.parity_fee_share_enabled (appended-last, absent ==
+// false). Every legacy asset (bit*, HONEST.*, gateway UIAs, CORE) is absent-
+// flagged, so post-fork fills on non-opted assets leave parity_pool
+// untouched and credit 100% of the increment to accumulated_fees — by
+// construction, not by convention. Read-only options lookup: deterministic,
+// no floats, no time, no state change.
+bool parity_fee_share_opted_in( const database& db, asset_id_type recv_asset )
+{
+   const auto& opt = recv_asset( db ).options.extensions.value.parity_fee_share_enabled;
+   return opt.valid() && *opt;
+}
+
 fc::sha256 nullifier_key( const std::vector<char>& image33 )
 {
    return fc::sha256::hash( image33.data(), image33.size() );
@@ -1128,6 +1142,11 @@ share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
    if( !stealth_passed( db ) )
       return share_type( 0 );
    if( inout_increment.value <= 0 )
+      return share_type( 0 );
+   // Task 7 legacy gate (GP-01/GP-02): no opt-in, no diversion, ever. The
+   // increment is untouched, so the caller credits 100% to accumulated_fees.
+   // Checked before any state access: legacy assets never dirty undo state.
+   if( !parity_fee_share_opted_in( db, recv_asset ) )
       return share_type( 0 );
    // The routed share of any single fee trivially fits the joint ceiling at
    // the proposal share (500bps << 7000bps); the assert pins that bound so a

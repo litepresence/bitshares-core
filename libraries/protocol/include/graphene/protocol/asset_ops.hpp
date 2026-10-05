@@ -41,6 +41,18 @@ namespace graphene { namespace protocol {
        /// in bitasset options instead and must NOT set this (the two would disagree about
        /// what the token tracks). Appended last: extension tags are append-only.
        fc::optional<reference_mapping>         reference_asset_mapping;
+       /// G1 parity fee-share opt-in (BSIP-2 section 2, Task 7): when set to
+       /// true, a fixed share (GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS) of this
+       /// asset's market/settlement fee increments funds the per-asset parity
+       /// pool instead of landing in accumulated_fees. Absent (the default,
+       /// and the state of every legacy bit*/HONEST.*/gateway asset) means
+       /// false: no diversion, ever — accumulated_fees takes 100%.
+       /// Appended last: extension tags are append-only, so pre-fork chain
+       /// data (field absent) keeps parsing. Settable only post-STEALTH: the
+       /// asset_create/asset_update evaluators refuse it pre-fork, because
+       /// pre-fork nodes reject unknown extension fields on unpack and a
+       /// pre-fork opt-in would split the network.
+       fc::optional<bool>                      parity_fee_share_enabled;
     };
    typedef extension<additional_asset_options> additional_asset_options_t;
 
@@ -689,7 +701,7 @@ FC_REFLECT( graphene::protocol::bitasset_options,
 
 FC_REFLECT( graphene::protocol::additional_asset_options,
              (reward_percent)(whitelist_market_fee_sharing)(taker_fee_percent)
-             (reference_asset_mapping) )
+             (reference_asset_mapping)(parity_fee_share_enabled) )
 
 FC_REFLECT( graphene::protocol::asset_update_operation::ext, (new_precision)(skip_core_exchange_rate) )
 FC_REFLECT( graphene::protocol::asset_publish_feed_operation::ext, (initial_collateral_ratio) )

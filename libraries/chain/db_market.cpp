@@ -2688,8 +2688,11 @@ asset database::pay_market_fees(const account_object* seller, const asset_object
          // G1c parity routing (BSIP-2 §2): a fixed share of the market /
          // settlement fee increment funds the per-asset parity pool; the
          // remainder lands in accumulated_fees exactly as before. Redirects,
-         // never mints: totals preserved. Pre-fork and funding-halted are
-         // no-ops inside (increment untouched).
+         // never mints: totals preserved. Pre-fork, funding-halted, and
+         // non-opted-in assets are no-ops inside (increment untouched, so
+         // legacy assets credit 100% to accumulated_fees by construction).
+         // Task 7 (GP-01/GP-02): routing requires the recv asset's
+         // parity_fee_share_enabled opt-in alongside stealth_passed.
          share_type routed = stealth_parity_route_fee( *this, recv_asset.get_id(), increment );
          (void)routed; // accounted in the pool + interval flow; remainder below
          modify( recv_dyn_data, [&increment]( asset_dynamic_data_object& obj ){
@@ -2723,6 +2726,16 @@ asset database::pay_force_settle_fees(const asset_object& collecting_asset, cons
    asset settle_fee( value, collat_receives.asset_id );
 
    // Deposit fee in asset's dynamic data object:
+   // Task 7 documented exclusion (BSIP-2 §2): the BSIP-87 force-settle slice
+   // is NEVER parity-routed — not for legacy assets, not even for opted-in
+   // ones. It is collateral-denominated issuer revenue credited to the DEBT
+   // asset's accumulated_collateral_fees; routing it would place
+   // collateral-denominated value into parity_pool[debt], mixing
+   // denominations inside one per-asset entry and breaking the pool's
+   // denomination identity (subsidies pay pool[fee_asset] in fee_asset
+   // units). The MARKET-fee leg of the same settlement still routes when the
+   // collateral asset opted in (denomination-preserving, via pay_market_fees
+   // → stealth_parity_route_fee); this slice lands 100% here.
    if( value > 0) {
       collecting_asset.accumulate_fee(*this, settle_fee);
    }

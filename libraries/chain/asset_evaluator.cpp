@@ -156,6 +156,20 @@ namespace detail {
                   "An asset's reference mapping cannot be set before the oracle hardfork" );
     }
 
+    void check_asset_options_hf_stealth( const fc::time_point_sec& block_time,
+                                         const asset_options& options )
+    {
+       // Task 7 (GP-01/GP-02 legacy coexistence): the parity fee-share
+       // opt-in must not be set before the STEALTH hardfork. Pre-fork nodes
+       // reject unknown extension fields on unpack, so a pre-fork opt-in
+       // would split the network (new nodes accept, old nodes refuse the
+       // same asset_update/asset_create). Post-fork the flag is inert until
+       // stealth_parity_route_fee requires it alongside stealth_passed.
+       FC_ASSERT( !options.extensions.value.parity_fee_share_enabled.valid()
+                  || HARDFORK_STEALTH_PASSED( block_time ),
+                  "An asset's parity fee-share opt-in cannot be set before the stealth hardfork" );
+    }
+
     /// A declared mapping must be internally consistent and point at a reference asset that
     /// exists. Checked here rather than left to first use: an asset mapped to nothing would
     /// look consumable while no oracle value could ever convert into its price.
@@ -250,7 +264,8 @@ void_result asset_create_evaluator::do_evaluate( const asset_create_operation& o
    detail::check_asset_options_hf_bsip81(now, op.common_options);
     detail::check_asset_options_hf_core2281( next_maint_time, op.common_options ); // HF_REMOVABLE
     detail::check_asset_options_hf_core2467( next_maint_time, op.common_options ); // HF_REMOVABLE
-    detail::check_asset_options_hf_oracle( now, op.common_options );
+     detail::check_asset_options_hf_oracle( now, op.common_options );
+     detail::check_asset_options_hf_stealth( now, op.common_options );
     // The UIA mapping home: a non-market-issued asset may declare what it tracks at
     // creation, provided the reference exists. A market-issued asset must not: its mapping
     // lives in bitasset options, and a second home would disagree about what the token
@@ -535,7 +550,8 @@ void_result asset_update_evaluator::do_evaluate(const asset_update_operation& o)
    detail::check_asset_options_hf_bsip81(now, o.new_options);
    detail::check_asset_options_hf_core2281( next_maint_time, o.new_options ); // HF_REMOVABLE
    detail::check_asset_options_hf_core2467( next_maint_time, o.new_options ); // HF_REMOVABLE
-   detail::check_asset_options_hf_oracle( now, o.new_options );
+    detail::check_asset_options_hf_oracle( now, o.new_options );
+    detail::check_asset_options_hf_stealth( now, o.new_options );
    detail::check_asset_update_extensions_hf_bsip_48_75( now, o.extensions.value );
 
    bool hf_bsip_48_75_passed = ( HARDFORK_BSIP_48_75_PASSED( now ) );

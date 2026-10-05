@@ -228,11 +228,23 @@ void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
 
 /**
  * Fee-share routing (called from database::pay_market_fees, the single
- * choke point for market + settlement fees): post-STEALTH and while funding
- * is not halted, move inout_increment * PARITY_FEE_SHARE_BPS / 10000 into
+ * choke point for market + settlement fees): post-STEALTH, while funding
+ * is not halted, AND only when the fee asset's issuer opted in via
+ * additional_asset_options.parity_fee_share_enabled (Task 7 legacy gate:
+ * absent == false, so every legacy asset never diverts), move
+ * inout_increment * PARITY_FEE_SHARE_BPS / 10000 into
  * parity_pool[recv_asset] (128-bit integer math) and reduce inout_increment
  * to the remainder for accumulated_fees. Totals preserved exactly.
- * Returns the routed amount (0 pre-fork, while halted, or on dust).
+ * Returns the routed amount (0 pre-fork, while halted, on dust, or when the
+ * asset did not opt in — the increment is then untouched).
+ *
+ * Deliberately NOT called from pay_force_settle_fees: the BSIP-87 slice is
+ * collateral-denominated revenue credited to the DEBT asset's
+ * accumulated_collateral_fees, so routing it would mix denominations inside
+ * one per-asset pool entry and break the pool's denomination identity
+ * (subsidies pay out pool[fee_asset] in fee_asset units). The MARKET-fee leg
+ * of a force-settlement still routes when the COLLATERAL asset opted in —
+ * denomination-preserving, via this same function.
  */
 share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
                                      share_type& inout_increment );

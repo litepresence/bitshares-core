@@ -337,6 +337,50 @@ stealth_ring_input T_make_ring_input( uint8_t version,
 }
 
 /**
+ * Task 5 (M05/GC-07) dual-image ring input: the test prover knows the opening
+ * (b,v), so it authorizes under BOTH versions in one input — main image+sig
+ * under `version` with msg_main32, alternate under `alt_version` with
+ * msg_alt32, over the same ring and pseudo-output. The pseudo-output is
+ * version-independent (P = b'*G + v*H uses the fixed bases G/H), pinned
+ * equal here; the images differ (version-domain J bases).
+ */
+stealth_ring_input T_make_dual_ring_input( uint8_t version, uint8_t alt_version,
+      const std::vector<std::vector<unsigned char>>& Q,
+      size_t s, const BIGNUM* b_s, uint64_t v_s,
+      const BIGNUM* b_prime,
+      const std::string& msg_main32, const std::string& msg_alt32 )
+{
+   stealth_ring_input rin = T_make_ring_input( version, Q, s, b_s, v_s,
+                                               b_prime, msg_main32 );
+   stealth_ring_input alt = T_make_ring_input( alt_version, Q, s, b_s, v_s,
+                                               b_prime, msg_alt32 );
+   BOOST_REQUIRE( alt.pseudo_output == rin.pseudo_output );
+   rin.alt_key_image = alt.key_image;
+   rin.alt_ring_sig = alt.ring_sig;
+   return rin;
+}
+
+/// Dry-run both versions to learn both images (+ shared pseudo) before
+/// building the version-bound ring messages (mirrors the happy-path pattern).
+struct T_dual_dry_run_result
+{
+   std::vector<unsigned char> img_main, img_alt, pseudo;
+};
+T_dual_dry_run_result T_dual_dry_run( uint8_t v_main, uint8_t v_alt,
+      const std::vector<std::vector<unsigned char>>& Q,
+      size_t s, const BIGNUM* b_s, uint64_t v_s, const BIGNUM* b_prime )
+{
+   T_dual_dry_run_result r;
+   std::vector<char> sig0;
+   std::string m0( 32, '\0' );
+   std::vector<unsigned char> pseudo_alt;
+   T_prove_ring( v_main, Q, s, b_s, v_s, b_prime, m0, r.img_main, r.pseudo, sig0 );
+   T_prove_ring( v_alt, Q, s, b_s, v_s, b_prime, m0, r.img_alt, pseudo_alt, sig0 );
+   BOOST_REQUIRE( pseudo_alt == r.pseudo );
+   return r;
+}
+
+/**
  * Test-only BP+ prover (m=1, n=64).
  *
  * Ported from S1 bulletproof_plus_PROVE (monero @ e4fbca88, vendored) to
@@ -756,6 +800,9 @@ BOOST_AUTO_TEST_CASE( stealth_ops_are_refused_before_the_hardfork )
    in.key_image.assign( 33, 0 );
    in.key_image[0] = 2;
    in.ring_sig.assign( 32 + 96 * 11, 0 );
+   // Dummy alt linkage (rejected at the pre-fork hardfork gate, never verified).
+   in.alt_key_image.assign( 33, 0 );
+   in.alt_ring_sig.assign( 32 + 96 * 11, 0 );
    op.inputs = { in };
    stealth_blind_output out;
    out.commitment = T_commitment( std::vector<unsigned char>( 33, 1 ) );
@@ -1108,6 +1155,9 @@ BOOST_AUTO_TEST_CASE( decoy_rules_enforced )
       frin.key_image = std::vector<char>( 33, 0x03 );
       frin.pseudo_output = frin.ring[0];
       frin.ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
+      // Dummy alt linkage (rejected at the pool floor, never verified).
+      frin.alt_key_image = std::vector<char>( 33, 0x04 );
+      frin.alt_ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
       thin.inputs = { frin };
       stealth_blind_output fout;
       fout.commitment = frin.ring[1];
@@ -1246,14 +1296,28 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
                      m0, img0, pseudo0, sig0 );
     }
     BOOST_REQUIRE( pseudo0 == Pv ); // deterministic pseudo derivation
+    // Task 5 (M05/GC-07): the same opening authorized under V2 as well —
+    // consensus nullifies both images (dual-verify window).
+    std::vector<unsigned char> img2, pseudo2; std::vector<char> sig2;
+    {
+       std::string m0( 32, '\0' );
+       T_prove_ring( GRAPHENE_STEALTH_PROOF_V2, Q, s, bs, 1000, bprime,
+                     m0, img2, pseudo2, sig2 );
+    }
+    BOOST_REQUIRE( pseudo2 == Pv ); // pseudo is version-independent
     std::vector<char> img0c( img0.begin(), img0.end() );
+    std::vector<char> img2c( img2.begin(), img2.end() );
     fc::sha256 m = stealth_ring_message( stop.proof_version, stop.asset_id,
        img0c, commits, pseudo_c, out_cs, stop.fee.amount );
+    fc::sha256 m_alt = stealth_ring_message( GRAPHENE_STEALTH_PROOF_V2, stop.asset_id,
+       img2c, commits, pseudo_c, out_cs, stop.fee.amount );
     std::string ms( (const char*)m.data(), 32 );
-    stealth_ring_input rin = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V1,
-       Q, s, bs, 1000, bprime, ms );
+    std::string ms_alt( (const char*)m_alt.data(), 32 );
+    stealth_ring_input rin = T_make_dual_ring_input( GRAPHENE_STEALTH_PROOF_V1,
+       GRAPHENE_STEALTH_PROOF_V2, Q, s, bs, 1000, bprime, ms, ms_alt );
    // image must be stable across runs (deterministic image derivation)
    BOOST_REQUIRE( std::vector<unsigned char>( rin.key_image.begin(), rin.key_image.end() ) == img0 );
+   BOOST_REQUIRE( std::vector<unsigned char>( rin.alt_key_image.begin(), rin.alt_key_image.end() ) == img2 );
    stop.inputs = { rin };
    BOOST_CHECK_NO_THROW( stop.validate() );
    trx.operations = { stop };
@@ -1432,9 +1496,21 @@ BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
       std::vector<char> img0c( img0.begin(), img0.end() );
       fc::sha256 m = stealth_ring_message( stop.proof_version, stop.asset_id,
          img0c, commits, pseudo_wire, out_cs, stop.fee.amount );
+      // Task 5 dual linkage: same opening under V2 (proven against the TRUE
+      // pseudo; the detach swap below invalidates both legs identically).
+      std::vector<unsigned char> imgA, pseudoA; std::vector<char> sigA;
+      {
+         std::string m0( 32, '\0' );
+         T_prove_ring( GRAPHENE_STEALTH_PROOF_V2, Q, idx, bs, 1000, bp,
+                       m0, imgA, pseudoA, sigA );
+      }
+      std::vector<char> imgAc( imgA.begin(), imgA.end() );
+      fc::sha256 m_alt = stealth_ring_message( GRAPHENE_STEALTH_PROOF_V2, stop.asset_id,
+         imgAc, commits, pseudo_wire, out_cs, stop.fee.amount );
       std::string ms( (const char*)m.data(), 32 );
-      stealth_ring_input rin = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V1,
-         Q, idx, bs, 1000, bp, ms );
+      std::string ms_alt( (const char*)m_alt.data(), 32 );
+      stealth_ring_input rin = T_make_dual_ring_input( GRAPHENE_STEALTH_PROOF_V1,
+         GRAPHENE_STEALTH_PROOF_V2, Q, idx, bs, 1000, bp, ms, ms_alt );
       if( detach_pseudo )
          rin.pseudo_output = pseudo_wire; // swap in the inflated kernel input
       stop.inputs = { rin };
@@ -1486,6 +1562,592 @@ BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
    BOOST_CHECK_MESSAGE( attempt( 4, "g1b-kerC", 1000, { 600, 390 },
                                  false, true ),
                         "mismatched-proof stealth spend must reject" );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Task 5 (M04/M05/SUP-03/GC-07/V-04/V-05): G1 double-spend closure.
+// A stealth-spent commitment stays indexed (future decoy), so the legacy
+// explicit-spend legs must refuse it (spent flag); one opening must not spend
+// once per proof version (dual-image linkage); amount/fee asset confusion
+// must fail in consensus, not just relay validate. The supply identity
+// (confidential_supply == test-ledger sum over live unspent blinds, all
+// values test-known) pins that refused re-spends move nothing.
+// ---------------------------------------------------------------------------
+
+// Funded pool with KNOWN blinds AND owner keys, so every spend leg (ring +
+// owner-signed legacy/turnstile) is constructible. All values are 1000.
+struct t5_pool
+{
+   std::vector<fc::ecc::commitment_type> commits;
+   std::vector<fc::sha256>               blinds;
+   std::vector<fc::ecc::private_key>     keys;
+   std::vector<authority>                owners;
+   int64_t                               each = 1000;
+   int64_t                               funded_total = 0;
+};
+
+// Pool scaffold (mirrors stealth_transfer_happy_path): the caller has run
+// generate_blocks(HARDFORK_STEALTH_TIME) + generate_block + ACTORS first.
+// aged==true requires n_out==16 (4/4/4/4 windows + 25h age for the decoy
+// policy); aged==false funds consecutively (the gates under test fire before
+// any age check, and the pool-floor counter needs no aging).
+static t5_pool t5_fund_pool( database_fixture& f, const account_object& funder,
+                             const fc::ecc::private_key& funder_key,
+                             const std::string& tag, int n_out, bool aged )
+{
+   database& db = f.db;
+   signed_transaction& trx = f.trx;
+   const asset_object& core = asset_id_type()( db );
+   f.transfer( account_id_type()( db ), funder, core.amount( 500000000 ) );
+   f.generate_block();
+   g1c_seed_pool( db, funder.get_id(), core, n_out * 1000000 + 5000000 );
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   t5_pool p;
+   auto fund_one = [&]( int i ) {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( p.each );
+      ttb.from = funder.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( tag + "-b|" + std::to_string( i ) );
+      auto N = T_secret( tag + "-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, p.each );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, p.each );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      f.sign( trx, funder_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      p.commits.push_back( o.commitment );
+      p.blinds.push_back( B );
+      p.keys.push_back( k );
+      p.owners.push_back( o.owner );
+      p.funded_total += p.each;
+   };
+   if( aged )
+   {
+      BOOST_REQUIRE_EQUAL( n_out, 16 );
+      for( int i = 0; i < 4; ++i ) { fund_one( i ); f.generate_block(); }
+      f.generate_blocks( 110 );
+      for( int i = 4; i < 8; ++i ) { fund_one( i ); f.generate_block(); }
+      f.generate_blocks( 110 );
+      for( int i = 8; i < 12; ++i ) { fund_one( i ); f.generate_block(); }
+      f.generate_blocks( 110 );
+      for( int i = 12; i < 16; ++i ) { fund_one( i ); f.generate_block(); }
+      f.generate_blocks( db.head_block_time() + 90000 ); // +25h: decoys old
+      f.generate_block();
+      set_expiration( db, trx );
+   }
+   else
+   {
+      for( int i = 0; i < n_out; ++i ) { fund_one( i ); f.generate_block(); }
+   }
+   return p;
+}
+
+// Honest dual-image stealth spend of pool output s: each (1000) splits into
+// out1 + out2 + fee. Output proofs match `version` (V1 Borromean / V2 BP+).
+// Returns the op; the caller pushes.
+static stealth_transfer_operation t5_build_spend( const asset_object& core,
+      const t5_pool& p, size_t s, uint8_t version, const std::string& tag,
+      int64_t out1, int64_t out2, int64_t fee )
+{
+   BOOST_REQUIRE( out1 + out2 + fee == p.each );
+   const uint8_t alt_v = ( version == GRAPHENE_STEALTH_PROOF_V1 )
+                         ? GRAPHENE_STEALTH_PROOF_V2
+                         : GRAPHENE_STEALTH_PROOF_V1;
+   BIGNUM* bs = T_bn( p.blinds[s] );
+   BIGNUM* bprime = T_bn( T_blind_secret( tag + "-pseudo" ) );
+   auto Bk1 = T_blind_secret( tag + "-o1" );
+   auto Bk2 = T_blind_secret( tag + "-o2" );
+   auto rk1 = fc::ecc::private_key::generate();
+   auto rk2 = fc::ecc::private_key::generate();
+   stealth_blind_output so1, so2;
+   so1.commitment = fc::ecc::blind( Bk1, out1 );
+   so2.commitment = fc::ecc::blind( Bk2, out2 );
+   if( version == GRAPHENE_STEALTH_PROOF_V1 )
+   {
+      auto Nk1 = T_secret( tag + "-n1" );
+      auto Nk2 = T_secret( tag + "-n2" );
+      so1.range_proof = fc::ecc::range_proof_sign( 0, so1.commitment, Bk1, Nk1, 0, 0, out1 );
+      so2.range_proof = fc::ecc::range_proof_sign( 0, so2.commitment, Bk2, Nk2, 0, 0, out2 );
+   }
+   else
+   {
+      so1.range_proof = T_bp_prove( so1.commitment, Bk1, (uint64_t)out1 );
+      so2.range_proof = T_bp_prove( so2.commitment, Bk2, (uint64_t)out2 );
+   }
+   so1.owner = authority( 1, public_key_type( rk1.get_public_key() ), 1 );
+   so2.owner = authority( 1, public_key_type( rk2.get_public_key() ), 1 );
+   stealth_transfer_operation stop;
+   stop.asset_id = core.get_id();
+   stop.proof_version = version;
+   stop.fee = core.amount( fee );
+   stop.outputs = { so1, so2 };
+   {
+      BIGNUM* e = BN_new();
+      BIGNUM* b1 = T_bn( Bk1 );
+      BIGNUM* b2 = T_bn( Bk2 );
+      BN_copy( e, bprime );
+      BN_mod_sub( e, e, b1, T_order(), T_ctx() );
+      BN_mod_sub( e, e, b2, T_order(), T_ctx() );
+      unsigned char eb[32]; BN_bn2binpad( e, eb, 32 );
+      std::copy( eb, eb + 32, (char*)stop.excess.data() );
+      BN_free( e ); BN_free( b1 ); BN_free( b2 );
+   }
+   std::vector<std::vector<unsigned char>> Q;
+   for( const auto& c : p.commits )
+      Q.push_back( std::vector<unsigned char>( c.begin(), c.end() ) );
+   std::vector<fc::ecc::commitment_type> out_cs = { so1.commitment, so2.commitment };
+   auto Pv = T_commit( bprime, (uint64_t)p.each );
+   fc::ecc::commitment_type pseudo_c = T_commitment( Pv );
+   auto dry = T_dual_dry_run( version, alt_v, Q, s, bs, (uint64_t)p.each, bprime );
+   BOOST_REQUIRE( dry.pseudo == Pv );
+   std::vector<char> img_c( dry.img_main.begin(), dry.img_main.end() );
+   std::vector<char> img_a( dry.img_alt.begin(), dry.img_alt.end() );
+   fc::sha256 m = stealth_ring_message( version, stop.asset_id, img_c,
+                                        p.commits, pseudo_c, out_cs, stop.fee.amount );
+   fc::sha256 ma = stealth_ring_message( alt_v, stop.asset_id, img_a,
+                                         p.commits, pseudo_c, out_cs, stop.fee.amount );
+   std::string ms( (const char*)m.data(), 32 );
+   std::string msa( (const char*)ma.data(), 32 );
+   stop.inputs = { T_make_dual_ring_input( version, alt_v, Q, s, bs,
+                                           (uint64_t)p.each, bprime, ms, msa ) };
+   BN_free( bs ); BN_free( bprime );
+   return stop;
+}
+
+static int64_t t5_supply( database& db, const asset_object& core )
+{
+   return core.dynamic_asset_data_id( db ).confidential_supply.value;
+}
+
+// M04/V-04: a stealth-spent commitment re-spent via transfer_from_blind.
+BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_withdrawal )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-wd", 16, true );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+   // Honest stealth spend of output #5 (1000 -> 600 + 390 + fee 10).
+   const size_t s = 5;
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-wd-sp", 600, 390, 10 );
+   BOOST_CHECK_NO_THROW( stop.validate() );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   const int64_t live = t5_supply( db, core );
+   BOOST_REQUIRE_EQUAL( live, p.funded_total - 10 ); // 16000 - fee
+   // Re-spend the SAME commitment via transfer_from_blind (owner-signed,
+   // conservation-exact: 990 + 10 == 1000 under the true blind).
+   transfer_from_blind_operation x;
+   x.to = dan.id;
+   x.amount = core.amount( 990 );
+   x.fee = core.amount( 10 );
+   blind_input bi; bi.commitment = p.commits[s]; bi.owner = p.owners[s];
+   x.inputs = { bi };
+   x.blinding_factor = p.blinds[s];
+   BOOST_CHECK_NO_THROW( x.validate() ); // relay shape is fine...
+   set_expiration( db, trx );
+   trx.operations = { x };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception ); // ...consensus refuses
+   trx.clear_signatures(); trx.operations.clear();
+   // Supply identity: the refused re-spend moved nothing; the test ledger
+   // (15 live deposits + 600 + 390) matches the chain counter.
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), 15 * p.each + 600 + 390 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// M04/V-04: a stealth-spent commitment re-spent via blind_transfer.
+BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_blind_transfer )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-bt", 16, true );
+   const size_t s = 5;
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-bt-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   const int64_t live = t5_supply( db, core );
+   BOOST_REQUIRE_EQUAL( live, p.funded_total - 10 );
+   // Re-spend the SAME commitment via blind_transfer (1000 -> 990 under the
+   // SAME blind + fee 10: conservation-exact with a real range proof).
+   blind_transfer_operation btx;
+   btx.fee = core.amount( 10 );
+   blind_input bi; bi.commitment = p.commits[s]; bi.owner = p.owners[s];
+   btx.inputs = { bi };
+   blind_output bo;
+   bo.owner = p.owners[s];
+   auto N = T_secret( "t5-bt-nout" );
+   bo.commitment = fc::ecc::blind( p.blinds[s], 990 );
+   bo.range_proof = fc::ecc::range_proof_sign( 0, bo.commitment, p.blinds[s], N, 0, 0, 990 );
+   btx.outputs = { bo };
+   BOOST_CHECK_NO_THROW( btx.validate() );
+   set_expiration( db, trx );
+   trx.operations = { btx };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+   trx.clear_signatures(); trx.operations.clear();
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), 15 * p.each + 600 + 390 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// M04/V-04: a stealth-spent commitment re-spent via turnstile_reproof.
+BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_turnstile )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-ts", 16, true );
+   const size_t s = 5;
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-ts-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   const int64_t live = t5_supply( db, core );
+   BOOST_REQUIRE_EQUAL( live, p.funded_total - 10 );
+   // Migrate the SAME commitment (1000 -> V2 990 + fee 10, transparent leg
+   // conservation-exact under the revealed blinds).
+   turnstile_reproof_operation t;
+   t.asset_id = core.get_id();
+   t.old_commitment = p.commits[s];
+   t.owner = p.owners[s];
+   t.new_proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   stealth_blind_output no;
+   auto Bn = T_blind_secret( "t5-ts-bn" );
+   {
+      BIGNUM* bnn = T_bn( Bn );
+      no.commitment = T_commitment( T_commit( bnn, 990 ) );
+      BN_free( bnn );
+   }
+   no.range_proof = T_bp_prove( no.commitment, Bn, 990 );
+   no.owner = p.owners[s];
+   t.new_output = no;
+   t.fee = core.amount( 10 );
+   t.old_blind = p.blinds[s];
+   t.new_blind = Bn;
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+   trx.clear_signatures(); trx.operations.clear();
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), 15 * p.each + 600 + 390 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// M05/GC-07: the same opening (b,v) spent under V1, then under V2.
+BOOST_AUTO_TEST_CASE( cross_version_double_spend_rejected )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-xv", 16, true );
+   stealth_transfer_operation v1 = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-xv-1", 600, 390, 10 );
+   trx.operations = { v1 };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   BOOST_REQUIRE_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
+   // Same opening, fresh outputs, now versioned V2: the V1 leg already
+   // nullified this opening's alternate image, so consensus must refuse.
+   stealth_transfer_operation v2 = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V2, "t5-xv-2", 600, 390, 10 );
+   trx.operations = { v2 };
+   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+   trx.clear();
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// V-05: the surviving post-sunset path, end to end (V2 rings + BP+ outputs).
+// Also pins the dual linkage: exactly two nullifiers per one-input spend.
+BOOST_AUTO_TEST_CASE( v2_stealth_transfer_end_to_end )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-v2", 16, true );
+   const size_t nul_before =
+      db.get_index_type<stealth_nullifier_index>().indices().size();
+   stealth_transfer_operation v2 = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V2, "t5-v2-sp", 600, 390, 10 );
+   BOOST_CHECK_NO_THROW( v2.validate() );
+   trx.operations = { v2 };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   const size_t nul_after =
+      db.get_index_type<stealth_nullifier_index>().indices().size();
+   BOOST_CHECK_EQUAL( nul_after - nul_before, 2u ); // main + alternate image
+   const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   BOOST_CHECK( idx.find( v2.outputs[0].commitment ) != idx.end() );
+   BOOST_CHECK( idx.find( v2.outputs[1].commitment ) != idx.end() );
+   BOOST_CHECK( idx.find( p.commits[5] ) != idx.end() ); // retained as decoy
+   BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 17u );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// V-05: V1 ring spends stay frozen past sunset (spend-only-via-turnstile).
+BOOST_AUTO_TEST_CASE( v1_stealth_transfer_refused_post_sunset )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-ss", 11, false );
+   generate_blocks( stealth_v1_sunset_time( db ) + 10 );
+   generate_block();
+   set_expiration( db, trx );
+   // The ~1-year jump lapses the parity review: re-arm the subsidized path
+   // (turnstile_migration precedent) so the sunset gate is what rejects.
+   ACTORS( (alice) );
+   upgrade_to_lifetime_member( alice );
+   create_committee_member( alice );
+   generate_block();
+   {
+      parity_review_operation r;
+      r.voter = alice.id;
+      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      r.note = "parity review ahead of the sunset refusal check";
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      sign( tx, alice_private_key );
+      PUSH_TX( db, tx );
+   }
+   set_expiration( db, trx );
+   // Otherwise-valid V1 dual spend over the 11-output pool.
+   stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-ss-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "V1 stealth spend past sunset must reject" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "sunset" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
+   trx.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// V-05/GC-11: the same key image twice in one op is a same-opening spend.
+BOOST_AUTO_TEST_CASE( duplicate_key_image_within_op_rejected )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-di", 11, false );
+   stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-di-sp", 600, 390, 10 );
+   stop.inputs = { stop.inputs[0], stop.inputs[0] }; // same image twice
+   trx.operations = { stop };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "duplicate key image within one op must reject" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Duplicate key image" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// V-05/GC-11: duplicate ring members shrink the real set; consensus refuses
+// (validate also refuses at relay: dispatch directly to pin the gate).
+BOOST_AUTO_TEST_CASE( duplicate_ring_member_rejected_consensus )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-dm", 11, false );
+   stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-dm-sp", 600, 390, 10 );
+   stop.inputs[0].ring[1] = stop.inputs[0].ring[0];
+   transaction_evaluation_state es( &db );
+   try
+   {
+      db.apply_operation( es, operation( stop ) );
+      BOOST_FAIL( "duplicate ring member must fail closed in do_evaluate" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Duplicate ring member" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// GC-11: a non-canonical (>= n) scalar in the ALT leg must reject — proving
+// the alternate signature is VERIFIED, not merely parsed (a lying prover's
+// garbage alt would otherwise bypass the cross-version linkage).
+BOOST_AUTO_TEST_CASE( non_canonical_alt_scalar_rejected )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-nc", 16, true );
+   stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-nc-sp", 600, 390, 10 );
+   // 0xFF..FF is >= the curve order: rb_0 of the alt leg is non-canonical.
+   std::fill( stop.inputs[0].alt_ring_sig.begin() + 32,
+              stop.inputs[0].alt_ring_sig.begin() + 64, (char)0xFF );
+   trx.operations = { stop };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "non-canonical alt scalar must reject" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Ring signature does not verify" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// V-05: pre-fork (grandfathered, metadata-absent) outputs are NEVER decoys.
+BOOST_AUTO_TEST_CASE( grandfathered_output_not_decoy_eligible )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 500000000 ) );
+   // One pre-fork blind output (no creation metadata: created_block == 0).
+   fc::ecc::commitment_type pre_c;
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( "t5-gf-pre-b" );
+      auto N = T_secret( "t5-gf-pre-n" );
+      o.commitment = fc::ecc::blind( B, 1000 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      pre_c = o.commitment;
+   }
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t5-gf", 11, false );
+   // Valid dual spend shape, then swap one member for the grandfathered one
+   // (sigs no longer verify — but the metadata gate fires first).
+   stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "t5-gf-sp", 600, 390, 10 );
+   stop.inputs[0].ring[0] = pre_c;
+   trx.operations = { stop };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "grandfathered ring member must reject" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Grandfathered" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// SUP-03: amount/fee asset confusion must fail in CONSENSUS (do_evaluate),
+// not only in relay-side validate (proposal-embedded ops bypass validate).
+BOOST_AUTO_TEST_CASE( transfer_from_blind_asset_gate_consensus )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 500000000 ) );
+   generate_block(); // seal before direct pool seeding (G1c pattern)
+   g1c_seed_pool( db, dan_id, core, 2000000 );
+   fc::ecc::commitment_type c;
+   authority own;
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( "t5-sup-b" );
+      auto N = T_secret( "t5-sup-n" );
+      o.commitment = fc::ecc::blind( B, 1000 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      c = o.commitment;
+      own = o.owner;
+   }
+   generate_block();
+   // Mismatched assets, validate bypassed: the consensus gate must refuse.
+   transfer_from_blind_operation bad;
+   bad.to = dan.id;
+   bad.amount = asset( 90, asset_id_type( 7 ) );
+   bad.fee = core.amount( 10 );
+   blind_input bi; bi.commitment = c; bi.owner = own;
+   bad.inputs = { bi };
+   bad.blinding_factor = T_blind_secret( "t5-sup-b" );
+   {
+      transaction_evaluation_state es( &db );
+      try
+      {
+         db.apply_operation( es, operation( bad ) );
+         BOOST_FAIL( "cross-asset transfer_from_blind must fail closed in do_evaluate" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "must be the same asset" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+   }
+   // Control: the matching-asset shape dispatches past the gate (and applies).
+   {
+      transfer_from_blind_operation good = bad;
+      good.amount = core.amount( 990 );
+      transaction_evaluation_state es( &db );
+      BOOST_CHECK_NO_THROW( db.apply_operation( es, operation( good ) ) );
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( per_block_cap_enforced )
@@ -2776,6 +3438,9 @@ BOOST_AUTO_TEST_CASE( thin_pool_decoy_tightening )
       rin.key_image = std::vector<char>( 33, 0x03 );
       rin.pseudo_output = cs[0];
       rin.ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
+      // Dummy alt linkage (rejected at the decoy gate, never verified).
+      rin.alt_key_image = std::vector<char>( 33, 0x04 );
+      rin.alt_ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
       thin11.inputs = { rin };
       stealth_blind_output so;
       so.commitment = fc::ecc::blind( Bo, 990 );

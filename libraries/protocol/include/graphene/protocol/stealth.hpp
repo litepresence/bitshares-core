@@ -201,6 +201,17 @@ constexpr uint8_t GRAPHENE_STEALTH_REVIEW_SET_REPORT = 1; ///< quarterly anonymi
  * Wire note: decoy heights/times are NOT on the wire. The evaluator reads
  * creation metadata from chain state (blinded_balance_object, appended
  * fields); wire-claimed metadata would be a malleability surface.
+ *
+ * Cross-version linkage (Task 5, M05/GC-07): the prover knows the opening
+ * (b,v), so it authorizes under EVERY supported version at once. key_image /
+ * ring_sig carry the op-version authorization; alt_key_image / alt_ring_sig
+ * (appended-last) carry the same opening's authorization under the other
+ * version, over the same ring/pseudo-output/outputs/fee (only the version
+ * byte and image differ in the message). Consensus verifies BOTH signatures
+ * and nullifies BOTH images: one opening can never be spent once per
+ * version inside the dual-verify window. An unverified extra image would be
+ * a lying-prover bypass (garbage alt never collides), so the second
+ * signature is mandatory, not decorative.
  */
 struct stealth_ring_input
 {
@@ -220,6 +231,14 @@ struct stealth_ring_input
    /// spent member, fresh blind. Bound to the ring by the signature's M
    /// equation; consumed by the excess equation. Never indexed.
    commitment_type         pseudo_output;
+   /// Alternate-version key image (appended-last): the SAME opening's image
+   /// under the other supported proof version (33 bytes). Nullified alongside
+   /// key_image; bound by alt_ring_sig, never trusted unverified.
+   vector<char>            alt_key_image;
+   /// Alternate-version ring signature (appended-last): same ring, same
+   /// pseudo-output, same outputs/fee, other version's message and image.
+   /// Same size rule as ring_sig (32 + 96*n).
+   vector<char>            alt_ring_sig;
 };
 
 /**
@@ -370,7 +389,7 @@ struct parity_review_operation : public base_operation
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::stealth_ring_input,
-            (ring)(key_image)(ring_sig)(pseudo_output) )
+            (ring)(key_image)(ring_sig)(pseudo_output)(alt_key_image)(alt_ring_sig) )
 FC_REFLECT( graphene::protocol::stealth_blind_output,
             (commitment)(range_proof)(owner) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation,

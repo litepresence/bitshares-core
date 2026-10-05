@@ -111,6 +111,11 @@ void transfer_to_blind_evaluator::pay_fee()
 void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blind_operation& o )
 { try {
    const auto& d = db();
+   // SUP-03: amount/fee asset confusion must fail in consensus, not only in
+   // relay-side validate (proposal-embedded ops bypass validate: one block
+   // producer could otherwise destroy X's blinds while crediting liquid Y).
+   FC_ASSERT( o.amount.asset_id == o.fee.asset_id,
+              "transfer_from_blind amount and fee must be the same asset" );
    o.fee.asset_id(d);  // verify fee is a legit asset
    const auto& bbi = d.get_index_type<blinded_balance_index>();
    const auto& cidx = bbi.indices().get<by_commitment>();
@@ -120,6 +125,9 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       FC_ASSERT( itr != cidx.end() );
       FC_ASSERT( itr->asset_id == o.fee.asset_id );
       FC_ASSERT( itr->owner == in.owner );
+      // Task 5 (M04/V-04): stealth-spent commitments stay indexed as decoys;
+      // the explicit legs must refuse them (cross-path double-spend guard).
+      FC_ASSERT( !itr->spent, "Commitment already spent (stealth transfer)" );
    }
    // G1: shared blind gate; V1 spends are spend-only-via-turnstile past sunset.
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
@@ -190,6 +198,8 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       GRAPHENE_ASSERT( itr != cidx.end(), blind_transfer_unknown_commitment, "", ("commitment",in.commitment) );
       FC_ASSERT( itr->asset_id == o.fee.asset_id );
       FC_ASSERT( itr->owner == in.owner );
+      // Task 5 (M04/V-04): cross-path double-spend guard (see op41 above).
+      FC_ASSERT( !itr->spent, "Commitment already spent (stealth transfer)" );
    }
    // G1: shared blind gate (closes the live gap uniformly), V1 sunset, and
    // sound range proofs on every output (a mismatched-but-well-formed proof

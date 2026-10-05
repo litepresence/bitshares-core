@@ -51,9 +51,16 @@ void stealth_transfer_operation::validate()const
       FC_ASSERT( in.ring.size() >= GRAPHENE_STEALTH_RING_MIN &&
                  in.ring.size() <= GRAPHENE_STEALTH_RING_MAX,
                  "ring size out of bounds" );
-      FC_ASSERT( in.key_image.size() == 33, "key image must be 33 bytes" );
-      FC_ASSERT( in.ring_sig.size() == 32 + 96 * in.ring.size(),
-                 "ring signature size mismatch" );
+       FC_ASSERT( in.key_image.size() == 33, "key image must be 33 bytes" );
+       FC_ASSERT( in.ring_sig.size() == 32 + 96 * in.ring.size(),
+                  "ring signature size mismatch" );
+       // Task 5 (M05/GC-07): the alternate-version linkage rides the same
+       // size rules (relay-side early failure mirrors the consensus gate;
+       // see the stealth_ring_input doc for why an unverified alt would be
+       // a bypass — consensus verifies, never just parses).
+       FC_ASSERT( in.alt_key_image.size() == 33, "alt key image must be 33 bytes" );
+       FC_ASSERT( in.alt_ring_sig.size() == 32 + 96 * in.ring.size(),
+                  "alt ring signature size mismatch" );
       // distinct ring members (duplicate decoys shrink the real set).
       // O(n^2) with n <= 32 is bounded (<=1024 compares); the evaluator
       // re-checks (consensus rule; validate() is relay-side early failure).

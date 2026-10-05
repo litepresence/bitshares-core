@@ -51,6 +51,15 @@ class blinded_balance_object : public graphene::db::abstract_object<blinded_bala
       /// NEVER decoy-eligible, spendable only explicitly or via turnstile).
       uint32_t                                created_block = 0;
       fc::time_point_sec                      created_time;
+      /// Task 5 (M04/V-04): cross-path double-spend guard (BSIP-2). A
+      /// stealth-spent output stays indexed (future decoy: the evaluator
+      /// cannot identify the real input without breaking ring privacy), so
+      /// the EXPLICIT-spend legs (op40/op41/op85) must refuse it here.
+      /// Set for every ring member of every op104 input in do_apply (the
+      /// real input is unidentifiable, so the whole anonymity set is
+      /// consumed — see the evaluator comment for the availability cost).
+      /// Appended last; default false preserves pre-fork balances.
+      bool                                    spent = false;
 };
 
 struct by_commitment;

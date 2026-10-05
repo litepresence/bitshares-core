@@ -96,7 +96,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::committee_member_object, (graph
                     (committee_member_account)(vote_id)(total_votes)(url) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::blinded_balance_object, (graphene::db::object),
-                                (commitment)(asset_id)(owner)(created_block)(created_time) )
+                                 (commitment)(asset_id)(owner)(created_block)(created_time)(spent) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::fba_accumulator_object, (graphene::db::object),
                                 (accumulated_fba_fees)(designated_asset) )

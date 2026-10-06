@@ -1040,12 +1040,25 @@ BOOST_AUTO_TEST_CASE( recovery_suspends_new_debt_at_150_scope_then_clears )
    BOOST_CHECK( tripped->last_collateral == bonds );
    BOOST_CHECK( tripped->last_debt == share_type( 893333333334LL ) );
 
-   // New debt is suspended (full-size terms, so the refusal isolates the
-   // suspension gate, never the bond floors) ...
-   BOOST_CHECK_THROW( h2e_register_vault( *this, bob_id, bob_private_key,
-                                          authority( 1, bob_id, 1 ),
-                                          H2E_VAULT_RAW, H2E_VAULT_USD_CENTS ),
-                      fc::exception );
+    // New debt is suspended (full-size terms, so the refusal isolates the
+    // suspension gate, never the bond floors) ...
+    // NOTE (vacuous pre-existing): this duplicate-pair leg refuses at the
+    // duplicate-pair gate (vault_evaluator.cpp:104-105, earlier in
+    // do_evaluate), not the Recovery gate — preserved as-is.
+    BOOST_CHECK_THROW( h2e_register_vault( *this, bob_id, bob_private_key,
+                                           authority( 1, bob_id, 1 ),
+                                           H2E_VAULT_RAW, H2E_VAULT_USD_CENTS ),
+                       fc::exception );
+
+    // Fresh-pair Recovery proof (defense vault_evaluator.cpp:111-113 ->
+    // test recovery_fresh_pair_refused_during_suspension): a never-used
+    // zero-supply UIA skips the duplicate-pair gate (new pair) and the
+    // pilot gate (zero supply), so refusal isolates the Recovery gate.
+    BOOST_CHECK_THROW( h2e_register_vault(
+          *this, bob_id, bob_private_key, authority( 1, bob_id, 1 ),
+          H2E_VAULT_RAW, H2E_VAULT_USD_CENTS, h2e_create_uia(
+                *this, bob_id, bob_private_key, "RECOV1" ) ),
+                       fc::exception );
 
      // ... restoration clears it (before the 36h top-up expires: no wind-down).
     // New block first: the refused registration above leaves the pending undo

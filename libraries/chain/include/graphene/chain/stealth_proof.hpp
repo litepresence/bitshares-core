@@ -121,6 +121,12 @@ fc::sha256 stealth_ring_message( uint8_t version,
  * prover cannot know without log_G(H) — the Pedersen binding assumption.
  * Combined with the consensus excess equation over the pseudos (evaluator),
  * unbalanced ring spends cannot mint value.
+ *  The pseudo-outputs themselves are NEVER range-proven, and must not be:
+ *  each P_i's value bound is inherited transitively from the real spent
+ *  member's creation-time range proof through this M leg (P_i.value ==
+ *  real_input.value, which that earlier proof bounded). Any future path that
+ *  synthesizes a pseudo-output outside this M leg is unsound — it would
+ *  enter the conservation kernel with no value bound at all (F-03).
  *
  * AUDIT: this is an adaptation, NOT verbatim CLSAG: CLSAG signs with a
  * spend key whose pubkey is the ring member; here the member is a Pedersen
@@ -159,25 +165,44 @@ bool stealth_verify_excess( const std::vector<fc::ecc::commitment_type>& ins,
 
 /// V1 (Borromean, fc backend): thin wrapper so call sites are uniform.
 /// Legacy proofs verify forever under this path.
+/// Operative range is [0,2^50), NOT [0,2^64): the 4096-byte consensus cap
+/// admits the in-tree wallet's 49-bit proofs (3941B, 155B of headroom) up to
+/// 50-bit proofs (4005B, last admissible); wider mantissas fail closed at
+/// the cap (ADDENDUM A6). Call sites pin min_value==0 fail-closed (no
+/// max_value floor: narrow proofs are sound, see the call-site comments),
+/// so the claimed range is checked, never ignored (F-05).
 bool stealth_verify_range_v1( const fc::ecc::commitment_type& c,
                               const std::vector<char>& proof,
                               uint64_t& min_value, uint64_t& max_value );
 
 /**
  * V2 Bulletproofs+ verifier (2020-735 §3-§4 transcription, single proof,
- * n=64, m in {1,2}, prime-order form: no cofactor clearing exists on
+ * n=64, m wired to 1 only, prime-order form: no cofactor clearing exists on
  * secp256k1 so S1's x8/INV_EIGHT scaling is dropped as identity).
+ *
+ * R9A (F-02/F-06): the verifier rejects m != 1 ("only m=1 is wired") before
+ * any m-sized indexing — the m=2 branch is dead code (no prover, no
+ * consensus caller, generator caches hold 64 entries, not 128). m in {1,2}
+ * stays valid on the WIRE (stealth_bp_proof_size keeps both exact sizes,
+ * 592/658); only verification is weight-1 gated.
  *
  * Wire: m || A || A1 || B || r1 || s1 || d1 || (L_j || R_j per round),
  * rounds = 6 + log2(m). Points 33B compressed, scalars 32B BE canonical.
  *
  * AUDIT: (1) transcript labels differ from S1 (sha256 domains vs ed25519
- * hash-to-scalar of point encodings) — binding-equivalent by construction,
- * but the PROVER must use these exact labels (test prover does; wallets
- * reimplement from this spec, not from S1); (2) single-proof weight is
- * fixed to 1 — batch verification (future) MUST use transcript-derived
- * weights, never RNG, or verifiers diverge; (3) soundness of the whole
- * transcription is the pre-G1 audit's headline item.
+ * hash-to-scalar of point encodings) — binding-equivalent given fixed stage
+ * ordering (see the G1BPe interim note below), but the PROVER must use these
+ * exact labels (test prover does; wallets reimplement from this spec, not
+ * from S1); (2) single-proof weight is fixed to 1 — batch verification
+ * (future) MUST use transcript-derived weights, never RNG, or verifiers
+ * diverge; (3) soundness of the whole transcription is the pre-G1 audit's
+ * headline item.
+ *
+ * AUDIT (F-10 interim, R9A): G1BPe is reused for the round challenges AND
+ * the final (A1, B) challenge, so the label partition is NOT unambiguous —
+ * stage ORDER is what disambiguates them today. Relabelling the final
+ * challenge (e.g. G1BPf) is a consensus-visible protocol change: it needs
+ * its own hardfork gate (tracked as R9C), never a silent patch.
  */
 bool stealth_verify_bp_plus( uint8_t m,
                              const std::vector<char>& proof,

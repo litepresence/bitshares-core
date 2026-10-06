@@ -297,8 +297,9 @@ struct stealth_ring_input
 struct stealth_blind_output
 {
    commitment_type       commitment;
-   /// V1: fc Borromean proof bytes. V2: G1 Bulletproofs+ blob
-   /// (m || A || S || T1 || T2 || taux || mu || L/R pairs || a || b || t_hat).
+   /// V1: fc Borromean proof bytes. V2: G1 Bulletproofs+ single-proof blob
+   /// (m || A || A1 || B || r1 || s1 || d1 || L/R pairs: 592 bytes for m=1,
+   /// 658 bytes for m=2; only m=1 is wired to consensus, R9A).
    vector<char>          range_proof;
    authority             owner;
 };

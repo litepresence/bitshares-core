@@ -107,6 +107,8 @@ BIGNUM* secp_field()
 /// Strict parse: 32B big-endian must encode a canonical scalar (< n).
 /// Used BEFORE any modular reduction so non-canonical encodings are
 /// rejected exactly like S1's is_reduced (no malleability surface).
+// AUDIT: strict canonical parse (< n, no wraparound reduction) is the S1
+// is_reduced discipline; relaxing it reopens proof malleability.
 bool scalar_parse_strict( BIGNUM* out, const unsigned char* in, size_t len )
 {
    if( len != 32 || out == nullptr ) return false;
@@ -398,7 +400,9 @@ size_t stealth_BP_count() { return STEALTH_BP_N; }
 // ---------------------------------------------------------------------------
 // Transcript
 // ---------------------------------------------------------------------------
-
+// AUDIT: the G1R2 domain separates the pseudo-output-bound statement from
+// the G1R1 pre-kernel domain; equal domains would let pre-kernel signatures
+// verify as bound and vice versa.
 fc::sha256 stealth_challenge( const std::string& msg32,
                               const std::vector<unsigned char>& L33,
                               const std::vector<unsigned char>& R33,
@@ -723,7 +727,14 @@ bool stealth_verify_bp_plus( uint8_t m,
                              std::string& err )
 {
    // ---- wire parse (exact sizes; no padding ambiguity) ----
+   // AUDIT: exact-size parse with the m tag checked first; any accepted
+   // padding or tag/size skew between relay and verifier forks the network.
    if( m != 1 && m != 2 ) { err = "m out of range"; return false; }
+   // R9A (F-02/F-06): only m=1 is wired — the m=2 branch below indexes
+   // GP.BPG/BPH over [0,MN=128) but the caches hold exactly 64 entries,
+   // and no prover or consensus caller ever exercised it. Reject here,
+   // before any m-sized indexing, so the dead branch is unreachable.
+   if( m != 1 ) { err = "only m=1 is wired"; return false; }
    if( commits.size() != m ) { err = "commit count != m"; return false; }
    if( proof.size() != stealth_bp_proof_size( m ) ) { err = "blob size"; return false; }
    if( (unsigned char)proof[0] != m ) { err = "m tag mismatch"; return false; }
@@ -799,6 +810,10 @@ bool stealth_verify_bp_plus( uint8_t m,
       { err = "bad base generators"; fail_pts(); for( auto p : Gv ) EC_POINT_free(p); for( auto p : Hv ) EC_POINT_free(p); return false; }
 
    // ---- transcript (order mirrors S1; labels are G1 sha256 domains) ----
+   // Flat transcript: S1 chains stages through running hash state, G1 omits
+   // the chaining and relies on fixed stage ORDER instead — notably for the
+   // G1BPe round-vs-final reuse below. Any relabelling is consensus-visible
+   // (hardfork-gated, R9C); see the hpp interim note.
    size_t Loff = 1 + 99 + 96;
    {
       std::vector<std::vector<unsigned char>> items;
@@ -869,15 +884,23 @@ bool stealth_verify_bp_plus( uint8_t m,
       { bn yp; BN_copy( yp.b, yb.b ); for( size_t i = 0; i < MN; ++i ) { mod_add( sum_y.b, sum_y.b, yp.b ); mod_mul( yp.b, yp.b, yb.b ); } }
 
       // challenges_cache[i] = prod_j e_j^{s(j,i)} with s = +1 iff
-      // bit_{rounds-1-j}(i) is set, else -1 (the TRUE IPA fold weights:
-      // round j halves the vector, so it selects bit_{R-1-j}, lo-branch
-      // taking e_j^{-1} and hi-branch e_j^{+1} per hadamard_fold(G',e^-1,..)).
-      // AUDIT: S1 computes the same weights via an in-place loop whose
-      // overlapping writes are undefined behavior in C++ (plus an out-of-
-      // bounds write at s=0); the OBSERVED S1 values match this clean form
-      // (verified against S1 @ e4fbca88 runtime dumps, indices 0..7, plus
-      // symbolic fold tracking). G1 implements the clean form directly and
-      // does NOT replicate S1's loop. Any change here breaks bp_plus soundness.
+      // bit_{rounds-1-j}(i) is set, else -1 (the TRUE IPA fold weights,
+      // derived from the prover fold, NOT from the vendored loop: the
+      // in-tree prover folds G'[i] = G_lo[i]*e^-1 + G_hi[i]*(y^-n'*e) and
+      // H'[i] = H_lo[i]*e + H_hi[i]*e^-1 (tests g1_stealth_tests.cpp:632-642),
+      // so round j halves the vector and selects bit_{R-1-j}, lo-branch
+      // taking e_j^-1 and hi-branch e_j^+1).
+      // AUDIT: the vendored S1 loop (bulletproofs_plus.cc:1028-1039) is NOT
+      // the authority for these weights — its in-place overlapping writes
+      // are undefined behavior in C++ (plus an OOB write at s=0) — and no
+      // claim of agreement with observed S1 runtime values is made here.
+      // G1 implements the fold-derived clean form directly. Any change here
+      // breaks bp_plus soundness.
+      // F-02: cache covers the Gi/Hi index space [0,MN) iff nc >= MN, i.e.
+      // 2^(6+logM) >= 2^logM * N iff N <= 64. STEALTH_BP_N is exactly 64 and
+      // rounds = 6+logM hardcodes log2(64) a second time — raising N above
+      // 64 without touching rounds OOB-reads cache in consensus. With m==1
+      // wired above, MN = nc = 64 exactly.
       size_t nc = (size_t)1 << rounds;
       bvec cache( nc );
       for( size_t i = 0; i < nc; ++i )

@@ -1032,14 +1032,184 @@ BOOST_AUTO_TEST_CASE( generator_provenance_vectors )
    BOOST_CHECK( stealth_J2_point( 1 ) == expect_hex( "03bd0bcdc62437761ac7746f9171670c2252af994f8e04758694b3ee3f45bd9299" ) );
    BOOST_CHECK( stealth_J1_point( 2 ) == expect_hex( "026dc9d657123cb196f96828a893fddb08352e4f99dfe7920b6a87e4c1ae60aa0b" ) );
    BOOST_CHECK( stealth_J2_point( 2 ) == expect_hex( "03ac6eab33dc31ff12f4c93842e117647621c7d4d5ae4ab92ea83374a59ba6e335" ) );
-   // BP+ vector generators: first of each vector pinned; full-length +
-   // determinism asserted (all 64 must be distinct on-curve points).
-   BOOST_CHECK( stealth_BP_G( 0 ) == expect_hex( "026b5fa2ac909d6f5dca68029ab3c9f59cbf6cf50404abde089bedff033fdc36e7" ) );
-   BOOST_CHECK( stealth_BP_H( 0 ) == expect_hex( "0319ff1a3915c93b9764a43d5b1837edfdd13b906f09ddb13d91fd059d865266c4" ) );
+   // BP+ vector generators: full 64+64 golden pin (F-04, R9A) — any
+   // generator change fails loudly here instead of surfacing as liveness
+   // ("no honest proof verifies"). J/H pins above unchanged.
    BOOST_CHECK_EQUAL( stealth_BP_count(), 64u );
-   BOOST_CHECK( stealth_BP_G( 0 ) == stealth_BP_G( 0 ) );
-   BOOST_CHECK( stealth_BP_G( 0 ) != stealth_BP_G( 1 ) );
-   BOOST_CHECK( stealth_BP_H( 0 ) != stealth_BP_H( 1 ) );
+   BOOST_CHECK( stealth_BP_G( 0 ) == stealth_BP_G( 0 ) ); // determinism spot
+// --- pasted from tooling/g1_gen_vectors.py --cpp ---
+static const char* const BP_G_GOLDEN[64] = {
+  "026b5fa2ac909d6f5dca68029ab3c9f59cbf6cf50404abde089bedff033fdc36e7",
+  "036aa76ffe7b8ecd7df7cfea3a65c4a59fe484be287cba6f5b02d3f95d35762d92",
+  "0206b18703b99da12608b32a04ee7823b1c38fe6c40b8472a231139949c9733640",
+  "02a13ca1ebf03992207a8dffa23b56ba58f4aa782566ce337fc7133098a28c0b9d",
+  "03cd1afd0d5796a7bbefb8283e46ba0cbf83613c971d7a08b3a168f0b835318cee",
+  "037f8eba149d98c6d7e6af7fd88097d37e95eabffbd7129de96e93c54152e17b81",
+  "02ed9f890d7c2903a8af96fcad74701be37fbb1d5c628c6281c57d850bfc07959e",
+  "0371fba9809933f576286954bcf624a3ff15a35c3522773f110136b07a6703bf06",
+  "0267487f0056d687344b931b4b29b45fe57eb52589d37db8ab985cab32a15f04fa",
+  "029bb4d1b446e699e9e18edfb1b23cd0fbea2c0e0afa862c9843d8902ac84c25ad",
+  "03aeb37e5d05c0cb1a1a3328b5dfeced1ff9c172f62a1e71016bf905a3234d17d1",
+  "024831e3ad4916e3f3a824d896130f883880530440cc302d44e1abfea0dd2c23d9",
+  "037367012acd3a583bad25e6391412074c5a8a2e149ff2bddf2711aa186f69a278",
+  "035d35ccc2281bd9b986a32f61df8823c0d393ea379ab5b15512665484127745b2",
+  "02a4ed968db68cccfdcfbded545a2c30cd48585cb4ca6ad9af9c7307e56c897a32",
+  "0287674dcec197031d53a26368c4e2798c08169414dea91e85eeaab8e3ae63a422",
+  "032827d36d94bf37dc1f7543994d70c7ea6afc2bfda907058d75993d030bb19afa",
+  "025cc92bfc9f07de8ade1cf6305a10afa88587c2f7509122e247fbc99898cc6f7c",
+  "03cdd60debc0ae817e3e7589bd482d9777b236c0499d285723971b1e004b662f57",
+  "0238d73f87f24178971b28c3e01545696563b58910c820a57fc8ff4e90c44438f6",
+  "02a1e8132197085415eb139dc1ef85f5511b81646ad7274e5e67342b5294c6b310",
+  "02b7804145ba03aba94230dd7b9f2f595f50467c062babda8c2a3aefe05881a856",
+  "033a90e5f2a7d576031ac0dc942a0b38b6d81b2fba157183dab5822c34d24c80d8",
+  "020b457141ad015a620f365d3888f63e5781b0965d32463d65a669956997d7909a",
+  "03722d9b1bd4db2dbfeaf735d68089da9f4a52e6b1e35011299c006bdb25716146",
+  "023fc0f7ad35ae52bf3fd1bcdaf59e88c8e921142df52ce9fed0696f4583eced9f",
+  "02802c94e98ab7a24bdb02f44971efb62b3f78fa20c6266bac12726fa33487177f",
+  "02b18ebd34a448b2bd92244d0a4f8863dac620237d609cab3636b5dac666c8bbde",
+  "03346a43f8f0772d8d85a782e2c5c825674fdef46f29cf60361a8bc381631e2ad2",
+  "037fceb89ecc3a42be9574c59d9db79d1009410ac3298b4e90b706cbfa3297e643",
+  "03398929bbe4de270b4994152ab9f808e69ad22706125988908f657f742f5939bd",
+  "03ef401e97e5868628ad0a95d9ad5c3c73348cde68dc8ce982d6d45b984173dd63",
+  "02105220abd990b0b7c34fc1a472a415fd5ea171efd0565c1a30830e55ae2c6d90",
+  "023ba4a93cb44639c9e2b648e3e5a61447b4c943dadcaebba91bf84c011df3201d",
+  "0397cb34c8558d55cdce31f1ee5a48952ac41ff25f0320eba5444714ec33c23e23",
+  "020528bf2be887ce9a80df7ac7b954a87931a145b1dd299fab21ef7c94aa23dd3e",
+  "0304832dba88f5d42f0e86152718e337f171f211562852a4374c890fe4822ccd97",
+  "03710b57094341a71c01d7de1aa73d8929ada4526619cfd0b2a287f4dd40dbe8b0",
+  "03dc931b60eb7e30c9787c3f219b41c5cdb867e2433a2f957ebc8a76b1cd924be3",
+  "03501ab2e7472a0763b667b14367a1030a758a71ee75ccc058243c80f7b3140b03",
+  "022bb2c14de247d10988c06d09a78b222cb1b9cf4c0630985a75d544971b9213be",
+  "037820fc9c24b6665029340ea1088137ad90bd4a5d93cf868b025725a513ad2ca9",
+  "0394ebe96f004f9d88639bbae0ea8632d70caeb4a517a9db8d7bdb78674cc3ab39",
+  "02f2ac40568f9d56f7c23d242c31743e8927888a783cfdd6bb1a5dfeb80cb0962d",
+  "0260e203a3f095a586c8dac22e2f3a7b49ca628a7d7dd19c1292640a20edd67d54",
+  "020b179b6c8b235cbdde088e159ed0a31c01434e1dc529de13d749950955d5a9cc",
+  "02328795cba20deef0a05e7e82ee9d71b6904637451034446814b14fb29d0ff1d5",
+  "020ff82068280aea6c9c3d0152557fe2e6c229920138d44bfd3c5556e6902186f5",
+  "03a7d14da7fb62ffea6ac580ca09fc2a56d70e966b61cdf433e9bead33d8ebaf6b",
+  "03d7e8d30ab9acb5b41261a7d9089d42cb5b577a8cf8b71c0518a20be1cb2b2239",
+  "0202c9ed61b9613d762484dad97a246497f58d63c4b14bf01217021e92f7a43a6d",
+  "02c2880b5496b322cbbf29dbc9d419ddc9d705ed9011deb528128b2f211c4b22c5",
+  "0365f7b8348d102c696f4185695ede4ed11d2e90ecdc458d04b3a860ab3dc29053",
+  "02ebb8ebe1efcde59b60be88265b702ba4ab792a8ca693d92817ff3e90ea460985",
+  "020c1888c9316b8e1c548c956c634aecdbc0f4174ff175201199d99d7e792cca8f",
+  "025a4b74705c5945476762d00205143900f64896a3d8a5c72697b508c284d05574",
+  "034fb8a91cc131ca17f3b5d3a716b6e3af77cf2c07f8ab51cf492e8d7f40582094",
+  "0287e911d6d883559092f2af2e78293ff74a2f3652e6071728fe98b4e4b938512f",
+  "03fdf1f13a87a452e193a2b00f1be6b36bff0fec7741ff7b62db1e172d8a8bb498",
+  "022766836a8b1ecdb6f2a8e95c63d0b1263accd7c6c6e4fc5a9784ad35cfbfe225",
+  "025d453a661af384608eab4a83d264fde2c7eb1e65417dfdec4992d93aa9eb2ebf",
+  "02779f3b8283068d0aebe3019d45eba185c2f5d42a88204eec63a732f4a7dfe02e",
+  "0235fec2d0a8fca62fe14f7eb0e49295ef52d004ba043dbc902c8b26754ac78732",
+  "025a712d9ff10bb26d6e7b8c3bd35328e04719a3e7932e7fccf888fbe599e31e3e",
+};
+static const char* const BP_H_GOLDEN[64] = {
+  "0319ff1a3915c93b9764a43d5b1837edfdd13b906f09ddb13d91fd059d865266c4",
+  "0349642991c7694eb7cb2fb9f196dd1778295e893c7c862ab7b3acd499fc432ee1",
+  "02d8701ee3a5644f4675b89fa4d9e1ad4692890b278249710960aab2da19717c83",
+  "03b9a9fa3edda96595d423bd13a99ce4d66b5303ccaf6094b0d3bb1db193f7bfca",
+  "024ee1b23795269ee94350e92e9cd6081cfca1d77b0b3622cfd61bfcf37ba8bc27",
+  "0393f48a1b391bc7721566e1be3ad907d02aa4bddc4d9d531e32409c9a1958724d",
+  "025f007b450d77f747a64b97fc37802a47ecf739a85a853bf8c041f5e749951490",
+  "030e8cde16f474e9053c4333605ecd9061dd6812a17372d0ba4a48f4956f3ec052",
+  "031b3131e5d4bf50643b41f4670a4afad3ce2cc5082283c3cc841df2e2b8df5aef",
+  "02aa2f056f1daa315f6252c5de7685c8a2322089233dd0eb32c57f39de0a3e7e17",
+  "0255f987e0180debf047de34cce28157ac1cc8d4327c78f10e9609a1db9ce38f7b",
+  "024a7ff84a357dce611f8281b749865b0e62d17dd9f60f0affed01f66816a51f25",
+  "02cf8b436e7853c397981f2e741d86afc7f7a58a0b696500850065383a8635ccd7",
+  "03a736b3e223c1e600010b3d654ed5d1249b897cf17c179c27028ecfc0c2d42b44",
+  "02b4370b60d224b7dc61600f90f3d68b9f27b027c1d43c1c4cf9875d01241dcde6",
+  "02ec1d7bd64e0b5281c96a490f51fc548b78280159c4f013b9d63687dc336bfb1d",
+  "02133f9a2722f83483cc5f36d31a1fa4aacf5f7eb7089e936ba9bdb345111c3a8e",
+  "0297afaef305e9a7d5c5ffe8376cd0ff7ca226554e96666f3e4837ebcfbf266f5f",
+  "0239780f2dfd7affc68073d1fe27029a89e74a780f661c632fc62aeb9a7ba4da6e",
+  "03abf62fe7b5d257f031521fe0b344540108c3a64e0be0d9374764e902a26f32da",
+  "0241e58127bbe2b5372e689d6f0c94bcb576432091f9a31b23ef7aab8328ea3641",
+  "024f3a06929c396c7f73bf6646cf3a193f45af26466e7182c1a32422bf67cb6299",
+  "034cb365eda90d8abc0423950f13748ab5533244ab040c9c3645650f963f9ea601",
+  "02d01703d8b3cea6a3728a406ef4bd8d3231e2532d06a4d2a7794e7ae68668c738",
+  "02fd41e8da37b50bfb27443e0740c01fe65ad4d5b59ca8cd3418a4675832607fc4",
+  "02bd42a9dc059977ae4a4da938a15e38927351eee725a64a54c9f0739e7ed0b565",
+  "021b1deef1948bf30a22b837f3f99debe9c272b1ed91acffd676626caa2ed18e79",
+  "023c3c36363b7899c0ac93856310fcf1f9ea510bb3def2a00618c70fe48e19bf28",
+  "027fa29aa19c90c1944f2bed6c53cb976221236c83caf5589bfc424a2328d148aa",
+  "028a499eba5982620e95a14fe8b91686493bfdb969f642065e03647cae22b39b83",
+  "026031e9e97047fa1de58d1b0fca15fd24c28cb9df80418e69bd51e389c6f27df1",
+  "037c88ff2c98ee43408766e40452fad2d6ea2ae28b62869c24f649e3804583122d",
+  "030eecf4d13e92ce09b2ba4503e70e8e5bbfcc20c0d891aedfb2c8027e9d455a1b",
+  "03f2b761d5ce91c261777f0b90c6ae007461187b4dcf437b88eec639adaead3675",
+  "03d787738da378f2915af361763e0964aa5437649fe3171665280122ee4549a2d6",
+  "02e8cd5aabce01721f767139c5ccc5f7e7a134adb22ea56dd3d8c49d8638bc0bce",
+  "02a48e3be13a6a84692840109ed5042ce3d03d233406ecd52e22b68257776ac8cd",
+  "02146c0680a028417b64ace91481580acc718746ab1446fb7e3b9ca33976dab4a5",
+  "03ab656d260e1d0d2ee815628fc82fc891750452162f1c81dfb80fd7b4d4b9bdbb",
+  "02dc610fd565705445149fed213c6bdf3a2340710130b8db30c09823559bf1fa76",
+  "02069086e28f0287c24463c0168d8ad6171def8c4290b0086c90b5b1ff8b7bc6a8",
+  "032302913c421ccc69a8aaec0e440752891695cd0702afdd4b40b9479f30e76f8c",
+  "02aabbb0f2478d21242dee5a8c728904c133b055d7e1ee1e165307b54531b30f9a",
+  "0230381c81f6bf56061227bb2ee9938f47bf1a2dbfd4cd7d7c826aebf3f6a7d5be",
+  "02a6e56774d2b6bc3b67ec4070307dc3879a8d5730bea7eb2a153528a610045d88",
+  "026a16040b8129272e8fecdb71a74a60e6a6d06c20ea420e5c825a96abc0f4b539",
+  "0249441f529c3a104e997d4c823a8699696d147892b64b89642c3ea587452b4b7c",
+  "0388ec567e92ad8a974949fb12ebfdac4e05b9cdeb53cf4bc1320465005d957204",
+  "027a40fae0cc23db2191856b3de05c34fdc50bc22a38b2af0ace3bae82ef61cb88",
+  "02033ae7e2c9c19de1ee02982e65d7f2812a8274f88e83ec202d7234adcc1b30bd",
+  "0245fe53f90aa8ff0fbc30a9d056092e7a596fe70dbf1505b5c4f37a50f5196e59",
+  "0276eaf8211bf12ea6f76336f2a17ed6022098a26d3140ca79918f9f51f5f13c2e",
+  "0363f9b3bd075733db0ceca04e2205f7ed062d491ac6ed80e5109b60327150cb0e",
+  "02a1cd762d574e2b68afc3738d9e573619c30992a215b8ea16c49f039a6da436ef",
+  "03f6b91a04a1d9387439e5d2d2c9127ff4fd48e7317b8a818764b5278f60907bf4",
+  "0200ff8cf060bc2f37a61a4fa674072f4ab2a23a6bf3af493aa0cad11fe70cf40b",
+  "02ed59d64f9de88a96798ea68a849ba66c0d97aaa3c527fa420047492b97bd9312",
+  "02a088a83208a3b51c13b5cb4ad3da94584a07aa7658f1f939c0d3dfc6a9303f49",
+  "03af9c578f256d39d7426c9902377d135df34016fde66289e07d82eab5e1386f63",
+  "0301e723ebd23e092fad9e8359d12c2b61fd65a18e1e11c14dccf8bfe29250ca4a",
+  "0290492a5dd69f619677469b70e1f5e69ed007d7de8f444a7ea9c5fa78a964cf56",
+  "03e78b873db0fa8a0ffde032960d904aae29a770e455a4c1d91951cc9d22022904",
+  "03d3d71a8c87d6ab69756a681e83e5343be116deda8fbfecf3e5f6786e3fb16164",
+  "034f8983a51567d0280eb759f2850edc47d1a591d471a5b6c822714be7033dba4d",
+};
+   for( size_t i = 0; i < 64; ++i )
+   {
+      BOOST_CHECK_MESSAGE( stealth_BP_G( i ) == expect_hex( BP_G_GOLDEN[i] ),
+         "BP_G[" << i << "] does not match golden — generator derivation changed" );
+      BOOST_CHECK_MESSAGE( stealth_BP_H( i ) == expect_hex( BP_H_GOLDEN[i] ),
+         "BP_H[" << i << "] does not match golden — generator derivation changed" );
+   }
+   // Pairwise distinctness (F-04): 64 Gi distinct, 64 Hi distinct, no Gi==Hi,
+   // none equals G/H/J1v*/J2v* — degenerate generators would collapse the
+   // IPA weight vector the verifier equation depends on.
+   {
+      std::vector<unsigned char> Gpt = stealth_G_point();
+      std::vector<std::vector<unsigned char>> reserved;
+      reserved.push_back( Gpt );
+      reserved.push_back( H );
+      reserved.push_back( stealth_J1_point( 1 ) );
+      reserved.push_back( stealth_J2_point( 1 ) );
+      reserved.push_back( stealth_J1_point( 2 ) );
+      reserved.push_back( stealth_J2_point( 2 ) );
+      for( size_t i = 0; i < 64; ++i )
+      {
+         for( size_t j = i + 1; j < 64; ++j )
+         {
+            BOOST_CHECK_MESSAGE( stealth_BP_G( i ) != stealth_BP_G( j ),
+               "BP_G[" << i << "] == BP_G[" << j << "]" );
+            BOOST_CHECK_MESSAGE( stealth_BP_H( i ) != stealth_BP_H( j ),
+               "BP_H[" << i << "] == BP_H[" << j << "]" );
+         }
+         for( size_t k = 0; k < 64; ++k )
+            BOOST_CHECK_MESSAGE( stealth_BP_G( i ) != stealth_BP_H( k ),
+               "BP_G[" << i << "] == BP_H[" << k << "]" );
+         for( size_t r = 0; r < reserved.size(); ++r )
+         {
+            BOOST_CHECK_MESSAGE( stealth_BP_G( i ) != reserved[r],
+               "BP_G[" << i << "] collides with reserved generator " << r );
+            BOOST_CHECK_MESSAGE( stealth_BP_H( i ) != reserved[r],
+               "BP_H[" << i << "] collides with reserved generator " << r );
+         }
+      }
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( commitments_match_fc_backend )
@@ -3033,8 +3203,97 @@ BOOST_AUTO_TEST_CASE( bp_plus_vectors_and_budget )
        BOOST_TEST_MESSAGE( "G1b worst-case full block: 100x(bound-ring-11 + BP+1 + excess) = "
                            << us << "us" );
        BOOST_WARN_MESSAGE( us <= 750000, "verifier budget ring-11: " << us << "us > 750000us" );
-       BN_free( bs ); BN_free( bprime ); BN_free( bx ); BN_free( by ); BN_free( be );
-    }
+        BN_free( bs ); BN_free( bprime ); BN_free( bx ); BN_free( by ); BN_free( be );
+     }
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( bp_plus_m2_rejected_only_m1_wired )
+{ try {
+   // R9A safe batch (F-02/F-06): only m=1 is wired to consensus. A
+   // well-formed 658-byte m=2 blob (exact size, matching m tag, valid
+   // on-curve points, canonical nonzero scalars) over 2 commitments must be
+   // rejected cleanly with the wiring error — never accepted, never an OOB
+   // read. m in {1,2} stays valid on the wire (size helper untouched).
+   BOOST_REQUIRE_EQUAL( stealth_bp_proof_size( 1 ), 592u );
+   BOOST_REQUIRE_EQUAL( stealth_bp_proof_size( 2 ), 658u );
+   std::vector<unsigned char> G33 = stealth_G_point();
+   BOOST_REQUIRE_EQUAL( G33.size(), 33u );
+   std::vector<char> blob;
+   blob.reserve( 658 );
+   blob.push_back( (char)2 ); // m tag matches m=2
+   auto push_point = [&]( const std::vector<unsigned char>& p )
+      { for( auto b : p ) blob.push_back( (char)b ); };
+   push_point( G33 ); // A
+   push_point( G33 ); // A1
+   push_point( G33 ); // B
+   for( int k = 0; k < 3; ++k ) // r1, s1, d1: canonical nonzero scalars
+   {
+      for( int i = 0; i < 31; ++i ) blob.push_back( (char)0 );
+      blob.push_back( (char)1 );
+   }
+   for( int k = 0; k < 14; ++k ) push_point( G33 ); // 7x (L, R)
+   BOOST_REQUIRE_EQUAL( blob.size(), 658u );
+   BIGNUM* b1 = T_bn( T_blind_secret( "r9a-m2-b|0" ) );
+   BIGNUM* b2 = T_bn( T_blind_secret( "r9a-m2-b|1" ) );
+   fc::ecc::commitment_type c1 = T_commitment( T_commit( b1, 100 ) );
+   fc::ecc::commitment_type c2 = T_commitment( T_commit( b2, 200 ) );
+   BN_free( b1 ); BN_free( b2 );
+   std::string err;
+   BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 2, blob, { c1, c2 }, err ),
+                        "m=2 blob must not verify (only m=1 is wired)" );
+   BOOST_CHECK_EQUAL( err, "only m=1 is wired" );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( v1_range_claims_observed )
+{ try {
+   // R9A (F-05): the V1 claimed range is observed, never ignored. Small
+   // values prove narrow ranges by construction (min_bits=0 -> mantissa =
+   // value bits), so consensus pins min_value==0 fail-closed and documents
+   // the operative ceiling [0,2^50) instead of flooring max_value — a floor
+   // would reject legitimate small-value proofs (see evaluator call sites).
+   for( uint64_t v : { (uint64_t)1000, (uint64_t)GRAPHENE_MAX_SHARE_SUPPLY } )
+   {
+      auto B = T_blind_secret( "r9a-v1rng|" + std::to_string( v ) );
+      auto N = T_secret( "r9a-v1nonce|" + std::to_string( v ) );
+      fc::ecc::commitment_type C = fc::ecc::blind( B, v );
+      fc::ecc::range_proof_type pr = fc::ecc::range_proof_sign( 0, C, B, N, 0, 0, v );
+      BOOST_REQUIRE_MESSAGE( !pr.empty(), "must sign a V1 proof for v=" << v );
+      BOOST_CHECK_MESSAGE( pr.size() <= 4096, "V1 proof for v=" << v
+         << " must fit the consensus cap, got " << pr.size() << "B" );
+      uint64_t min_v = 0, max_v = 0;
+      std::vector<char> proof( pr.begin(), pr.end() );
+      BOOST_REQUIRE_MESSAGE( stealth_verify_range_v1( C, proof, min_v, max_v ),
+         "V1 proof for v=" << v << " must verify" );
+      BOOST_CHECK_EQUAL( min_v, 0u );
+      BOOST_CHECK_MESSAGE( max_v >= v, "claimed max " << max_v
+         << " must cover the proven value " << v );
+   }
+   // Exact pins: 1000 needs 10 bits -> [0,1023]; max supply needs 50 bits
+   // -> [0,2^50), the last range admissible under the 4096-byte cap.
+   {
+      auto B = T_blind_secret( "r9a-v1rng|pin" );
+      auto N = T_secret( "r9a-v1nonce|pin" );
+      fc::ecc::commitment_type C = fc::ecc::blind( B, 1000 );
+      fc::ecc::range_proof_type pr = fc::ecc::range_proof_sign( 0, C, B, N, 0, 0, 1000 );
+      uint64_t min_v = 0, max_v = 0;
+      std::vector<char> proof( pr.begin(), pr.end() );
+      BOOST_REQUIRE( stealth_verify_range_v1( C, proof, min_v, max_v ) );
+      BOOST_CHECK_EQUAL( min_v, 0u );
+      BOOST_CHECK_EQUAL( max_v, 1023u );
+   }
+   {
+      auto B = T_blind_secret( "r9a-v1rng|pin50" );
+      auto N = T_secret( "r9a-v1nonce|pin50" );
+      fc::ecc::commitment_type C = fc::ecc::blind( B, GRAPHENE_MAX_SHARE_SUPPLY );
+      fc::ecc::range_proof_type pr = fc::ecc::range_proof_sign(
+         0, C, B, N, 0, 0, GRAPHENE_MAX_SHARE_SUPPLY );
+      uint64_t min_v = 0, max_v = 0;
+      std::vector<char> proof( pr.begin(), pr.end() );
+      BOOST_REQUIRE_MESSAGE( stealth_verify_range_v1( C, proof, min_v, max_v ),
+         "max-supply proof must fit the cap and verify" );
+      BOOST_CHECK_EQUAL( min_v, 0u );
+      BOOST_CHECK_EQUAL( max_v, ( (uint64_t)1 << 50 ) - 1 );
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )

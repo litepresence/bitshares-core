@@ -95,6 +95,9 @@ bool parity_fee_share_opted_in( const database& db, asset_id_type recv_asset )
 
 fc::sha256 nullifier_key( const std::vector<char>& image33 )
 {
+   // AUDIT: nullifier identity IS sha256(image) — double-spend detection
+   // reduces to sha256 second-preimage resistance; any image truncation or
+   // domain change here breaks cross-path linkage silently.
    return fc::sha256::hash( image33.data(), image33.size() );
 }
 
@@ -328,6 +331,15 @@ void stealth_require_sound_range_proofs( const database& db,
       std::vector<char> proof( out.range_proof.begin(), out.range_proof.end() );
       FC_ASSERT( stealth_verify_range_v1( out.commitment, proof, min_v, max_v ),
                  "Blind output range proof does not verify" );
+      // F-05 (R9A): the claimed range is checked, never ignored. min_value
+      // is pinned to 0 (every honest prover — wallet 49-bit mantissa, tests —
+      // signs min_value=0); nonzero minima fail closed here. No max_value
+      // FLOOR is asserted: narrow proofs are sound (small values prove narrow
+      // ranges by construction under min_bits=0), so a floor would reject
+      // legitimate small-value outputs. The operative CEILING [0,2^50) is
+      // enforced by the 4096-byte cap inside the verifier (50-bit = 4005B,
+      // last admissible, ADDENDUM A6); see stealth_proof.hpp:160-161.
+      FC_ASSERT( min_v == 0, "V1 range proof must claim min_value 0" );
    }
 }
 
@@ -443,6 +455,10 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
             std::vector<char> proof( out.range_proof.begin(), out.range_proof.end() );
             FC_ASSERT( stealth_verify_range_v1( out.commitment, proof, min_v, max_v ),
                        "Stealth output V1 range proof does not verify: ${e}", ("e", err) );
+            // F-05 (R9A): same claimed-range pin as the legacy path above —
+            // min_value==0 fail-closed; no max_value floor (narrow proofs are
+            // sound; the ceiling [0,2^50) rides the verifier's 4096-byte cap).
+            FC_ASSERT( min_v == 0, "V1 range proof must claim min_value 0" );
          }
          else
          {
@@ -779,8 +795,11 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    // C_old - C_new - fee*H must equal (b_old - b_new)*G. This binds the hidden
    // values: any new-value inflation (or fee shortfall) fails the equation.
    {
-      // Excess scalar e = b_old - b_new (mod n), from the revealed blinds.
-      fc::sha256 e_raw;
+       // Excess scalar e = b_old - b_new (mod n), from the revealed blinds.
+       // AUDIT: this hand-rolled 256-bit modular subtraction must equal the
+       // excess the kernel checks exactly; a borrow/carry error here mints
+       // or burns value while conservation still passes.
+       fc::sha256 e_raw;
       {
          // 256-bit modular subtraction on the blind preimages.
          unsigned char a[32], b[32], e[32];
@@ -845,6 +864,10 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
          uint64_t min_v = 0, max_v = 0;
          FC_ASSERT( stealth_verify_range_v1( o.new_output.commitment, proof, min_v, max_v ),
                     "Turnstile V1 range proof does not verify" );
+         // F-05 (R9A): same claimed-range pin — min_value==0 fail-closed;
+         // no max_value floor (narrow proofs are sound; ceiling [0,2^50)
+         // rides the verifier's 4096-byte cap).
+         FC_ASSERT( min_v == 0, "V1 range proof must claim min_value 0" );
       }
       else
       {

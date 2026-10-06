@@ -33,8 +33,11 @@ namespace graphene { namespace protocol {
  * live in the chain evaluators, hardfork-gated. validate() MUST NOT verify
  * cryptography: it runs on relays that may not have the EC context, and
  * consensus divergence between validate flavors would fork the network.
- * Every size bound here mirrors the verifier's bounds exactly (same
- * constants) so malformed transactions fail early AND identically.
+ * Every size bound here mirrors the verifier's bounds (same constants) or,
+ * for V2 range proofs, stays deliberately looser (756 relay cap vs 592/658
+ * exact verifier sizes) so malformed transactions fail early on relays AND
+ * identically in consensus — validate() never admits what the verifier
+ * rejects, it only pre-rejects a superset early.
  */
 void stealth_transfer_operation::validate()const
 {
@@ -88,8 +91,10 @@ void stealth_transfer_operation::validate()const
    }
    else
    {
-      // V2 G1 wire format: 1 + 33*4 + 32*2 + 7*66 + 32*3 = 756 max (m<=2).
-      // Tighter per-m bounds are enforced by the verifier, not here.
+   // V2 G1 single-proof wire: 1 + 33*3 + 32*3 + rounds*66, rounds = 6
+   // (m=1: 592 bytes) or 7 (m=2: 658 bytes). The 756 cap below stays a
+   // loose relay-side upper bound only; the verifier enforces the exact
+   // per-m size (stealth_bp_proof_size), never this cap.
       for( const auto& out : outputs )
          FC_ASSERT( out.range_proof.size() <= 756, "V2 proof too large" );
    }

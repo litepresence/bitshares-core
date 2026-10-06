@@ -32,6 +32,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 
@@ -66,6 +67,22 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
    FC_ASSERT( !pair_asset->is_market_issued(),
               "Vault pairs must be vault-backed UIAs: market-issued (H1-track) "
               "assets are excluded from bonded custody" );
+   // Pilot ceiling (AC-02, consensus-enforced): the pair's standing token
+   // supply must already sit at or under the $20,000 face cap when the
+   // vault binds it. Without this, pre-bind issuer-direct flow (inert
+   // with no vault row to match) could print past the cap, then register
+   // and leave over-cap supply standing while every future mint refuses.
+   // Exact integer compare, no price/time input; equality admits
+   // (inclusive cap).
+   {
+      const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset->precision );
+      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+      FC_ASSERT( pair_dyn.current_supply <= pilot_cap,
+                 "Pilot ceiling: pair current supply ${s} exceeds the "
+                 "$20,000 face pilot cap for this pair; vault registration "
+                 "refused while over-cap",
+                 ("s", pair_dyn.current_supply) );
+   }
    // Allow-list enforced at registration (H2a review direction): locks check
    // per-type, so registration must not accept anything else. BTS-only at
    // genesis; basket assets join through an explicit later rule.

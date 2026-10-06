@@ -1996,4 +1996,56 @@ BOOST_AUTO_TEST_CASE( pilot_ceiling_caps_pair_scale )
                     share_type( 200 ), share_type( 1 ) );
 } FC_LOG_AND_RETHROW() }
 
+/// Pilot ceiling pre-bind closure (AC-02 follow-up): vault registration
+/// itself refuses when the pair already carries over-cap supply. Attack:
+/// issue large supply before any vault exists (issuer-direct gate inert:
+/// no vault row), then register -- future mints refuse but the over-cap
+/// remains. Defense `vault_evaluator.cpp vault_register_evaluator::
+/// do_evaluate`: pair current_supply <= h2_issue_pilot_cap_face(precision).
+BOOST_AUTO_TEST_CASE( pilot_ceiling_binds_vault_registration )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+
+   // Over-cap pre-issue (no vault yet: issuer-direct gate inert, admits).
+   const asset_id_type over = h2j_create_uia( *this, alice_id, alice_private_key, "HYPREOV" );
+   h2j_pilot_issue( *this, alice_id, alice_private_key, over, alice_id,
+                    share_type( 2000000000LL + 1 ) );
+   BOOST_REQUIRE_EQUAL( over( db ).dynamic_asset_data_id( db ).current_supply.value,
+                        2000000000LL + 1 );
+   // Registration over the standing over-cap supply refuses at the pilot gate.
+   {
+      vault_register_operation op;
+      op.registrar            = alice_id;
+      op.pair                 = over;
+      op.vault_authority      = authority( 1, alice_id, 1 );
+      op.min_bond             = H2J_VAULT_RAW;
+      op.min_bond_usd_cents   = H2J_VAULT_USD_CENTS;
+      op.bond_asset           = asset_id_type();
+      op.secure_ratio_bps     = 20000;
+      op.challenge_window_sec = GRAPHENE_H2_BOND_UNBOND_DELAY_SEC;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      h2j_require_pilot_refusal( *this, tx, "vault register with over-cap supply" );
+   }
+
+   // At-cap pre-issue registers OK (inclusive boundary).
+   const asset_id_type ok = h2j_create_uia( *this, alice_id, alice_private_key, "HYPREOK" );
+   h2j_pilot_issue( *this, alice_id, alice_private_key, ok, alice_id,
+                    share_type( 2000000000LL ) );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2j_register_vault(
+         *this, alice_id, alice_private_key, vault_auth,
+         H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, ok );
+   BOOST_REQUIRE( db.find( vid ) != nullptr );
+   BOOST_CHECK( vid( db ).vault_pair == ok );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

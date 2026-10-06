@@ -146,6 +146,26 @@ oracle_id_type h2c_make_oracle(
       PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
 }
 
+asset_id_type h2c_create_uia(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
+      const string& symbol );
+
+/// Pilot-scale default pair (AC-02): vault scaffolding binds a fresh
+/// zero-supply UIA, never CORE (whose 1e15 genesis supply is now correctly
+/// refused at the pilot gate in vault_register::do_evaluate). Find-or-create
+/// keeps the suite's fixed-pair semantics: repeat registrations in one test
+/// still hit the duplicate-pair gate, exactly as with the old CORE default.
+asset_id_type h2c_default_pair(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key )
+{
+   const auto& sym_idx =
+         f.db.get_index_type<asset_index>().indices().get<by_symbol>();
+   const auto itr = sym_idx.find( "H2CPAIR" );
+   if( itr != sym_idx.end() )
+      return itr->get_id();
+   return h2c_create_uia( f, issuer, key, "H2CPAIR" );
+}
+
 vault_id_type h2c_register_vault(
       database_fixture& f, account_id_type registrar, const fc::ecc::private_key& key,
       const authority& vault_auth, share_type min_bond, uint64_t min_bond_usd,
@@ -153,7 +173,8 @@ vault_id_type h2c_register_vault(
 {
    vault_register_operation op;
    op.registrar            = registrar;
-   op.pair                 = pair;
+   op.pair                 = ( pair == asset_id_type() )
+         ? h2c_default_pair( f, registrar, key ) : pair;
    op.vault_authority      = vault_auth;
    op.min_bond             = min_bond;
    op.min_bond_usd_cents   = min_bond_usd;

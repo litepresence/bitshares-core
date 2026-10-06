@@ -145,13 +145,49 @@ void h2d_publish( database_fixture& f, oracle_id_type oid,
    PUSH_TX( f.db, tx );
 }
 
+/// Creates a plain UIA to serve as a vault pair.
+asset_id_type h2d_create_uia(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
+      const string& symbol )
+{
+   asset_create_operation op;
+   op.issuer      = issuer;
+   op.symbol      = symbol;
+   op.precision   = 5;
+   op.common_options.max_supply = GRAPHENE_MAX_SHARE_SUPPLY;
+   op.common_options.core_exchange_rate = price( asset( 2 ), asset( 1, asset_id_type( 1 ) ) );
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return asset_id_type {
+      PUSH_TX( f.db, tx ).operation_results.front().get<object_id_type>() };
+}
+
+/// Pilot-scale default pair (AC-02): vault scaffolding binds a fresh
+/// zero-supply UIA, never CORE (whose 1e15 genesis supply is now correctly
+/// refused at the pilot gate in vault_register::do_evaluate). Find-or-create
+/// keeps the suite's fixed-pair semantics: repeat registrations in one test
+/// still hit the duplicate-pair gate, exactly as with the old CORE default.
+asset_id_type h2d_default_pair(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key )
+{
+   const auto& sym_idx =
+         f.db.get_index_type<asset_index>().indices().get<by_symbol>();
+   const auto itr = sym_idx.find( "H2DPAIR" );
+   if( itr != sym_idx.end() )
+      return itr->get_id();
+   return h2d_create_uia( f, issuer, key, "H2DPAIR" );
+}
+
 vault_id_type h2d_register_vault(
       database_fixture& f, account_id_type registrar, const fc::ecc::private_key& key,
       const authority& vault_auth )
 {
    vault_register_operation op;
    op.registrar            = registrar;
-   op.pair                 = asset_id_type();
+   op.pair                 = h2d_default_pair( f, registrar, key );
    op.vault_authority      = vault_auth;
    op.min_bond             = share_type( 1340000LL * H2D_RAW_PER_USD_CENT );
    op.min_bond_usd_cents   = 1340000;

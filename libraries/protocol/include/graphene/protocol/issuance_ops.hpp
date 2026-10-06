@@ -43,7 +43,17 @@ namespace graphene { namespace protocol {
    /// deposits plus redeem payouts per pair per block must not exceed this.
    /// Load-bearing (R2 audit): without it oracle profit-from-corruption is
    /// unbounded. DEX legs are NOT capped (market + slippage) -- door-only.
-   constexpr uint64_t GRAPHENE_H2_ISSUE_DOOR_CAP_BTS = 200000000000ULL;
+    constexpr uint64_t GRAPHENE_H2_ISSUE_DOOR_CAP_BTS = 200000000000ULL;
+    /// Pilot ceiling proposal (AC-02, audit-round-7): total senior
+    /// outstanding per pair may never exceed $20,000 face while the pilot
+    /// phase holds (HONEST-scale pilot, 90 days, before $1 of USD-scale
+    /// issuance). Metered in whole face dollars here and precision-scaled
+    /// at the gate (cap_face = 20000 x 10^pair_precision); both the book
+    /// (reserve stable_supply) and the token (pair current_supply) must
+    /// stay under it on every supply-creating path. Lifting it is a new
+    /// binary + audit, never a vote toggle: scale is fail-closed by
+    /// construction.
+    constexpr uint64_t GRAPHENE_H2_ISSUE_PILOT_MAX_STABLE_FACE_USD = 20000ULL;
     /// Conversion fee proposal: 30bps of every door conversion stays in the
     /// reserve (griefing a mint/redeem cycle costs the fee twice while
     /// coverage rises). Mint leg: the fee slice of the deposit backs the

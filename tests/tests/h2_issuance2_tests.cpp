@@ -1866,4 +1866,134 @@ BOOST_AUTO_TEST_CASE( band_quantas_floor_per_leg_with_anchor_advance )
    BOOST_CHECK( h2j_band_sum_face( r1 ) == r1->stable_supply );
 } FC_LOG_AND_RETHROW() }
 
+/// Pilot ceiling (AC-02, audit-round-7): total senior outstanding per pair is
+/// consensus-capped at $20,000 face. Red test for the mint-door gate in
+/// `hybrid_mint_evaluator::do_evaluate` (issuance.cpp) and the issuer-direct
+/// gate in `asset_issue_evaluator::do_evaluate` (asset_evaluator.cpp): the
+/// book fills to exactly the cap across blocks (door-cap scale chunks, every
+/// other gate passing), cap+1 face refuses on BOTH paths with a "Pilot
+/// ceiling" refusal, while cap itself admits. Pair precision is 5, so the
+/// cap is 20000 * 10^5 = 2000000000 face units.
+static_assert( GRAPHENE_H2_ISSUE_PILOT_MAX_STABLE_FACE_USD == 20000ULL,
+               "pilot ceiling must stay $20,000 face (lift = new binary + audit)" );
+
+void h2j_pilot_issue(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
+      asset_id_type pair, account_id_type to, share_type amount )
+{
+   asset_issue_operation op;
+   op.issuer            = issuer;
+   op.asset_to_issue    = asset( amount, pair );
+   op.issue_to_account  = to;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
+void h2j_require_pilot_refusal(
+      database_fixture& f, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( f.db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "Pilot ceiling" ) != std::string::npos,
+            what << " refused off-gate (not the pilot ceiling): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED past the pilot ceiling" );
+}
+
+BOOST_AUTO_TEST_CASE( pilot_ceiling_caps_pair_scale )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   // Door A: fill the BOOK to exactly the cap. Genesis skips the headroom
+   // leg, so one door-cap-scale mint opens deep; later chunks respect the
+   // standing headroom (k1 unity) with a block per chunk resetting the
+   // shared door counter. Post-chunk1 headroom ~= 200B - 50M*130 ~= 193B,
+   // so the 180.54B second leg admits (grossed for the 30bps fee: net
+   // 180541624874 - 541624874 = 180000000000 exact); post-chunk2 headroom
+   // ~= 139B admits the 20B third leg. Every non-pilot gate passes at each
+   // step below (rmin 4000%/205%/200%, door, headroom, secure 6x+).
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPILOT", "HYPILOTF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "P" );
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000000000LL ), share_type( 50000000LL ) );
+   generate_block(); // reset the door counter
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 180541624874LL ), share_type( 1800000000LL ) );
+   generate_block(); // reset the door counter
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 20000000000LL ), share_type( 150000000LL ) );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_REQUIRE_EQUAL( r->stable_supply.value, 2000000000LL );
+   // Cap + 1 face through the mint door refuses AT the pilot gate.
+   {
+      hybrid_mint_operation op;
+      op.minter        = alice_id;
+      op.vault         = d.vault;
+      op.deposit       = asset( share_type( 200 ), asset_id_type() );
+      op.stable_amount = share_type( 1 );
+      op.fxr_asset     = d.fxr;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      h2j_require_pilot_refusal( *this, tx, "mint past $20k cap" );
+   }
+   // Issuer-direct path on the same pair refuses too (same cap, token leg).
+   {
+      asset_issue_operation op;
+      op.issuer           = alice_id;
+      op.asset_to_issue   = asset( share_type( 1 ), d.pair );
+      op.issue_to_account = alice_id;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      h2j_require_pilot_refusal( *this, tx, "issuer-direct past $20k cap" );
+   }
+
+   // Door B: pin the issuer-path BOUNDARY (exact cap admits, +1 refuses)
+   // and the mint token-leg (book small, token at cap, mint refuses).
+   const h2j_door e = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPILOTB", "HYPILOTBF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "Q" );
+   h2j_mint( *this, alice_id, alice_private_key, e,
+             share_type( 140000 ), share_type( 1000 ) );
+   h2j_pilot_issue( *this, alice_id, alice_private_key, e.pair, alice_id,
+                    share_type( 2000000000LL - 1000 ) );
+   BOOST_CHECK_EQUAL( e.pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+                      2000000000LL );
+   {
+      asset_issue_operation op;
+      op.issuer           = alice_id;
+      op.asset_to_issue   = asset( share_type( 1 ), e.pair );
+      op.issue_to_account = alice_id;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      h2j_require_pilot_refusal( *this, tx, "issuer-direct cap+1" );
+   }
+   // Token at cap, book at 1000: a 1-face mint passes every book-side gate
+   // (rmin 140%, headroom, door) and refuses on the pilot token leg only.
+   h2j_mint_throws( *this, alice_id, alice_private_key, e,
+                    share_type( 200 ), share_type( 1 ) );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

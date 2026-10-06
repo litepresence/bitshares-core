@@ -776,6 +776,18 @@ uint32_t h2_issue_coverage_bps( share_type value_face, share_type supply_face )
    return uint32_t( fc::uint128_lo64( q ) );
 }
 
+share_type h2_issue_pilot_cap_face( uint8_t precision )
+{
+   uint256_t unit( 1 );
+   for( uint8_t i = 0; i < precision; ++i )
+      unit *= 10;
+   const uint256_t cap =
+         uint256_t( GRAPHENE_H2_ISSUE_PILOT_MAX_STABLE_FACE_USD ) * unit;
+   if( cap > uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
+      return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
+   return share_type( int64_t( uint64_t( cap ) ) );
+}
+
 void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op )
 { try {
    database& d = db();
@@ -950,6 +962,33 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
       const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
       FC_ASSERT( ( pair_dyn.current_supply + op.stable_amount ) <= pair_asset->options.max_supply,
                  "Mint exceeds the pair asset's maximum supply" );
+   }
+   // Pilot ceiling (AC-02, consensus-enforced): total senior outstanding
+   // per pair never exceeds $20,000 face while the pilot phase holds
+   // (precision-scaled: 20000 x 10^pair_precision face units). BOTH the
+   // book (reserve stable_supply) and the token (pair current_supply) must
+   // stay under it on every supply-creating path -- the mint door checks
+   // both legs because issuer-direct flow (asset_issue) moves the token
+   // without touching the book. Lifting the ceiling is a new binary +
+   // audit, never a vote toggle: scale is fail-closed by construction.
+   // Exact integer math (saturating adds), no price input, deterministic
+   // on every node. Equality admits (inclusive cap).
+   {
+      const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset->precision );
+      const share_type book_before =
+            _creates_reserve ? share_type( 0 ) : _reserve->stable_supply;
+      FC_ASSERT( h2_issue_sat_add( book_before, op.stable_amount ) <= pilot_cap,
+                 "Pilot ceiling: post-mint book ${b} exceeds the $20,000 "
+                 "face pilot cap for this pair; scale-up needs a new binary",
+                 ("b", h2_issue_sat_add( book_before, op.stable_amount )) );
+      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+      FC_ASSERT( h2_issue_sat_add( pair_dyn.current_supply, op.stable_amount )
+                 <= pilot_cap,
+                 "Pilot ceiling: post-mint token supply ${s} exceeds the "
+                 "$20,000 face pilot cap for this pair; scale-up needs a "
+                 "new binary",
+                 ("s", h2_issue_sat_add( pair_dyn.current_supply,
+                                         op.stable_amount )) );
    }
 
    // Effective door cap (ISSUANCE-2 live rule; the fixed $2,000 cap survives

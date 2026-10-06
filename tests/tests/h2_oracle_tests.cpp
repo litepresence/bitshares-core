@@ -1204,14 +1204,14 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_h2_medians )
      const asset_id_type lshare = h2e_create_uia( *this, sam_id, sam_private_key, "LSHARE" );
      const liquidity_pool_id_type lpool_id = create_liquidity_pool(
            sam_id, asset_id_type(), lone, lshare, 0, 0 ).get_id();
-    issue_uia( sam, asset( 20000000000LL, lone ) );
+    issue_uia( sam, asset( 2000000000LL, lone ) ); // pilot-scale (AC-02): ÷10, cap-inclusive
     deposit_to_liquidity_pool( sam_id, lpool_id,
-                               asset( 1000000000000LL ), asset( 10000000000LL, lone ) );
+                               asset( 10000000000LL ), asset( 100000000LL, lone ) ); // ÷10 pilot-scale
     for( int w = 0; w < 3; ++w )
     {
        for( int i = 0; i < 2; ++i )
           exchange_with_liquidity_pool( sam_id, lpool_id,
-                                        asset( 500000000LL, lone ), asset( 1, asset_id_type() ) );
+                                        asset( 50000000LL, lone ), asset( 1, asset_id_type() ) ); // ÷10 pilot-scale
       generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
       generate_block();
    }
@@ -1271,11 +1271,11 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
           sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
     const liquidity_pool_id_type pool2_id = create_liquidity_pool(
           sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-    issue_uia( sam, asset( 100000000000LL, pairp ) );
+    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
     deposit_to_liquidity_pool( sam_id, pool1_id,
-                               asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );
     deposit_to_liquidity_pool( sam_id, pool2_id,
-                               asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );
 
     auto trade_both = [&]( int64_t sell_p, int64_t tweak )
     {
@@ -1294,7 +1294,7 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
 
    // Window 1: feed 100, market ~100. First sweep only fills the older slot.
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    const tripwire_state_object* tw1 = h2e_find_tripwire( *this, pairp );
    BOOST_REQUIRE( tw1 != nullptr );
@@ -1309,7 +1309,7 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
 
    // Window 2: still aligned -> first evaluation is clean (streak 1, no halt).
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 2000000, 3 );
+   trade_both( 1000000, 3 );
    pass_window();
    BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage, 0u );
    BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->clean_streak, 1u );
@@ -1325,10 +1325,10 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
        const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
        withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
        deposit_to_liquidity_pool( sam_id, pid,
-                                  asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+                                  asset( 100000000000LL ), asset( 500000000LL, pairp ) );
     }
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window();
    const tripwire_state_object* tw3 = h2e_find_tripwire( *this, pairp );
    BOOST_REQUIRE( tw3 != nullptr );
@@ -1347,7 +1347,7 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
 
    // Window 4: dislocation persists -> REDEMPTIONS halt last (only lagging rung).
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 100000000, 7 );
+   trade_both( 1000000, 7 );
    pass_window();
    const tripwire_state_object* tw4 = h2e_find_tripwire( *this, pairp );
    BOOST_CHECK_EQUAL( tw4->halt_stage,
@@ -1364,7 +1364,7 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
         const liquidity_pool_object& p1 = pool1_id( db );
        h2e_publish( *this, oid, bob_id, bob_private_key,
                     p1.balance_a.value, p1.balance_b.value );
-      trade_both( 100000000, 11 + w );
+      trade_both( 1000000, 11 + w );
       pass_window();
    }
    const tripwire_state_object* tw7 = h2e_find_tripwire( *this, pairp );
@@ -1419,12 +1419,12 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
     const asset_id_type sq = h2e_create_uia( *this, sam_id, sam_private_key, "HSHARE" );
     const liquidity_pool_id_type pool_id = create_liquidity_pool(
           sam_id, asset_id_type(), pairq, sq, 0, 0 ).get_id();
-    issue_uia( sam, asset( 20000000000LL, pairq ) );
+    issue_uia( sam, asset( 2000000000LL, pairq ) ); // pilot-scale (AC-02): ÷10, cap-inclusive
     deposit_to_liquidity_pool( sam_id, pool_id,
-                               asset( 1000000000000LL ), asset( 10000000000LL, pairq ) );
+                               asset( 10000000000LL ), asset( 100000000LL, pairq ) ); // ÷10 pilot-scale
     h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
     exchange_with_liquidity_pool( sam_id, pool_id,
-                                  asset( 500000000LL, pairq ), asset( 1, asset_id_type() ) );
+                                   asset( 50000000LL, pairq ), asset( 1, asset_id_type() ) ); // ÷10 pilot-scale
    BOOST_REQUIRE( h2e_find_tripwire( *this, pairq ) != nullptr );
 
     // The hold itself is set through the object's own latch (the ladder case
@@ -1646,11 +1646,11 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
          sam_id, asset_id_type(), pairc, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairc, s2, 0, 0 ).get_id();
-   issue_uia( sam, asset( 100000000000LL, pairc ) );
+   issue_uia( sam, asset( 1200000000LL, pairc ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairc ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairc ) );
    deposit_to_liquidity_pool( sam_id, pool2_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairc ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairc ) );
    auto trade_both = [&]( int64_t sell_p, int64_t tweak )
    {
       exchange_with_liquidity_pool( sam_id, pool1_id,
@@ -1668,10 +1668,10 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
 
    // Windows 1-2: aligned (feed 100, market ~100) to fill both windows clean.
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 2000000, 3 );
+   trade_both( 1000000, 3 );
    pass_window();
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairc )->halt_stage, 0u );
 
@@ -1685,10 +1685,10 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 2000000000000LL ), asset( 10000000000LL, pairc ) );
+                                 asset( 100000000000LL ), asset( 500000000LL, pairc ) );
    }
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window();
 
    // Atomicity: ONE sweep applied door AND debt together. No block observed
@@ -1705,7 +1705,7 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
 
    // Window 4: dislocation persists -> REDEMPTIONS (only lagging rung).
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 100000000, 7 );
+   trade_both( 1000000, 7 );
    pass_window();
    const tripwire_state_object* tw4 = h2e_find_tripwire( *this, pairc );
    BOOST_REQUIRE( tw4 != nullptr );
@@ -1755,7 +1755,7 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
       const liquidity_pool_object& p1 = pool1_id( db );
       h2e_publish( *this, oid, bob_id, bob_private_key,
                    p1.balance_a.value, p1.balance_b.value );
-      trade_both( 100000000, 11 + w );
+      trade_both( 1000000, 11 + w );
       pass_window();
    }
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairc )->halt_stage, 0u );
@@ -1826,11 +1826,11 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    deposit_to_liquidity_pool( sam_id, pool2_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    auto trade_both = [&]( int64_t sell_p, int64_t tweak )
    {
       exchange_with_liquidity_pool( sam_id, pool1_id,
@@ -1864,7 +1864,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
    // Window 1: aligned market on the surviving carol feed — clean, no halt,
    // and the guilty freeze is untouched by the clean wire.
    h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage, 0u );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
@@ -1876,10 +1876,10 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 100000000000LL ), asset( 500000000LL, pairp ) );
    }
    h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window();
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -1908,7 +1908,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
       const liquidity_pool_object& p1 = pool1_id( db );
       h2e_publish( *this, oid, carol_id, carol_private_key,
                    p1.balance_a.value, p1.balance_b.value );
-      trade_both( 100000000, 21 + w );
+      trade_both( 1000000, 21 + w );
       pass_window();
    }
    const tripwire_state_object* tw = h2e_find_tripwire( *this, pairp );
@@ -1924,7 +1924,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
       const liquidity_pool_object& p1 = pool1_id( db );
       h2e_publish( *this, oid, carol_id, carol_private_key,
                    p1.balance_a.value, p1.balance_b.value );
-      trade_both( 100000000, 25 );
+      trade_both( 1000000, 25 );
       pass_window();
    }
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
@@ -2115,11 +2115,11 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    deposit_to_liquidity_pool( sam_id, pool2_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    auto trade_both = [&]( int64_t sell_p, int64_t tweak )
    {
       exchange_with_liquidity_pool( sam_id, pool1_id,
@@ -2138,7 +2138,7 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
    // Phase A: halt at DEBT through dislocation (two windows: fill, then
    // breach on the combined median, mirroring the ladder test).
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
    {
@@ -2146,10 +2146,10 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 100000000000LL ), asset( 500000000LL, pairp ) );
    }
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window();
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -2175,12 +2175,12 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    }
    for( int w = 0; w < 3; ++w )
    {
       h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-      trade_both( 2000000, 31 + w );
+      trade_both( 1000000, 31 + w );
       pass_window();
    }
    BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage, 0u );
@@ -2195,7 +2195,7 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
    const oracle_dispute_id_type did = h2e_post_dispute(
          *this, sam_id, sam_private_key, oid, bob_id, accused, 0,
          h2e_evidence( "x06-expiry" ) );
-   trade_both( 2000000, 41 );
+   trade_both( 1000000, 41 );
    generate_blocks( did( db ).round_deadline + 2 * 86400 );
    generate_block();
    BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
@@ -2207,7 +2207,7 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
    for( int w = 0; w < 2; ++w )
    {
       h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-      trade_both( 2000000, 51 + w );
+      trade_both( 1000000, 51 + w );
       pass_window();
    }
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
@@ -2270,11 +2270,11 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_expired_vault_frozen )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    deposit_to_liquidity_pool( sam_id, pool2_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    auto trade_both = [&]( int64_t sell_p, int64_t tweak )
    {
       exchange_with_liquidity_pool( sam_id, pool1_id,
@@ -2297,7 +2297,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_expired_vault_frozen )
 
    // Halt to DEBT through dislocation (X-06 ladder pattern).
    publish_both();
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
    {
@@ -2305,10 +2305,10 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_expired_vault_frozen )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 100000000000LL ), asset( 500000000LL, pairp ) );
    }
    publish_both();
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window();
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -2334,12 +2334,12 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_expired_vault_frozen )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    }
    for( int w = 0; w < 3; ++w )
    {
       publish_both();
-      trade_both( 2000000, 61 + w );
+      trade_both( 1000000, 61 + w );
       pass_window();
    }
    const tripwire_state_object* tw = h2e_find_tripwire( *this, pairp );
@@ -2354,7 +2354,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_expired_vault_frozen )
    // One more clean window with no committee action: still frozen (the vault
    // half has no unfreeze op; expired pins fail-closed by design).
    publish_both();
-   trade_both( 2000000, 64 );
+   trade_both( 1000000, 64 );
    pass_window();
    BOOST_CHECK_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage, 0u );
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
@@ -2419,11 +2419,11 @@ BOOST_AUTO_TEST_CASE( exonerated_vault_restores_through_reopen )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    deposit_to_liquidity_pool( sam_id, pool2_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    auto trade_both = [&]( int64_t sell_p, int64_t tweak )
    {
       exchange_with_liquidity_pool( sam_id, pool1_id,
@@ -2447,7 +2447,7 @@ BOOST_AUTO_TEST_CASE( exonerated_vault_restores_through_reopen )
    // Halt to DEBT (door hold freezes the vault), then three truthful
    // windows: reopen clears the vault despite the standing EXONERATED past.
    publish_both();
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
    {
@@ -2455,10 +2455,10 @@ BOOST_AUTO_TEST_CASE( exonerated_vault_restores_through_reopen )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 100000000000LL ), asset( 500000000LL, pairp ) );
    }
    publish_both();
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window();
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -2470,12 +2470,12 @@ BOOST_AUTO_TEST_CASE( exonerated_vault_restores_through_reopen )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    }
    for( int w = 0; w < 3; ++w )
    {
       publish_both();
-      trade_both( 2000000, 71 + w );
+      trade_both( 1000000, 71 + w );
       pass_window();
    }
    BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXONERATED );
@@ -2693,11 +2693,11 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-   issue_uia( sam, asset( 100000000000LL, pairp ) );
+   issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    deposit_to_liquidity_pool( sam_id, pool2_id,
-                              asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                              asset( 50000000000LL ), asset( 500000000LL, pairp ) );
    auto trade_both = [&]( int64_t sell_p, int64_t tweak )
    {
       exchange_with_liquidity_pool( sam_id, pool1_id,
@@ -2725,13 +2725,13 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
          const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
          withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
          deposit_to_liquidity_pool( sam_id, pid,
-                                    asset( 1000000000000LL ), asset( 10000000000LL, pairp ) );
+                                    asset( 50000000000LL ), asset( 500000000LL, pairp ) );
       }
    };
 
    // Halt to DEBT (S0): fill, then breach on the combined median.
    publish_both();
-   trade_both( 2000000, 1 );
+   trade_both( 1000000, 1 );
    pass_window();
    for( const liquidity_pool_id_type pid : { pool1_id, pool2_id } )
    {
@@ -2739,10 +2739,10 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
       const share_type shares = db.get_balance( sam_id, pool.share_asset ).amount;
       withdraw_from_liquidity_pool( sam_id, pid, asset( shares, pool.share_asset ) );
       deposit_to_liquidity_pool( sam_id, pid,
-                                 asset( 2000000000000LL ), asset( 10000000000LL, pairp ) );
+                                 asset( 100000000000LL ), asset( 500000000LL, pairp ) );
    }
    publish_both();
-   trade_both( 100000000, 5 );
+   trade_both( 1000000, 5 );
    pass_window(); // S0
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -2765,7 +2765,7 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
    const oracle_dispute_id_type did = h2e_post_dispute(
          *this, sam_id, sam_private_key, oid, bob_id, accused, 0,
          h2e_evidence( "r405-dispute" ) );
-   trade_both( 2000000, 81 );
+   trade_both( 1000000, 81 );
    pass_window(); // S2
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -2773,7 +2773,7 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
    // C2: (C1, C2) clean → streak 1. Both targets still open (no expiry yet:
    // deadlines sit a full window out).
    publish_both();
-   trade_both( 2000000, 82 );
+   trade_both( 1000000, 82 );
    pass_window(); // S3
    BOOST_REQUIRE_EQUAL( h2e_find_tripwire( *this, pairp )->halt_stage,
                         GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT );
@@ -2797,7 +2797,7 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
    // with both deadlines inside it (deadline <= S4-now is proven post-sweep
    // by the EXPIRED_FROZEN states: expiry only fires at deadline <= now).
    publish_both();
-   trade_both( 2000000, 83 );
+   trade_both( 1000000, 83 );
    pass_window(); // S4: expiry + vault sweep + reopen coincide
    BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
    BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
@@ -2821,7 +2821,7 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    publish_both();
-   trade_both( 2000000, 84 );
+   trade_both( 1000000, 84 );
    pass_window();
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );

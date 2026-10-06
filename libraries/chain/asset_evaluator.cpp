@@ -29,9 +29,11 @@
 #include <graphene/chain/exceptions.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
+#include <graphene/chain/vault_object.hpp>
 
 #include <functional>
 
@@ -435,6 +437,31 @@ void_result asset_issue_evaluator::do_evaluate( const asset_issue_operation& o )
 
    asset_dyn_data = &a.dynamic_asset_data_id(d);
    FC_ASSERT( (asset_dyn_data->current_supply + o.asset_to_issue.amount) <= a.options.max_supply );
+
+   // Pilot ceiling (AC-02, consensus-enforced): an asset bound as an H2
+   // vault pair is capped at $20,000 face total senior outstanding while
+   // the pilot phase holds. The issuer-direct path checks the same
+   // precision-scaled cap the mint door enforces, so neither
+   // supply-creating path can print past it. Inert by construction
+   // everywhere else: legacy assets (bit*, HONEST.*, gateway UIAs) never
+   // bind a vault, so the lookup misses and this gate never fires for
+   // them. No hardfork date needed: vault rows only exist post-H2, so
+   // pre-fork the index is empty. Equality admits (inclusive cap).
+   {
+      const auto& vault_by_pair =
+            d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+      if( vault_by_pair.find( o.asset_to_issue.asset_id ) != vault_by_pair.end() )
+      {
+         const share_type pilot_cap = h2_issue_pilot_cap_face( a.precision );
+         FC_ASSERT( ( asset_dyn_data->current_supply + o.asset_to_issue.amount )
+                    <= pilot_cap,
+                    "Pilot ceiling: post-issue token supply ${s} exceeds the "
+                    "$20,000 face pilot cap for this pair; scale-up needs a "
+                    "new binary",
+                    ("s", ( asset_dyn_data->current_supply
+                            + o.asset_to_issue.amount )) );
+      }
+   }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) } // GCOVR_EXCL_LINE

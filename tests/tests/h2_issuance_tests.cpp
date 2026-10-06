@@ -858,7 +858,16 @@ BOOST_AUTO_TEST_CASE( unbonded_mint_and_reserveless_redeem_refuse )
 /// claim inside it burns FXR from the claimant, the token supply, and the
 /// reserve ledger together; a second senior then settles at the SAME
 /// haircut -- junior dilution never deepens senior settlement (burned FIRST).
-BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
+/// PILOT-NARROWED (AC-02, Task 10): disabled for the pilot phase, body
+/// kept byte-identical for the scale phase. This test builds a real
+/// 9.5e11-face book through consensus mints to breach 150% coverage with
+/// full-size bonds -- a state unreachable under the $20,000-face pilot
+/// ceiling (any mint past it refuses at the pilot gate before reaching
+/// the wind-down machinery). RE-ENTRY: re-enable in the scale binary
+/// that lifts the cap (new binary + audit); the wind-down dilution order
+/// must be re-proven there before scale activation.
+BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first,
+                      * boost::unit_test::disabled() )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
@@ -996,7 +1005,17 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
 /// full-size bond (1.34e12) covers at most 6.7e11 face: S=6.73e11 reads
 /// 199.1% and refuses (rmin and net-of-fee both pass, isolating the gate),
 /// while S=6.6e11 reads 203% and mints.
-BOOST_AUTO_TEST_CASE( mint_below_secure_ratio_refused )
+/// PILOT-NARROWED (AC-02, Task 10): disabled for the pilot phase, body
+/// kept byte-identical for the scale phase. The secure-ratio boundary
+/// (6.6e11 face with full-size bonds, raw-vs-face 1:1 against the
+/// $13,400 bond floor) sits 330x above the $20,000-face pilot ceiling,
+/// so the gate is vacuous-but-live under pilot consensus: every
+/// pilot-reachable mint passes it, and any mint reaching it refuses at
+/// the pilot gate first. RE-ENTRY: re-enable in the scale binary that
+/// lifts the cap (new binary + audit); the boundary pin must be
+/// re-proven there before scale activation.
+BOOST_AUTO_TEST_CASE( mint_below_secure_ratio_refused,
+                      * boost::unit_test::disabled() )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();

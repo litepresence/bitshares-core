@@ -185,9 +185,16 @@ namespace graphene { namespace chain {
     * negative) supply saturates (nothing to secure); non-positive value
     * reads 0. Deterministic on every node.
     */
-   uint32_t h2_issue_coverage_bps( share_type value_face, share_type supply_face );
+    uint32_t h2_issue_coverage_bps( share_type value_face, share_type supply_face );
 
-    /// @return the issuance reserve for @p pair, or null when none exists.
+    /**
+     * Pilot ceiling in face units (AC-02): 20000 whole face dollars scaled
+     * by the pair precision (cap = 20000 x 10^precision), exact integer
+     * math, clamped to GRAPHENE_MAX_SHARE_SUPPLY. Deterministic.
+     */
+    share_type h2_issue_pilot_cap_face( uint8_t precision );
+
+     /// @return the issuance reserve for @p pair, or null when none exists.
     const reserve_object* h2_find_reserve( const database& d, asset_id_type pair );
 
     /**

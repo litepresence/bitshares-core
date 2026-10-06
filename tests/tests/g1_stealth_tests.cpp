@@ -840,9 +840,22 @@ BOOST_AUTO_TEST_CASE( stealth_ops_are_refused_before_the_hardfork )
 
    signed_transaction tx;
    tx.operations.push_back( op );
+   // Fee set on the funded path so the refusal reaches the consensus gate
+   // (H1-03: with fee 0 the tx dies in insufficient_fee and deleting the
+   // hardfork gate stays green).
+   db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx );
    // No signatures: temp fee payer (threshold 0) + ring authorization.
-   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   try
+   {
+      PUSH_TX( db, tx );
+      BOOST_FAIL( "pre-fork stealth_transfer was ACCEPTED" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "stealth hardfork" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 // Task 6 (R7 C-10): the ring-scheme migration slot fails closed. An unknown
@@ -2493,6 +2506,86 @@ BOOST_AUTO_TEST_CASE( tripwire_fires_on_divergence )
    }
 } FC_CAPTURE_AND_RETHROW() }
 
+/// Shadow-ahead divergence (stealth_evaluator.cpp stealth_reconcile_supplies,
+/// SUP-07): the tripwire fires in BOTH directions — not only when live
+/// confidential_supply runs ahead of the shadow (tripwire_fires_on_divergence)
+/// but when the SHADOW runs ahead of live (e.g. a fee-credit bookkeeping slip
+/// that inflates the shadow without moving the counter). While diverged the
+/// asset's blind ops reject at the asset gate; healing (shadow back to live)
+/// drops it from the set with no vote.
+BOOST_AUTO_TEST_CASE( shadow_ahead_divergence_halts_asset )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()(db), dan, core.amount( 400000000 ) );
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 15000000 );
+
+   BOOST_REQUIRE( !stealth_asset_halted( db, core_id ) );
+   // Push the SHADOW ahead of live (live untouched): +1000 with no backing
+   // counter move — the opposite direction from the live-ahead case.
+   db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+              []( stealth_status_object& s ) {
+         auto itr = s.blinded_supply_shadow.find( asset_id_type() );
+         if( itr == s.blinded_supply_shadow.end() )
+            s.blinded_supply_shadow[ asset_id_type() ] = share_type( 1000 );
+         else
+            itr->second += 1000;
+      } );
+   stealth_reconcile_supplies( db );
+   BOOST_CHECK( !stealth_blind_halted( db ) ); // no global flap
+   BOOST_CHECK( stealth_asset_halted( db, core_id ) );
+   BOOST_CHECK( stealth_tripwire_fire_block( db ) > 0 );
+
+   // While shadow-ahead, honest blind ops of the asset reject fail-closed.
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 100 );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_secret( "g1b-shadow-ahead-b" );
+      auto N = T_secret( "g1b-shadow-ahead-n" );
+      o.commitment = fc::ecc::blind( B, 100 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 100 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "shadow-ahead diverged-asset blind op must reject" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "halted" ) != std::string::npos,
+                              e.to_detail_string() );
+      }
+      trx.clear();
+   }
+
+   // Heal: shadow back to live, reconcile drops the asset, ops proceed.
+   db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+              []( stealth_status_object& s ) {
+         auto itr = s.blinded_supply_shadow.find( asset_id_type() );
+         BOOST_REQUIRE( itr != s.blinded_supply_shadow.end() );
+         itr->second -= 1000;
+      } );
+   stealth_reconcile_supplies( db );
+   BOOST_CHECK( !stealth_asset_halted( db, core_id ) );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.diverged_assets.empty() );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
 // Task 6 (SUP-07): per-asset halt scope end to end — a diverged UIA halts
 // while CORE blind ops proceed; the committee resume quorum is refused while
 // the diverged set is non-empty and clears after healing.
@@ -3664,6 +3757,51 @@ BOOST_AUTO_TEST_CASE( parity_joint_cap_with_h2 )
    BOOST_CHECK( !stealth_current_alarms( db ).joint_cap_breach );
 } FC_CAPTURE_AND_RETHROW() }
 
+/// MUSE-R11 G1 side, coincident both-legs breach: the joint ceiling is a SUM
+/// over one denominator (stealth_evaluator.cpp stealth_joint_fee_within_cap),
+/// never a per-leg check. Pure pins first (3500+3500 breaches while NEITHER
+/// leg alone exceeds the cap — RED if rewritten per-leg), then the production
+/// alarm path: H2 diversion 6800 with the 500bps parity share breaches at
+/// 7300 joint with both legs individually under 7000 (the atomic door+debt
+/// counterpart to the H2-side coincident test: both legs over the JOINT cap
+/// raises joint_cap_breach).
+BOOST_AUTO_TEST_CASE( parity_joint_cap_both_legs_over_cap )
+{ try {
+   // Pure joint semantics: the sum binds, not the legs.
+   BOOST_CHECK( stealth_joint_fee_within_cap( 0, 0 ) );
+   BOOST_CHECK( stealth_joint_fee_within_cap( 7000, 0 ) ); // boundary holds
+   BOOST_CHECK( stealth_joint_fee_within_cap( 0, 7000 ) ); // boundary holds
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 7001, 0 ) );
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 0, 7001 ) );
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 3500, 3501 ) ); // both under, joint over
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 6800 ) ); // production shape
+   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 6500 ) ); // production holds
+
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), dan, core.amount( 1000000 ) );
+
+   auto set_h2 = [&]( uint32_t bps ) {
+      db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+                 [&]( stealth_status_object& s ) { s.h2_diversion_bps = bps; } );
+   };
+   // Both legs individually under the 7000 cap (500, 6800): joint 7300
+   // breaches through the maintenance alarm path.
+   set_h2( 6800 );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( stealth_current_alarms( db ).joint_cap_breach );
+   // Back under joint (500 + 6500 = 7000): clears.
+   set_h2( 6500 );
+   stealth_parity_maintenance( db );
+   BOOST_CHECK( !stealth_current_alarms( db ).joint_cap_breach );
+   verify_asset_supplies( db );
+   set_h2( 0 );
+   stealth_parity_maintenance( db );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( thin_pool_decoy_tightening )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -4733,6 +4871,25 @@ BOOST_AUTO_TEST_CASE( blind_wallet_defaults )
       graphene::wallet::blind_receipt back;
       fc::from_variant( empty_obj, back, 20 );
       BOOST_CHECK_EQUAL( back.received_block, 0u );
+   }
+   // (j) Successful blind_by_default ROUTING selection (offline, no node):
+   // with an empty memo and a registered blind-key label, the blind branch
+   // is selected and proceeds PAST both fail-closed guards (memo + public
+   // account + unknown recipient) into the blind leg itself — failing only
+   // at the remote-only transfer_to_blind step. Neither guard fires and no
+   // silent transparent fallback happens (GP-07/08, GC-11, V-04/05).
+   {
+      const auto bk = fc::ecc::private_key::generate();
+      BOOST_REQUIRE( w.set_key_label(
+            public_key_type( bk.get_public_key() ), "blindbob" ) );
+      std::string err;
+      try { w.transfer_default( "alice", "blindbob", "1.00000", "CORE", "", false, false ); }
+      catch( const fc::exception& e ) { err = e.to_detail_string(); }
+      BOOST_REQUIRE_MESSAGE( !err.empty(),
+            "blind-routed transfer must reach the blind leg" );
+      BOOST_CHECK_MESSAGE( err.find( "blind legs carry no memo" ) == std::string::npos, err );
+      BOOST_CHECK_MESSAGE( err.find( "is a public account" ) == std::string::npos, err );
+      BOOST_CHECK_MESSAGE( err.find( "unknown blind recipient" ) == std::string::npos, err );
    }
 } FC_CAPTURE_AND_RETHROW() }
 

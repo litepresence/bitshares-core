@@ -207,6 +207,69 @@ BOOST_AUTO_TEST_CASE( legacy_pool_exchange_routes_nothing )
    generate_block();
 } FC_CAPTURE_AND_RETHROW() }
 
+/// Positive control on the pool path: with the sold asset opted in, the real
+/// pool-exchange maker leg splits 5/95 while the non-opted taker leg stays
+/// 100% issuer revenue (denomination-preserving per-asset routing through
+/// the same pay_market_fees choke point as limit fills).
+BOOST_AUTO_TEST_CASE( opted_in_pool_exchange_routes_five_percent )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (sam)(ted) );
+   fund( sam, asset( 100000000 ) );
+   fund( ted, asset( 100000000 ) );
+
+   additional_asset_options_t sell_opts, pay_opts;
+   sell_opts.value.taker_fee_percent = 100; // 1% taker (maker 1%)
+   pay_opts.value.taker_fee_percent = 100;
+   const asset_object& lpa = create_user_issued_asset( "OPPA", sam, charge_market_fee,
+         price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) ), 2, 100, sell_opts );
+   const asset_object& lpb = create_user_issued_asset( "OPPB", ted, charge_market_fee,
+         price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) ), 2, 100, pay_opts );
+   const asset_object& lps = create_user_issued_asset( "OPPS", sam, charge_market_fee );
+   const asset_id_type lpa_id = lpa.get_id();
+   const asset_id_type lpb_id = lpb.get_id();
+   issue_uia( sam, lpa.amount( 10000000 ) );
+   issue_uia( ted, lpa.amount( 10000000 ) );
+   issue_uia( sam, lpb.amount( 10000000 ) );
+   issue_uia( ted, lpb.amount( 10000000 ) );
+
+   // Only the sold asset opts in (issuer-signed production path).
+   opt_in_parity_via_update( *this, lpa_id( db ), sam_private_key );
+   BOOST_REQUIRE( parity_opted_in( db, lpa_id ) );
+   BOOST_REQUIRE( !parity_opted_in( db, lpb_id ) );
+
+   liquidity_pool_id_type lp_id = create_liquidity_pool( sam_id, lpa_id, lpb_id,
+         lps.get_id(), 200, 300 ).get_id();
+   deposit_to_liquidity_pool( sam_id, lp_id, lpa.amount( 100000 ), lpb.amount( 100000 ) );
+   generate_block();
+   set_expiration( db, trx );
+
+   const share_type acc_lpa_0 = acc_fees( db, lpa_id );
+   const share_type acc_lpb_0 = acc_fees( db, lpb_id );
+
+   generic_exchange_operation_result result = exchange_with_liquidity_pool(
+         ted_id, lp_id, lpa_id( db ).amount( 20000 ), lpb_id( db ).amount( 1 ) );
+   BOOST_REQUIRE_EQUAL( result.fees.size(), 3u );
+   BOOST_REQUIRE( result.fees[0].amount.value > 0 );
+   BOOST_REQUIRE( result.fees[1].amount.value > 0 );
+
+   // Maker leg (opted-in LPA): 5% pool / 95% issuer, exactly.
+   const int64_t maker_fee = result.fees[0].amount.value;
+   BOOST_CHECK_EQUAL( pool_balance( db, lpa_id ).value, maker_fee * 500 / 10000 );
+   BOOST_CHECK_EQUAL( ( acc_fees( db, lpa_id ) - acc_lpa_0 ).value,
+                      maker_fee - maker_fee * 500 / 10000 );
+   BOOST_CHECK_EQUAL( pool_balance( db, lpa_id ).value
+                      + ( acc_fees( db, lpa_id ) - acc_lpa_0 ).value, maker_fee );
+   // Taker leg (non-opted LPB): 100% issuer, no pool.
+   BOOST_CHECK_EQUAL( ( acc_fees( db, lpb_id ) - acc_lpb_0 ).value,
+                      result.fees[1].amount.value );
+   BOOST_CHECK( !pool_has( db, lpb_id ) );
+   verify_asset_supplies( db );
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
 /// Step 1 (RED pre-fix) + exclusion pin: a real force-settlement on a
 /// non-opted bitUSD-style asset. The market-fee leg (collateral UIA, 1%)
 /// must not route, and the BSIP-87 force-settle slice must land 100% in

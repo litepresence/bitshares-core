@@ -82,6 +82,22 @@ using graphene::protocol::h2_convert_face_to_bond;
 
 namespace {
 
+/// H1-03 vacuity pin: pre-fork refusals must reach the hardfork gate, never
+/// stop at the fee check (fee set, funded CORE payer; refusal must name H2).
+void h2e_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-fork" );
+}
+
 // Pilot basis inherited from H2a/H2b/H2c: 1e6 raw BTS units per USD cent.
 constexpr int64_t H2E_RAW_PER_USD_CENT = 1000000LL;
 constexpr uint64_t H2E_VAULT_USD_CENTS = 1340000;    // $13,400 vault min_bond
@@ -538,9 +554,10 @@ BOOST_AUTO_TEST_CASE( h2d_fallback_op_refused_before_the_hardfork )
    op.fallback  = fb;
    signed_transaction tx;
    tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx );
    tx.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   h2e_require_gate_refusal( db, tx, "oracle_fallback_set pre-fork" );
 } FC_LOG_AND_RETHROW() }
 
 /// Routing shares are validated in consensus: they must sum to 10000 bps and

@@ -35,6 +35,22 @@ using namespace graphene::chain::test;
 
 namespace {
 
+/// H1-03 vacuity pin: pre-fork refusals must reach the hardfork gate, never
+/// stop at the fee check (fee set, funded CORE payer; refusal must name H2).
+void h2t_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-fork" );
+}
+
 // $0.001/BTS pilot basis: 1000 BTS per USD at precision 5 => 1e6 raw units per USD cent.
 constexpr int64_t H2_TEST_RAW_PER_USD_CENT = 1000000LL;
 // Pinned to the enforced protocol basis: the suite and consensus can never
@@ -175,9 +191,10 @@ BOOST_AUTO_TEST_CASE( h2_bond_ops_are_refused_before_the_hardfork )
 
    signed_transaction tx;
    tx.operations.push_back( rop );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx );
    tx.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   h2t_require_gate_refusal( db, tx, "vault_register pre-fork" );
 
    oracle_bond_lock_operation lop;
    lop.producer       = alice_id;
@@ -188,9 +205,10 @@ BOOST_AUTO_TEST_CASE( h2_bond_ops_are_refused_before_the_hardfork )
 
    signed_transaction tx2;
    tx2.operations.push_back( lop );
+   db.current_fee_schedule().set_fee( tx2.operations.back() );
    set_expiration( db, tx2 );
    tx2.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx2 ), fc::exception );
+   h2t_require_gate_refusal( db, tx2, "oracle_bond_lock pre-fork" );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( vault_registers_threshold_authority_and_terms )

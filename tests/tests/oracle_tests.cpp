@@ -144,6 +144,20 @@ inline vector<oracle_series> rev2_single_mid_series()
    return { rseries( oracle_series_kind::mid, oracle_series_rounding::unspecified ) };
 }
 
+/// H1-03 vacuity pin: pre-fork refusals must reach the hardfork gate, never
+/// stop at the fee check (fee set, funded CORE payer; refusal must name it).
+inline void rev2_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "oracle hardfork" ) != std::string::npos,
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-fork" );
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE( oracle_name_tests )
@@ -204,6 +218,7 @@ BOOST_AUTO_TEST_CASE( oracle_ops_are_refused_before_the_hardfork )
 
    // Rev-2 oracles quote reference assets; pre-fork none can exist, so the op names two
    // ids that resolve to nothing -- the hardfork gate fires before any of that matters.
+   // Fee set on the funded payer so the refusal reaches the gate (H1-03).
    oracle_create_operation op;
    op.owner       = alice_id;
    op.name        = "BTC.USD";
@@ -214,9 +229,10 @@ BOOST_AUTO_TEST_CASE( oracle_ops_are_refused_before_the_hardfork )
 
    signed_transaction tx;
    tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx );
    tx.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   rev2_require_gate_refusal( db, tx, "oracle_create pre-fork" );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( create_publish_and_aggregate )
@@ -3804,6 +3820,68 @@ BOOST_AUTO_TEST_CASE( t9f_no_extend_path_through_proposals_or_parameters )
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
    rev2_declare_mapping_1to1( *this, mia_id(db), alice_id, alice_private_key, usd_ref );
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
+} FC_LOG_AND_RETHROW() }
+
+/// T9g (H1-12 strictly-future bind): the consensus expiry height must be
+/// STRICTLY in the future at bind time (asset_evaluator.cpp bind-time half).
+/// Attack-first: expiry == 0 (absent) and expiry == head (already live at the
+/// binding block) both refuse; only head + 1 admits. Without the strictness
+/// (> vs >=) an attacker binds an already-dead height and the pair reads a
+/// binding that can never feed (dead-on-arrival latch with a subscriber).
+BOOST_AUTO_TEST_CASE( t9g_bind_expiry_must_be_strictly_future )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice ); fund( bob ); fund( carol );
+
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+
+   const auto mia_id = make_mapped_mia( "MIA9G", alice_id, alice_private_key, usd_ref );
+
+   auto try_bind = [&]( uint32_t expiry ) -> std::string
+   {
+      asset_update_bitasset_operation op;
+      op.issuer          = alice_id;
+      op.asset_to_update = mia_id;
+      op.new_options     = mia_id(db).bitasset_data(db).options;
+      price_oracle b;
+      b.oracle_id = oid;
+      b.series    = 0;
+      b.expiry_height = expiry;
+      op.new_options.extensions.value.price_oracle_binding = b;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      try { PUSH_TX( db, tx ); }
+      catch ( const fc::exception& e ) { return e.to_string(); }
+      return std::string();
+   };
+
+   // Absent height refuses...
+   BOOST_CHECK_MESSAGE( try_bind( 0 ).find( "consensus expiry height" ) != std::string::npos,
+                        "expiry 0 must refuse at the bind-time gate" );
+   // ...the live head height refuses (strictly future, never >=)...
+   const uint32_t head = db.head_block_num();
+   BOOST_CHECK_MESSAGE( try_bind( head ).find( "must be in the future" ) != std::string::npos,
+                        "expiry == head must refuse: strictly future, never >=" );
+   // ...while head + 1 admits (control: the gate is exact, not over-broad).
+   BOOST_CHECK_MESSAGE( try_bind( head + 1 ).empty(), "expiry head+1 must bind" );
+   BOOST_REQUIRE( mia_id(db).bitasset_data(db).options.extensions.value
+                  .price_oracle_binding.valid() );
+   BOOST_CHECK_EQUAL( mia_id(db).bitasset_data(db).options.extensions.value
+                      .price_oracle_binding->expiry_height, head + 1 );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

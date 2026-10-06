@@ -45,6 +45,22 @@ using namespace graphene::chain::test;
 
 namespace {
 
+// H1-03 vacuity pin: pre-price refusals must reach the hardfork gate, never
+// stop at the fee check (fee set, funded CORE payer; refusal must name H2).
+void h2i_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-price" );
+}
+
 // ---- Pinned proposal constants (BSIP-1 section 7b mirrors) ----
 static_assert( GRAPHENE_H2_ISSUE_RMIN_BPS == 13000,
                "rmin floor must stay 13000bps (Terra prohibition)" );
@@ -431,6 +447,7 @@ BOOST_AUTO_TEST_CASE( issuance_gates_refuse_before_the_price_leg )
 
    // Direct execution refuses (price-leg pre-check runs before vault lookup,
    // so a dangling vault reference still fails on the leg, not the lookup).
+   // Fee set on a funded payer so the refusal reaches the gate (H1-03).
    {
       hybrid_mint_operation op;
       op.minter        = alice_id;
@@ -439,8 +456,9 @@ BOOST_AUTO_TEST_CASE( issuance_gates_refuse_before_the_price_leg )
       op.stable_amount = share_type( 1000 );
       op.fxr_asset     = asset_id_type( 1 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2i_require_gate_refusal( db, tx, "hybrid_mint pre-price" );
    }
    {
       hybrid_redeem_operation op;
@@ -448,8 +466,9 @@ BOOST_AUTO_TEST_CASE( issuance_gates_refuse_before_the_price_leg )
       op.vault    = vault_id_type( 0 );
       op.burn     = asset( share_type( 1000 ), asset_id_type( 1 ) );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2i_require_gate_refusal( db, tx, "hybrid_redeem pre-price" );
    }
    // Fee-schedule votes naming hybrid fees refuse (E-01: committees cannot
    // price what cannot execute).

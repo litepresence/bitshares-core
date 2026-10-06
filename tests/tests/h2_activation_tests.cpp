@@ -54,6 +54,28 @@ using namespace graphene::chain::test;
 
 namespace {
 
+/// H1-03 vacuity pin: pre-fork refusals must reach the hardfork gate, never
+/// stop at the fee check. Callers set the exact fee on a funded CORE payer,
+/// so the refusal text must name the H2 gate; deleting any gate turns these
+/// red instead of silently green on insufficient_fee.
+void h2g_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-fork" );
+}
+
+} // namespace (gate-refusal helper)
+
+namespace {
+
 // Pilot basis inherited from H2a: 1e6 raw BTS units per USD cent.
 constexpr int64_t H2G_RAW_PER_USD_CENT = 1000000LL;
 constexpr uint64_t H2G_VAULT_USD_CENTS = 1340000; // $13,400 proposal
@@ -258,9 +280,10 @@ BOOST_AUTO_TEST_CASE( all_three_gates_refuse_before_activation )
             h2g_register_op( alice_id, asset_id_type(), authority( 1, alice_id, 1 ) );
       signed_transaction tx;
       tx.operations.push_back( rop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
       tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2g_require_gate_refusal( db, tx, "vault_register pre-activation" );
    }
 
    {
@@ -272,9 +295,10 @@ BOOST_AUTO_TEST_CASE( all_three_gates_refuse_before_activation )
       cop.evidence_memo            = "evidence:pre-activation";
       signed_transaction tx;
       tx.operations.push_back( cop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
       tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2g_require_gate_refusal( db, tx, "vault_challenge pre-activation" );
    }
 
    {
@@ -286,9 +310,10 @@ BOOST_AUTO_TEST_CASE( all_three_gates_refuse_before_activation )
       lop.bond_usd_cents  = GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS;
       signed_transaction tx;
       tx.operations.push_back( lop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
       tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2g_require_gate_refusal( db, tx, "oracle_bond_lock pre-activation" );
    }
 
    {
@@ -297,9 +322,10 @@ BOOST_AUTO_TEST_CASE( all_three_gates_refuse_before_activation )
       fop.oracle = oracle_id_type( 0 );
       signed_transaction tx;
       tx.operations.push_back( fop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx );
       tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2g_require_gate_refusal( db, tx, "oracle_fallback_set pre-activation" );
    }
 } FC_LOG_AND_RETHROW() }
 

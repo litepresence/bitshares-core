@@ -57,6 +57,22 @@ using namespace graphene::chain::test;
 
 namespace {
 
+/// H1-03 vacuity pin: pre-fork refusals must reach the hardfork gate, never
+/// stop at the fee check (fee set, funded CORE payer; refusal must name H2).
+void h2c_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-fork" );
+}
+
 // Pilot basis inherited from H2a/H2b: 1e6 raw BTS units per USD cent.
 constexpr int64_t H2C_RAW_PER_USD_CENT = 1000000LL;
 // The suite mirror above is pinned to the enforced protocol basis, so the
@@ -379,24 +395,27 @@ BOOST_AUTO_TEST_CASE( h2c_ops_are_refused_before_the_hardfork )
       op.vault         = vault_id_type( 0 );
       op.new_authority = authority( 1, bob_id, 1 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2c_require_gate_refusal( db, tx, "vault_rotate pre-fork" );
    }
    {
       vault_bond_release_operation op;
       op.owner = alice_id;
       op.bond  = vault_bond_id_type( 0 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2c_require_gate_refusal( db, tx, "vault_bond_release pre-fork" );
    }
    {
       vault_resolve_operation op;
       op.resolver  = alice_id;
       op.challenge = vault_challenge_id_type( 0 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2c_require_gate_refusal( db, tx, "vault_resolve pre-fork" );
    }
    {
       pair_freeze_operation op;
@@ -404,8 +423,9 @@ BOOST_AUTO_TEST_CASE( h2c_ops_are_refused_before_the_hardfork )
       op.vault   = vault_id_type( 0 );
       op.oracle  = oracle_id_type( 0 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2c_require_gate_refusal( db, tx, "pair_freeze pre-fork" );
    }
    {
       winddown_claim_operation op;
@@ -414,8 +434,9 @@ BOOST_AUTO_TEST_CASE( h2c_ops_are_refused_before_the_hardfork )
       op.claim_amount = share_type( 1 );
       op.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2c_require_gate_refusal( db, tx, "winddown_claim pre-fork" );
    }
 } FC_LOG_AND_RETHROW() }
 
@@ -1569,6 +1590,54 @@ BOOST_AUTO_TEST_CASE( vault_maintenance_fails_closed_on_dual_stale )
    const auto& rec_idx = db.get_index_type<recovery_state_index>().indices();
    BOOST_REQUIRE( !rec_idx.empty() );
    BOOST_CHECK_EQUAL( rec_idx.begin()->new_debt_suspended, true );
+} FC_LOG_AND_RETHROW() }
+
+/// V-11 withdraw-then-coverage, refusal half: the encumbered CDD vesting has
+/// zero withdrawable balance before anything vests, so withdrawing the full
+/// bond pre-unlock refuses at the legacy allowed-withdraw gate (never a
+/// partial drain the coverage math must chase). The coverage half lives in
+/// vault_maintenance_ignores_withdrawn_vesting (post-maturity drain reads
+/// live zero, never nominal full).
+BOOST_AUTO_TEST_CASE( vesting_withdraw_pre_unlock_overdraw_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default(
+         *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+
+   // Immediately (nothing vested, nothing claimable): the full-bond
+   // withdrawal refuses, and the encumbered balance is untouched.
+   {
+      vesting_balance_withdraw_operation wop;
+      wop.owner           = alice_id;
+      wop.vesting_balance = vest;
+      wop.amount          = asset( H2C_VAULT_RAW, asset_id_type() );
+      signed_transaction wtx;
+      wtx.operations.push_back( wop );
+      db.current_fee_schedule().set_fee( wtx.operations.back() );
+      set_expiration( db, wtx );
+      wtx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, wtx ), fc::exception );
+   }
+   BOOST_CHECK( vest( db ).balance.amount == H2C_VAULT_RAW );
+
+   // Control: the bond object still reads full and live cover is intact, so
+   // maintenance with no liabilities prices HEALTHY (no false TOPUP while
+   // nothing was ever withdrawn).
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -49,6 +49,22 @@ using namespace graphene::chain::test;
 
 namespace {
 
+// H1-03 vacuity pin: pre-price refusals must reach the hardfork gate, never
+// stop at the fee check (fee set, funded CORE payer; refusal must name H2).
+void h2j_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-price" );
+}
+
 // ---- Pinned ISSUANCE-2 proposal constants ----
 static_assert( GRAPHENE_H2_ISSUE_N_BANDS == 7, "soft bands must stay 7" );
 static_assert( GRAPHENE_H2_ISSUE_BAND_TICK_BPS == 250, "band tick must stay 250bps" );
@@ -1377,8 +1393,9 @@ BOOST_AUTO_TEST_CASE( issuance2_gates_refuse_before_the_price_leg )
       op.vault     = vault_id_type( 0 );
       op.deposit   = asset( share_type( 1000 ), asset_id_type() );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2j_require_gate_refusal( db, tx, "offset_deposit pre-price" );
    }
    {
       offset_claim_operation op;
@@ -1386,8 +1403,9 @@ BOOST_AUTO_TEST_CASE( issuance2_gates_refuse_before_the_price_leg )
       op.vault    = vault_id_type( 0 );
       op.amount   = share_type( 1000 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2j_require_gate_refusal( db, tx, "offset_claim pre-price" );
    }
    {
       issuance_exit_request_operation op;
@@ -1395,8 +1413,9 @@ BOOST_AUTO_TEST_CASE( issuance2_gates_refuse_before_the_price_leg )
       op.vault     = vault_id_type( 0 );
       op.face      = share_type( 1000 );
       signed_transaction tx; tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_private_key, db.get_chain_id() );
-      GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+      h2j_require_gate_refusal( db, tx, "issuance_exit_request pre-price" );
    }
    {
       proposal_create_operation cop = proposal_create_operation::committee_proposal(
@@ -1667,6 +1686,184 @@ BOOST_AUTO_TEST_CASE( offset_ledger_prunes_smallest_matured_claim )
    BOOST_CHECK( newcomer_present );
    BOOST_CHECK( db.get_balance( fillers[0], asset_id_type() ).amount
                 == victim_before + share_type( 1000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Pending-vest bound (issuance.cpp h2_issue_pending_unmatured + the redeem
+/// evaluate "Too many unvested door outputs" gate): 64 unvested escrows fill
+/// the bounded list; the 65th redeem refuses while none matured (RED: pre-fix
+/// the bound is absent so the list grows unbounded across blocks), and admits
+/// once the 24h vest matures (apply prunes matured entries, never strands).
+BOOST_AUTO_TEST_CASE( pending_vest_cap_refuses_65th_redeem )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPEND", "HYPENDF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "V" );
+
+   // Book D=700000/M=1000 at (100,1): 64 ten-face redeems stay far above
+   // rmin (remainder ~636000/360 ≈ 1767%) and far below the door cap, so the
+   // only binding constraint below is the pending-vest bound.
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 700000 ), share_type( 1000 ) );
+   for( int i = 0; i < 64; ++i )
+   {
+      generate_block(); // unique TaPoS per identical redeem (dupe-check)
+      h2j_redeem( *this, alice_id, alice_private_key, d, share_type( 10 ) );
+   }
+   BOOST_REQUIRE_EQUAL( h2j_find_reserve( *this, d.pair )->pending_vestings.size(), 64u );
+
+   // Nothing matured (minutes old vs 24h vest): the 65th refuses fail-closed.
+   // Fresh block first so the attempt is not a byte-duplicate of the 64th.
+   generate_block();
+   {
+      hybrid_redeem_operation op;
+      op.redeemer = alice_id;
+      op.vault    = d.vault;
+      op.burn     = asset( share_type( 10 ), d.pair );
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      try
+      {
+         PUSH_TX( db, tx );
+         BOOST_FAIL( "65th unmatured redeem must refuse at the pending-vest bound" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_string().find( "Too many unvested" ) != std::string::npos,
+                              e.to_string() );
+      }
+   }
+   BOOST_CHECK_EQUAL( h2j_find_reserve( *this, d.pair )->pending_vestings.size(), 64u );
+
+   // Past the 24h vest every entry matured: the same redeem admits, pruning
+   // the stood outputs (never repriced) down to the single fresh entry.
+   generate_blocks( db.head_block_time() + GRAPHENE_H2_ISSUE_REDEEM_VEST_SEC + 600 );
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+   generate_block();
+   h2j_redeem( *this, alice_id, alice_private_key, d, share_type( 10 ) );
+   BOOST_CHECK_EQUAL( h2j_find_reserve( *this, d.pair )->pending_vestings.size(), 1u );
+} FC_LOG_AND_RETHROW() }
+
+/// Band edge clamps (issuance.cpp h2_issue_maybe_rebalance dst clamp
+/// `src + 1 < N_BANDS` / `src > 0`): sustained up-moves migrate mass toward
+/// band 6 and clamp there (no wrap past the top, no out-of-range write),
+/// sustained down-moves clamp at band 0; the anchor advances on every
+/// consumed move and the partition sums to the totals exactly throughout
+/// (RED: without the clamp a top-band up-move writes past the vector).
+BOOST_AUTO_TEST_CASE( band_edge_clamps_hold_across_sustained_moves )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYCLAMP", "HYCLAMPF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "C" );
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 700000 ), share_type( 1000 ) );
+
+   auto check_partition = [&]( const char* where, int64_t anchor_base )
+   {
+      const reserve_object* r = h2j_find_reserve( *this, d.pair );
+      BOOST_REQUIRE_MESSAGE( r != nullptr, where );
+      BOOST_REQUIRE_EQUAL( r->band_bts.size(), 7u );
+      BOOST_REQUIRE_EQUAL( r->band_stable.size(), 7u );
+      BOOST_CHECK_MESSAGE( h2j_band_sum_bts( r ) == r->bts_balance, where );
+      BOOST_CHECK_MESSAGE( h2j_band_sum_face( r ) == r->stable_supply, where );
+      BOOST_CHECK_MESSAGE( r->band_anchor == oracle_value( anchor_base, 1 ), where );
+   };
+
+   // Up-leg: 28 x +2% consumed moves with small conversions (each step above
+   // the 1.25% half-tick, so each step shifts exactly once and re-anchors;
+   // the excursion stays small so the rmin floor never binds: the clamp, not
+   // rmin, is under test).
+   int64_t px = H2J_BASE;
+   for( int i = 0; i < 28; ++i )
+   {
+      px = px * 102 / 100;
+      h2j_publish( *this, d.oracle, bob_id, bob_private_key, px, 1 );
+      generate_block(); // unique TaPoS per identical small mint (dupe-check)
+      h2j_mint( *this, alice_id, alice_private_key, d,
+                share_type( 7000 ), share_type( 10 ) );
+      check_partition( "up-leg partition", px );
+   }
+   // Migration reached the top band (the clamp path executed: a fullest-6
+   // up-move shifts nothing, anchor still advances).
+   BOOST_CHECK( h2j_find_reserve( *this, d.pair )->band_bts[6] > share_type( 0 ) );
+
+   // Down-leg: 28 x -2% consumed moves back through and below the start.
+   for( int i = 0; i < 28; ++i )
+   {
+      px = px * 100 / 102;
+      h2j_publish( *this, d.oracle, bob_id, bob_private_key, px, 1 );
+      generate_block(); // unique TaPoS per identical small mint (dupe-check)
+      h2j_mint( *this, alice_id, alice_private_key, d,
+                share_type( 7000 ), share_type( 10 ) );
+      check_partition( "down-leg partition", px );
+   }
+   BOOST_CHECK( h2j_find_reserve( *this, d.pair )->band_anchor == oracle_value( px, 1 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// Per-leg floored quanta (issuance.cpp h2_issue_maybe_rebalance q_bts /
+/// q_face with the `q_bts > 0 || q_face > 0` move gate): a book whose face
+/// leg is dust floors the face quantum to zero while the BTS leg still
+/// shifts — each leg moves its own floored quantum, the anchor still
+/// advances on the consumed move, and conservation holds per leg.
+BOOST_AUTO_TEST_CASE( band_quantas_floor_per_leg_with_anchor_advance )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYDUST", "HYDUSTF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "D" );
+
+   // Dust-face book: band 3 holds (60000, 1), anchored at (100,1).
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 60000 ), share_type( 1 ) );
+   const reserve_object* r0 = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r0 != nullptr );
+   BOOST_REQUIRE( r0->band_bts[3] == share_type( 60000 ) );
+   BOOST_REQUIRE( r0->band_stable[3] == share_type( 1 ) );
+
+   // Consumed up-move (+15%) with a second tiny mint: pre-shift source is
+   // (67000, 2), so q_bts = 67000/7 = 9571 while q_face = 2/7 = 0.
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, 115, 1 );
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 7000 ), share_type( 1 ) );
+   const reserve_object* r1 = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r1 != nullptr );
+   // The BTS leg shifted one step up by its floored quantum...
+   BOOST_CHECK( r1->band_bts[4] == share_type( 9571 ) );
+   BOOST_CHECK( r1->band_bts[3] == share_type( 67000 - 9571 ) );
+   // ...the dust face leg moved nothing (its quantum floored to zero)...
+   BOOST_CHECK( r1->band_stable[4] == share_type( 0 ) );
+   BOOST_CHECK( r1->band_stable[3] == share_type( 2 ) );
+   // ...yet the anchor still advanced on the observed price (dust never
+   // pins the basis: the partition catches up, the price basis moves once
+   // observed).
+   BOOST_CHECK( r1->band_anchor == oracle_value( 115, 1 ) );
+   BOOST_CHECK( h2j_band_sum_bts( r1 ) == r1->bts_balance );
+   BOOST_CHECK( h2j_band_sum_face( r1 ) == r1->stable_supply );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

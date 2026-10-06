@@ -50,6 +50,26 @@ using namespace graphene::chain::test;
 
 namespace {
 
+/// H1-03 vacuity pin: pre-fork refusals must reach the hardfork gate, never
+/// stop at the fee check (fee set, funded CORE payer; refusal must name H2).
+void h2d_require_gate_refusal( database& db, signed_transaction& tx, const char* what )
+{
+   try { PUSH_TX( db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( "H2" ) != std::string::npos
+            && ( e.to_string().find( "hardfork" ) != std::string::npos
+              || e.to_string().find( "activation" ) != std::string::npos ),
+            what << " refused off-gate (vacuous, not gate proof): " << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED pre-fork" );
+}
+
+} // namespace (gate-refusal helper)
+
+namespace {
+
 // Pilot basis inherited from H2a: 1e6 raw BTS units per USD cent.
 constexpr int64_t H2D_RAW_PER_USD_CENT = 1000000LL;
 // The suite mirror above is pinned to the enforced protocol basis, so the
@@ -251,9 +271,10 @@ BOOST_AUTO_TEST_CASE( h2_dispute_ops_are_refused_before_the_hardfork )
    cop.evidence_memo = h2d_evidence( "prefork" );
    signed_transaction tx;
    tx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx );
    tx.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
+   h2d_require_gate_refusal( db, tx, "vault_challenge pre-fork" );
 
    oracle_dispute_operation dop;
    dop.challenger = alice_id;
@@ -266,9 +287,10 @@ BOOST_AUTO_TEST_CASE( h2_dispute_ops_are_refused_before_the_hardfork )
    dop.evidence_memo = h2d_evidence( "prefork" );
    signed_transaction tx2;
    tx2.operations.push_back( dop );
+   db.current_fee_schedule().set_fee( tx2.operations.back() );
    set_expiration( db, tx2 );
    tx2.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx2 ), fc::exception );
+   h2d_require_gate_refusal( db, tx2, "oracle_dispute pre-fork" );
 
    oracle_dispute_escalate_operation eop;
    eop.escalator = alice_id;
@@ -277,9 +299,10 @@ BOOST_AUTO_TEST_CASE( h2_dispute_ops_are_refused_before_the_hardfork )
    eop.round_bond_usd_cents = H2D_FLOOR_USD_CENTS * 2;
    signed_transaction tx3;
    tx3.operations.push_back( eop );
+   db.current_fee_schedule().set_fee( tx3.operations.back() );
    set_expiration( db, tx3 );
    tx3.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx3 ), fc::exception );
+   h2d_require_gate_refusal( db, tx3, "oracle_dispute_escalate pre-fork" );
 
    challenge_vote_operation vop;
    vop.voter = alice_id;
@@ -287,9 +310,10 @@ BOOST_AUTO_TEST_CASE( h2_dispute_ops_are_refused_before_the_hardfork )
    vop.decision = 0;
    signed_transaction tx4;
    tx4.operations.push_back( vop );
+   db.current_fee_schedule().set_fee( tx4.operations.back() );
    set_expiration( db, tx4 );
    tx4.sign( alice_private_key, db.get_chain_id() );
-   GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx4 ), fc::exception );
+   h2d_require_gate_refusal( db, tx4, "challenge_vote pre-fork" );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( challenge_posts_with_floor_memo_and_open_state )

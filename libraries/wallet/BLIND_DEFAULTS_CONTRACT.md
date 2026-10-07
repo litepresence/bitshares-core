@@ -121,3 +121,30 @@ network-wide observer. The UI MUST NOT promise the latter.
 No mandatory blindness for any operation class; no blind order books, margin
 positions, pool shares, or vault/oracle/issuance accounting; no blind asset
 types or supply totals; no custodial tumbling presented as a substitute.
+
+## 9. Availability disclosure — ring spends consume their decoys (F-08, normative)
+
+Wallets MUST surface this section before the first blind receive (6th
+MUSE-R12 item, BSIP-2 §4):
+
+- Every ring spend CONSUMES its entire ring: all members (real input plus
+  every decoy) are spent-flagged on apply and refused on every later leg —
+  future rings, explicit withdrawals, legacy transfers, and turnstile legs
+  alike. Flags are never cleared.
+- ANY stealth output can be rendered permanently unspendable by a stranger:
+  ring membership requires no ownership, so anyone can include your output
+  as their decoy and destroy it for the price of one fee. This is current
+  consensus semantics (pinned by `r9c_decoy_owner_explicit_spend_refused`),
+  not a bug in your wallet, and there is no recourse on-chain.
+- Pool-burn rates at pilot scale (≤$20k book): one ring-16 spend consumes
+  16 decoy candidates and mints 2 — a 16→2 burn per spend — so heavy
+  spending visibly thins the pool and the floor gate halts spends honestly
+  instead of building thin rings. At pilot scale a 100-output Sybil flood
+  costs ~$1 plus a 24h park (BSIP-2 Rationale), so early sets are thin until
+  volume arrives: the wallet MUST warn below recommended minimums and MUST
+  NOT promise set sizes the chain cannot see.
+- Design direction (not yet implemented, no wallet action): the explicit
+  legs may one day check owner-supplied key images against the nullifier
+  set instead of the spent flag (precise, privacy-preserving); the ring
+  gate keeps the flag regardless. Until then, treat every blind receipt as
+  spendable exactly once — by you, or destroyed as someone else's decoy.

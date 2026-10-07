@@ -809,11 +809,21 @@ bool stealth_verify_bp_plus( uint8_t m,
        !EC_POINT_copy( H0.p, GP.H ) )
       { err = "bad base generators"; fail_pts(); for( auto p : Gv ) EC_POINT_free(p); for( auto p : Hv ) EC_POINT_free(p); return false; }
 
-   // ---- transcript (order mirrors S1; labels are G1 sha256 domains) ----
-   // Flat transcript: S1 chains stages through running hash state, G1 omits
-   // the chaining and relies on fixed stage ORDER instead — notably for the
-   // G1BPe round-vs-final reuse below. Any relabelling is consensus-visible
-   // (hardfork-gated, R9C); see the hpp interim note.
+    // ---- transcript (order mirrors S1; labels are G1 sha256 domains) ----
+    // R9C (mimo F-01, fledge F1/F2, space-bunny F-10): CHAINED transcript,
+    // S1-style. state_0 is the z bytes (z binds y binds V||A, so the seed
+    // binds the full statement); e_j = H("G1BPr" || state_{j-1} || L_j ||
+    // R_j) with state_j = e_j; e = H("G1BPf" || state_last || A1 || B).
+    // Stage labels are partitioned (G1BPy/G1BPz/G1BPr/G1BPf) so no label
+    // does double duty: the pre-R9C round-vs-final "G1BPe" reuse (whose
+    // only disambiguator was fixed stage ORDER) is gone by construction.
+    // Consensus-visible protocol break (pre-activation, zero mainnet G1
+    // traffic): pre-R9C flat-transcript proofs REJECT here. The in-tree
+    // test prover (tests/tests/g1_stealth_tests.cpp T_bp_prove) implements
+    // this transcript identically; wallets reimplement from this spec
+    // (and stealth_proof.hpp), never from S1. y=H(V||A), z=H(y) unchanged.
+    // m=1-only (R9A gate stays); no batch path (weights would have to be
+    // transcript-derived, never RNG).
    size_t Loff = 1 + 99 + 96;
    {
       std::vector<std::vector<unsigned char>> items;
@@ -834,7 +844,8 @@ bool stealth_verify_bp_plus( uint8_t m,
       bn zb; scalar_from_sha( zb.b, z );
       if( BN_is_zero( zb.b ) ) { err = "z == 0"; fail_pts(); for( auto q : Gv ) EC_POINT_free(q); for( auto q : Hv ) EC_POINT_free(q); return false; }
 
-      // round challenges + final e
+      // round challenges + final e (chained, R9C — see note above)
+      std::vector<unsigned char> tstate = sha_bytes( z );
       bvec ch( rounds ), chi( rounds );
       for( size_t j = 0; j < rounds; ++j )
       {
@@ -842,16 +853,17 @@ bool stealth_verify_bp_plus( uint8_t m,
                                         proof.begin() + Loff + j*66 + 33 );
          std::vector<unsigned char> rb( proof.begin() + Loff + j*66 + 33,
                                         proof.begin() + Loff + j*66 + 66 );
-         fc::sha256 ej = stealth_bp_hash( "G1BPe", { lb, rb } );
+         fc::sha256 ej = stealth_bp_hash( "G1BPr", { tstate, lb, rb } );
          scalar_from_sha( ch[j], ej );
          if( BN_is_zero( ch[j] ) ) { err = "challenge == 0"; fail_pts(); for( auto q : Gv ) EC_POINT_free(q); for( auto q : Hv ) EC_POINT_free(q); return false; }
          if( !mod_inv( chi[j], ch[j] ) ) { err = "challenge inv"; fail_pts(); for( auto q : Gv ) EC_POINT_free(q); for( auto q : Hv ) EC_POINT_free(q); return false; }
+         tstate = sha_bytes( ej );
       }
       bn yinv; scalar_from_sha( yinv.b, y );
       if( !mod_inv( yinv.b, yinv.b ) ) { err = "y inv"; fail_pts(); for( auto q : Gv ) EC_POINT_free(q); for( auto q : Hv ) EC_POINT_free(q); return false; }
       std::vector<unsigned char> a1b( proof.begin() + 34, proof.begin() + 67 );
       std::vector<unsigned char> bb( proof.begin() + 67, proof.begin() + 100 );
-      fc::sha256 e = stealth_bp_hash( "G1BPe", { a1b, bb } );
+      fc::sha256 e = stealth_bp_hash( "G1BPf", { tstate, a1b, bb } );
       bn eb; scalar_from_sha( eb.b, e );
       if( BN_is_zero( eb.b ) ) { err = "e == 0"; fail_pts(); for( auto q : Gv ) EC_POINT_free(q); for( auto q : Hv ) EC_POINT_free(q); return false; }
 

@@ -390,7 +390,7 @@ T_dual_dry_run_result T_dual_dry_run( uint8_t v_main, uint8_t v_alt,
  *
  * Ported from S1 bulletproof_plus_PROVE (monero @ e4fbca88, vendored) to
  * secp256k1/OpenSSL with the G1 transcript (stealth_bp_hash domains
- * "G1BPy"/"G1BPz"/"G1BPe") and prime-order form (S1's x8/INV_EIGHT cofactor
+ * "G1BPy"/"G1BPz"/"G1BPr"/"G1BPf", R9C-chained S1-style) and prime-order form (S1's x8/INV_EIGHT cofactor
  * clearing dropped as identity — no cofactor exists on secp256k1, same
  * adaptation the consensus verifier documents). Generators Gi/Hi/G/H come
  * from the consensus accessors so prover and verifier share every constant.
@@ -456,7 +456,7 @@ static void Bp_bin32( unsigned char out[32], const BIGNUM* b )
 
 std::vector<char> T_bp_prove_attempt( const fc::ecc::commitment_type& C,
                                       const fc::sha256& blind, uint64_t value,
-                                      int attempt )
+                                      int attempt, bool chained )
 {
    const size_t N = 64, MN = 64, ROUNDS = 6;
    std::string tag = "|try" + std::to_string( attempt );
@@ -505,9 +505,18 @@ std::vector<char> T_bp_prove_attempt( const fc::ecc::commitment_type& C,
    BIGNUM* y = Bp_hash_scalar( "G1BPy", { Vb, Ab } );
    if( BN_is_zero( y ) ) return {};
    unsigned char yb[32]; Bp_bin32( yb, y );
-   BIGNUM* z = Bp_hash_scalar( "G1BPz", { std::vector<unsigned char>( yb, yb + 32 ) } );
-   if( BN_is_zero( z ) ) return {};
-   BIGNUM* z2 = BN_new(); Bp_mod_mul( z2, z, z );
+    BIGNUM* z = Bp_hash_scalar( "G1BPz", { std::vector<unsigned char>( yb, yb + 32 ) } );
+    if( BN_is_zero( z ) ) return {};
+    BIGNUM* z2 = BN_new(); Bp_mod_mul( z2, z, z );
+    // R9C chained transcript (S1-style): state_0 is the z bytes (z binds
+    // y binds V||A, so the seed binds the full statement). Flat mode
+    // (chained==false) keeps the pre-R9C transcript — H("G1BPe"||points)
+    // with no chaining — as a frozen reference: its proofs MUST reject
+    // under the chained verifier (r9c_flat_transcript_rejects pins the
+    // protocol break). Flat mode exists ONLY for that pin, never for
+    // consensus-bound proofs.
+    unsigned char zb0[32]; Bp_bin32( zb0, z );
+    std::vector<unsigned char> tstate( zb0, zb0 + 32 );
 
    // d[i] = z^2 * 2^i; y_powers[0..MN+1].
    std::vector<BIGNUM*> d( MN ), ypw( MN + 2 );
@@ -622,8 +631,15 @@ std::vector<char> T_bp_prove_attempt( const fc::ecc::commitment_type& C,
       Rb[round] = Bp_bytes33( R, ok );
       if( !ok ) return {};
 
-      BIGNUM* challenge = Bp_hash_scalar( "G1BPe", { Lb[round], Rb[round] } );
+      BIGNUM* challenge = chained
+         ? Bp_hash_scalar( "G1BPr", { tstate, Lb[round], Rb[round] } )
+         : Bp_hash_scalar( "G1BPe", { Lb[round], Rb[round] } );
       if( BN_is_zero( challenge ) ) return {};
+      if( chained )
+      {
+         unsigned char cb[32]; Bp_bin32( cb, challenge );
+         tstate.assign( cb, cb + 32 );
+      }
       BIGNUM* challenge_inv = BN_new();
       if( !BN_mod_inverse( challenge_inv, challenge, T_order(), T_ctx() ) ) return {};
       ch[round] = challenge;
@@ -708,8 +724,10 @@ std::vector<char> T_bp_prove_attempt( const fc::ecc::commitment_type& C,
    std::vector<unsigned char> A1b = Bp_bytes33( A1, ok );
    std::vector<unsigned char> Bb = Bp_bytes33( B, ok );
    if( !ok ) return {};
-   BIGNUM* e = Bp_hash_scalar( "G1BPe", { A1b, Bb } );
-   if( BN_is_zero( e ) ) return {};
+    BIGNUM* e = chained
+       ? Bp_hash_scalar( "G1BPf", { tstate, A1b, Bb } )
+       : Bp_hash_scalar( "G1BPe", { A1b, Bb } );
+    if( BN_is_zero( e ) ) return {};
    BIGNUM* e2 = BN_new(); Bp_mod_mul( e2, e, e );
    BIGNUM* r1 = BN_new(), *s1 = BN_new(), *d1 = BN_new();
    {
@@ -746,11 +764,28 @@ std::vector<char> T_bp_prove( const fc::ecc::commitment_type& C,
 {
    for( int attempt = 0; attempt < 100; ++attempt )
    {
-      std::vector<char> p = T_bp_prove_attempt( C, blind, value, attempt );
+      std::vector<char> p = T_bp_prove_attempt( C, blind, value, attempt, true );
       if( !p.empty() )
          return p;
    }
    BOOST_REQUIRE_MESSAGE( false, "T_bp_prove failed after 100 attempts" );
+   return {};
+}
+
+// Pre-R9C flat-transcript reference prover (frozen): every challenge is
+// H("G1BPe"||points) with no chaining. Its proofs MUST reject under the
+// chained consensus verifier (r9c_flat_transcript_rejects). Test-only,
+// never consensus-bound.
+std::vector<char> T_bp_prove_flat( const fc::ecc::commitment_type& C,
+                                   const fc::sha256& blind, uint64_t value )
+{
+   for( int attempt = 0; attempt < 100; ++attempt )
+   {
+      std::vector<char> p = T_bp_prove_attempt( C, blind, value, attempt, false );
+      if( !p.empty() )
+         return p;
+   }
+   BOOST_REQUIRE_MESSAGE( false, "T_bp_prove_flat failed after 100 attempts" );
    return {};
 }
 
@@ -3520,12 +3555,12 @@ BOOST_AUTO_TEST_CASE( r9b_bp_shape_scalar_transcript_vectors )
    { std::vector<char> bad = proof; // A8: d1 == 0
      std::copy( zbytes, zbytes + 32, bad.begin() + 164 );
      expect_bp_reject( bad, "bad d1" ); }
-   // E7: valid proof with A1/B replaced by the round-0 L/R pair in the `e`
-   // transcript. All four points are valid on-curve, so parsing succeeds;
-   // the equation must still fail (this pins the F-10 ordering dependence:
-   // the G1BPe label is reused across stages and only fixed stage ORDER
-   // keeps round challenges distinct from the final challenge — R9C owns
-   // any relabelling, never a silent patch).
+    // E7: valid proof with A1/B replaced by the round-0 L/R pair in the `e`
+    // transcript. All four points are valid on-curve, so parsing succeeds;
+    // the equation must still fail (R9C: round challenges use "G1BPr" and
+    // the final challenge its own label "G1BPf", so role collision is gone
+    // by construction — and separately the multiexp binds A1/B directly,
+    // so transplanting L0/R0 cannot close it).
    { std::vector<char> bad = proof;
      std::copy( bad.begin() + 196, bad.begin() + 229, bad.begin() + 34 ); // A1 <- L0
      std::copy( bad.begin() + 229, bad.begin() + 262, bad.begin() + 67 ); // B <- R0
@@ -3533,6 +3568,204 @@ BOOST_AUTO_TEST_CASE( r9b_bp_shape_scalar_transcript_vectors )
      BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, bad, { Cc }, err ),
                           "A1/B-swapped transcript must reject: " << err );
      BOOST_CHECK_EQUAL( err, "multiexp != identity" ); }
+} FC_CAPTURE_AND_RETHROW() }
+
+// R9C transcript hardening (mimo F-01, fledge F1/F2, space-bunny F-10):
+// the Fiat-Shamir transcript is chained S1-style (state_0 = z, then
+// e_j = H("G1BPr" || state_{j-1} || L_j || R_j), e = H("G1BPf" ||
+// state_last || A1 || B)) with partitioned stage labels. y = H(V||A) and
+// z = H(y) are unchanged; m=1-only (R9A gate stays).
+BOOST_AUTO_TEST_CASE( r9c_chained_transcript_verifies )
+{ try {
+   // The in-tree prover speaks the chained transcript; consensus must
+   // accept. TDD RED-1: fails while the verifier is still flat (the
+   // chained challenges match nothing the flat verifier recomputes).
+   std::string err;
+   fc::ecc::commitment_type Cc;
+   std::vector<char> proof;
+   {
+      auto B = T_blind_secret( "r9c-chain-bpb" );
+      BIGNUM* bb = T_bn( B );
+      auto Cv = T_commit( bb, 424242 );
+      BN_free( bb );
+      std::copy( Cv.begin(), Cv.end(), Cc.begin() );
+      proof = T_bp_prove( Cc, B, 424242 );
+      BOOST_REQUIRE_MESSAGE( !proof.empty(), "chained prover must produce a blob" );
+      BOOST_REQUIRE_EQUAL( proof.size(), 592u );
+   }
+   BOOST_CHECK_MESSAGE( stealth_verify_bp_plus( 1, proof, { Cc }, err ),
+                        "chained proof must verify: " << err );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9c_flat_transcript_rejects )
+{ try {
+   // Pre-R9C flat transcript (every challenge H("G1BPe"||points), no
+   // chaining) is a different protocol: the frozen reference prover's
+   // output MUST reject under the chained verifier. TDD RED-1: fails
+   // while the verifier is still flat (flat proofs verify there).
+   // Non-vacuity: the same fixture's chained proof verifies (r9c case
+   // above), and flat bytes differ from chained bytes below.
+   std::string err;
+   fc::ecc::commitment_type Cc;
+   std::vector<char> flat, chained;
+   {
+      auto B = T_blind_secret( "r9c-flat-bpb" );
+      BIGNUM* bb = T_bn( B );
+      auto Cv = T_commit( bb, 424242 );
+      BN_free( bb );
+      std::copy( Cv.begin(), Cv.end(), Cc.begin() );
+      flat = T_bp_prove_flat( Cc, B, 424242 );
+      chained = T_bp_prove( Cc, B, 424242 );
+      BOOST_REQUIRE_MESSAGE( !flat.empty() && !chained.empty(),
+                             "both provers must produce blobs" );
+   }
+   BOOST_CHECK_MESSAGE( flat != chained,
+                        "flat and chained transcripts must diverge" );
+   err.clear();
+   BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, flat, { Cc }, err ),
+                        "flat-transcript proof must reject post-R9C" );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9c_transcript_dependency_mutation )
+{ try {
+   // Chaining pin: corrupting any round's L input breaks its challenge
+   // AND every downstream challenge (state threads forward), so the
+   // equation cannot close. Flip the parity byte of L_0 and L_2 (wire
+   // offsets m=1: L_j at 196+66j; ^0x01 keeps 0x02/0x03 valid, negating
+   // y — encodings stay parseable, the equation must fail). Passes
+   // pre- and post-R9C (RED N/A — the flat transcript rejects these
+   // too); it pins rejection, the r9c pair above pins the break.
+   std::string err;
+   fc::ecc::commitment_type Cc;
+   std::vector<char> proof;
+   {
+      auto B = T_blind_secret( "r9c-mut-bpb" );
+      BIGNUM* bb = T_bn( B );
+      auto Cv = T_commit( bb, 424242 );
+      BN_free( bb );
+      std::copy( Cv.begin(), Cv.end(), Cc.begin() );
+      proof = T_bp_prove( Cc, B, 424242 );
+      BOOST_REQUIRE_MESSAGE( !proof.empty(), "test prover must produce a blob" );
+      BOOST_REQUIRE_MESSAGE( stealth_verify_bp_plus( 1, proof, { Cc }, err ),
+                             "control proof must verify: " << err );
+   }
+   for( size_t off : { (size_t)196, (size_t)( 196 + 2 * 66 ) } )
+   {
+      std::vector<char> bad = proof;
+      bad[off] ^= 0x01;
+      err.clear();
+      BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, bad, { Cc }, err ),
+                           "L-mutated proof (off " << off << ") must reject" );
+      BOOST_CHECK_EQUAL( err, "multiexp != identity" );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9b_b8_parity_negated_y_vectors )
+{ try {
+   // R9B Important-3 / space-bunny B8: the same-x opposite-parity prefix
+   // (y negated) is a DIFFERENT on-curve point — parse accepts it, the
+   // ring equation rejects it. Recorded: accept-at-parse ("ring did not
+   // close", not "bad ring point") — the malleability argument is won
+   // here: negation never smuggles a second valid authorization for the
+   // same member, it just fails the closure check.
+   std::string err;
+   const size_t n = 16;
+   std::vector<std::vector<unsigned char>> Q;
+   for( size_t i = 0; i < n; ++i )
+      Q.push_back( T_commit( T_scalar( "r9bB8-b|" + std::to_string( i ) ), 500 + i ) );
+   BIGNUM* bs = T_scalar( "r9bB8-b|7" );
+   BIGNUM* bprime = T_scalar( "r9bB8-bp" );
+   std::string ms( (const char*)T_secret( "r9bB8-msg" ).data(), 32 );
+   stealth_ring_input good = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
+      Q, 7, bs, 507, bprime, ms );
+   BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, good, ms, err ),
+                          "control must verify: " << err );
+   stealth_ring_input bad = good; // B8: member 3, same x, negated y
+   bad.ring[3][0] ^= 0x01;
+   err.clear();
+   BOOST_CHECK_MESSAGE( !stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, bad, ms, err ),
+                        "parity-negated member must reject" );
+   BOOST_CHECK_EQUAL( err, "ring did not close" );
+   BN_free( bs ); BN_free( bprime );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9c_v1_verify_cost_pin )
+{ try {
+   // R9B Important-1: replace the "believed cheaper" comment on
+   // WORK_US_PER_RANGE_PROOF with a measurement. Times ONE V1 Borromean
+   // verify over the consensus path (stealth_verify_range_v1 on a real
+   // 1000-value proof), best of 21. Printed, not gated: the budget keeps
+   // charging the BP+ rate per V1 output (fail-closed over-count); this
+   // pins the number the over-count is measured against.
+   auto B = T_blind_secret( "r9c-v1cost-b" );
+   auto N = T_secret( "r9c-v1cost-n" );
+   fc::ecc::commitment_type C = fc::ecc::blind( B, 1000 );
+   fc::ecc::range_proof_type pr = fc::ecc::range_proof_sign( 0, C, B, N, 0, 0, 1000 );
+   BOOST_REQUIRE_MESSAGE( !pr.empty(), "must sign a V1 proof" );
+   std::vector<char> proof( pr.begin(), pr.end() );
+   long long best = -1;
+   for( int i = 0; i < 21; ++i )
+   {
+      uint64_t mn = 0, mx = 0;
+      fc::time_point start = fc::time_point::now();
+      BOOST_REQUIRE( stealth_verify_range_v1( C, proof, mn, mx ) );
+      long long us = ( fc::time_point::now() - start ).count();
+      if( best < 0 || us < best ) best = us;
+   }
+   BOOST_TEST_MESSAGE( "V1 BORROMEAN VERIFY " << best << "us (1 proof, best of 21)" );
+} FC_CAPTURE_AND_RETHROW() }
+
+// R9C F-08 disclosure pin (mimo-2.6 F-08 HIGH): ring spends consume
+// their decoys — after spend A consumes ring R, the DECOY owner's
+// explicit spend refuses via the spent flag. This documents CURRENT
+// semantics (any output can be rendered unspendable by a third party
+// that includes it as a decoy); it does NOT change them. The
+// nullifier-set redesign stays a design-owner option (recorded at
+// stealth_transfer_evaluator::do_apply, never implemented here).
+BOOST_AUTO_TEST_CASE( r9c_decoy_owner_explicit_spend_refused )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r9c-f08", 16, true );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+   // Honest V1 spend of output #5 (1000 -> 600 + 390 + fee 10). V1 keeps
+   // this pin orthogonal to the transcript change (fc backend, no BP+).
+   const size_t s = 5, decoy = 7; // decoy != real input
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V1, "r9c-f08-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   const int64_t live = t5_supply( db, core );
+   // The decoy owner spends her OWN output explicitly (owner-signed,
+   // conservation-exact: 990 + 10 == 1000 under the true blind) — and
+   // is refused: her output died as someone else's decoy (F-08).
+   transfer_from_blind_operation x;
+   x.to = dan.id;
+   x.amount = core.amount( 990 );
+   x.fee = core.amount( 10 );
+   blind_input bi; bi.commitment = p.commits[decoy]; bi.owner = p.owners[decoy];
+   x.inputs = { bi };
+   x.blinding_factor = p.blinds[decoy];
+   BOOST_CHECK_NO_THROW( x.validate() ); // relay shape is fine...
+   set_expiration( db, trx );
+   trx.operations = { x };
+   sign( trx, p.keys[decoy] );
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "decoy-owner explicit spend must refuse (spent flag, F-08)" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "spent" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live ); // refused spend moved nothing
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( r9b_version_binding_e8 )

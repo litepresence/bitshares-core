@@ -82,6 +82,9 @@ fc::sha256 stealth_challenge( const std::string& msg32,
                               const std::vector<unsigned char>& M33 );
 
 /// BP+ transcript squeeze: sha256(domain || previous || items...) mod n.
+/// The BP+ path (R9C) honors this chaining literally: state_0 is the z
+/// bytes, e_j = stealth_bp_hash("G1BPr", {state_{j-1}, L_j, R_j}) with
+/// state_j = e_j, e = stealth_bp_hash("G1BPf", {state_last, A1, B}).
 fc::sha256 stealth_bp_hash( const std::string& domain,
                             const std::vector<std::vector<unsigned char>>& items );
 
@@ -189,21 +192,19 @@ bool stealth_verify_range_v1( const fc::ecc::commitment_type& c,
  * Wire: m || A || A1 || B || r1 || s1 || d1 || (L_j || R_j per round),
  * rounds = 6 + log2(m). Points 33B compressed, scalars 32B BE canonical.
  *
- * AUDIT: (1) transcript labels differ from S1 (sha256 domains vs ed25519
- * hash-to-scalar of point encodings) — binding-equivalent given fixed stage
- * ordering (see the G1BPe interim note below), but the PROVER must use these
- * exact labels (test prover does; wallets reimplement from this spec, not
- * from S1); (2) single-proof weight is fixed to 1 — batch verification
- * (future) MUST use transcript-derived weights, never RNG, or verifiers
- * diverge; (3) soundness of the whole transcription is the pre-G1 audit's
- * headline item.
- *
- * AUDIT (F-10 interim, R9A): G1BPe is reused for the round challenges AND
- * the final (A1, B) challenge, so the label partition is NOT unambiguous —
- * stage ORDER is what disambiguates them today. Relabelling the final
- * challenge (e.g. G1BPf) is a consensus-visible protocol change: it needs
- * its own hardfork gate (tracked as R9C), never a silent patch.
- */
+  * AUDIT: (1) transcript labels differ from S1 (sha256 domains vs ed25519
+  * hash-to-scalar of point encodings) — the stage ORDER matches S1
+  * (V, A -> y -> z -> rounds -> A1, B) and, since R9C, so does the
+  * CHAINING (mimo F-01, space-bunny F-10 closed in code: state_0 = z,
+  * rounds under "G1BPr", final under its own label "G1BPf"; pre-R9C
+  * flat-"G1BPe" proofs reject — protocol break, pre-activation). The
+  * PROVER must use these exact labels and this chaining (in-tree test
+  * prover does; wallets reimplement from this spec, not from S1);
+  * (2) single-proof weight is fixed to 1 — batch verification
+  * (future) MUST use transcript-derived weights, never RNG, or verifiers
+  * diverge; (3) soundness of the whole transcription is the pre-G1 audit's
+  * headline item.
+  */
 bool stealth_verify_bp_plus( uint8_t m,
                              const std::vector<char>& proof,
                              const std::vector<fc::ecc::commitment_type>& commits,

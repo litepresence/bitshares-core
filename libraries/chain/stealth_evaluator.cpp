@@ -713,19 +713,33 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
          n.created = db().head_block_time();
       } );
    }
-    // Task 6 (R7 C-02 + Task 5 concern #1): mark every ring member spent,
-    // and consume each newly-spent member from the pool-depth counter. The
-    // evaluator cannot identify the real input without breaking ring
-    // privacy, so the whole anonymity set is consumed: the explicit legs
-    // (op40/op41/op85) refuse spent commitments, closing stealth->legacy
-    // re-spend, AND future rings refuse them (spent flags are public, so
-    // they could never be plausible-real decoys). AVAILABILITY COST
-    // (accepted): each ring spend consumes ring-size fresh outputs from
-    // the counter — the floor gate then halts spends honestly when the
-    // pool runs thin, instead of overstating fresh depth. The counter is
-    // decremented exactly on the !spent -> spent transition (a member
-    // shared across inputs consumes once), so it always equals the
-    // metadata-bearing unspent set the floor gate means to measure.
+     // Task 6 (R7 C-02 + Task 5 concern #1): mark every ring member spent,
+     // and consume each newly-spent member from the pool-depth counter. The
+     // evaluator cannot identify the real input without breaking ring
+     // privacy, so the whole anonymity set is consumed: the explicit legs
+     // (op40/op41/op85) refuse spent commitments, closing stealth->legacy
+     // re-spend, AND future rings refuse them (spent flags are public, so
+     // they could never be plausible-real decoys). AVAILABILITY COST
+     // (accepted): each ring spend consumes ring-size fresh outputs from
+     // the counter — the floor gate then halts spends honestly when the
+     // pool runs thin, instead of overstating fresh depth. The counter is
+     // decremented exactly on the !spent -> spent transition (a member
+     // shared across inputs consumes once), so it always equals the
+     // metadata-bearing unspent set the floor gate means to measure.
+     // R9C F-08 (mimo-2.6 HIGH — disclosure only, semantics UNCHANGED
+     // here): whole-ring flagging renders EVERY member — including
+     // strangers' decoyed outputs — unspendable on ALL legs (ring
+     // membership above, op40/op41, op85 turnstile; the flag is never
+     // cleared), and anyone can target-destroy any stealth output for one
+     // fee since membership requires no ownership. Disclosed in BSIP-2 §4
+     // (6th MUSE-R12 item) + the wallet contract (BLIND_DEFAULTS_CONTRACT
+     // §9) with pilot pool-burn rates, and pinned (not fixed) by
+     // r9c_decoy_owner_explicit_spend_refused. Design-owner option (NOT
+     // implemented): explicit legs check owner-supplied key images against
+     // the nullifier set instead of the spent flag — precise and
+     // privacy-preserving — while the ring gate keeps the flag for C-02
+     // hygiene. No production wallet ring-builder exists in-tree, so this
+     // materializes when the spec'd sampler ships, if ever.
     {
        const auto& bbi = db().get_index_type<blinded_balance_index>().indices().get<by_commitment>();
        for( const auto& in : o.inputs )

@@ -88,9 +88,13 @@ constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK = 750000;
 /// direction). Each stealth input pays 2 x ring.size() units (main + alt leg).
 constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER = 1210;
 /// Range-proof cost per blind output (same log: BP+ m=1 verify 6322us).
-/// Legacy V1 Borromean outputs are charged at the same rate: the fc
-/// libsecp256k1 backend is believed cheaper per proof, so this OVER-counts
-/// legacy work (fail-closed direction for the budget).
+/// Legacy V1 Borromean outputs are charged at the same rate. Measured
+/// (R9C, r9c_v1_verify_cost_pin, same container hardware): one V1 verify
+/// over the consensus path is ~1100us (1059-1109us best-of-21 across runs),
+/// so 6322us OVER-counts legacy work ~5.7x — the fail-closed direction for
+/// the budget, kept deliberately (a lower V1-specific rate would be a
+/// loosening: blocks could carry more modeled work than the envelope
+/// admits).
 constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF = 6322;
 /// Conservation-kernel allowance per op carrying an excess equation
 /// (stealth_transfer, turnstile_reproof). Measured 471us for 1-in/1-out

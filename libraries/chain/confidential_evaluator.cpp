@@ -51,6 +51,9 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
    {
       stealth_check_blind_gate( d );
+      // F-01 (R9B): one V1 range proof per output, charged at the BP+ rate
+      // (conservative over-count — see stealth.hpp).
+      stealth_check_blind_work_gate( d, stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );
       stealth_check_asset_gate( d, o.amount.asset_id );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "No new V1 blind balances past sunset (use turnstile re-proof)" );
@@ -98,6 +101,7 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
+   stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 
@@ -210,6 +214,9 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
    {
       stealth_check_blind_gate( d );
+      // F-01 (R9B): one V1 range proof per output, charged at the BP+ rate
+      // (conservative over-count — see stealth.hpp).
+      stealth_check_blind_work_gate( d, stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );
       stealth_check_asset_gate( d, o.fee.asset_id );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
@@ -264,6 +271,7 @@ void_result blind_transfer_evaluator::do_apply( const blind_transfer_operation& 
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
+   stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }

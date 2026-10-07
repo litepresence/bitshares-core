@@ -224,6 +224,11 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       uint32_t              activation_k39_ppo = 0;
       /// Last computed alarm snapshot (see stealth_alarm_snapshot).
       stealth_alarm_snapshot alarms;
+      /// Per-block blind verification-work counter for the F-01 work budget
+      /// (block_num, used microsecond-model units). Appended-last (R9B);
+      /// reset on block rollover exactly like blind_block_num/count above.
+      uint32_t              blind_work_block_num = 0;
+      uint32_t              blind_work_used_us = 0;
 };
 
 using stealth_status_multi_idx = multi_index_container<

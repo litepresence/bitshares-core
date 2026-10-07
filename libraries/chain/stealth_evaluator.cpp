@@ -32,6 +32,10 @@ using protocol::GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC;
 using protocol::GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED;
 using protocol::GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS;
 using protocol::GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK;
+using protocol::GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK;
+using protocol::GRAPHENE_STEALTH_WORK_US_PER_KERNEL;
+using protocol::GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;
+using protocol::GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER;
 using protocol::GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT;
 using protocol::GRAPHENE_STEALTH_PARITY_BURN_WARN_PCT;
 using protocol::GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS;
@@ -320,6 +324,73 @@ void stealth_count_blind_op( database& db )
    } );
 }
 
+// ---------------------------------------------------------------------------
+// F-01 verification-work budget (R9B): model-unit accounting, integer only
+// ---------------------------------------------------------------------------
+
+uint32_t stealth_work_for_stealth_transfer( const protocol::stealth_transfer_operation& o )
+{
+   // 64-bit accumulation with saturation: the gate runs before the
+   // input/output-count asserts, and a proposal-embedded op bypasses
+   // validate(), so counts are unbounded here — saturate, never wrap, and
+   // the gate fails closed on the saturated value.
+   uint64_t w = GRAPHENE_STEALTH_WORK_US_PER_KERNEL;
+   for( const auto& in : o.inputs )
+      w += (uint64_t)2 * in.ring.size() * GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER;
+   w += (uint64_t)o.outputs.size() * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;
+   if( w > 0xFFFFFFFFu )
+      return 0xFFFFFFFFu;
+   return (uint32_t)w;
+}
+
+uint32_t stealth_work_for_range_proofs( uint32_t n_outputs )
+{
+   uint64_t w = (uint64_t)n_outputs * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;
+   if( w > 0xFFFFFFFFu )
+      return 0xFFFFFFFFu;
+   return (uint32_t)w;
+}
+
+uint32_t stealth_blind_work_this_block( const database& db )
+{
+   const auto* s = find_stealth_status( db );
+   if( !s ) return 0;
+   if( s->blind_work_block_num != db.head_block_num() + 1 )
+      return 0;
+   return s->blind_work_used_us;
+}
+
+void stealth_check_blind_work_gate( const database& db, uint32_t work_us )
+{
+   if( !stealth_passed( db ) )
+      return; // pre-fork: legacy behavior unchanged
+   // 64-bit sum: used stays <= budget by the apply invariant below, and
+   // work_us is saturated above — no wrap on any input.
+   uint64_t projected = (uint64_t)stealth_blind_work_this_block( db ) + work_us;
+   FC_ASSERT( projected <= GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK,
+              "Per-block blind verification-work budget exhausted" );
+}
+
+void stealth_count_blind_work( database& db, uint32_t work_us )
+{
+   if( !stealth_passed( db ) )
+      return;
+   const auto& s = get_or_create_stealth_status( db );
+   uint32_t pending = db.head_block_num() + 1;
+   db.modify( s, [&]( stealth_status_object& o ) {
+      if( o.blind_work_block_num != pending )
+      {
+         o.blind_work_block_num = pending;
+         o.blind_work_used_us = 0;
+      }
+      // No wrap: do_apply follows a do_evaluate that passed the gate for
+      // this same op, so used + work_us <= budget here by construction.
+      // Saturate defensively anyway (never throws in apply).
+      uint64_t next = (uint64_t)o.blind_work_used_us + work_us;
+      o.blind_work_used_us = ( next > 0xFFFFFFFFu ) ? 0xFFFFFFFFu : (uint32_t)next;
+   } );
+}
+
 void stealth_require_sound_range_proofs( const database& db,
       const vector<protocol::blind_output>& outputs )
 {
@@ -398,6 +469,11 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
                "Stealth transfers are not allowed until the stealth hardfork" );
    stealth_check_blind_gate( d );
+   // F-01 (R9B): the count gate above reserves market space; this second
+   // gate bounds verification work (dual ring verifies + BP+ outputs).
+   // Runs before the input/output-count asserts, so the calculator takes a
+   // wire-shaped op and saturates (fail-closed, never wraps).
+   stealth_check_blind_work_gate( d, stealth_work_for_stealth_transfer( o ) );
    stealth_check_asset_gate( d, o.asset_id );
 
    FC_ASSERT( o.fee.asset_id == o.asset_id, "Stealth transfer fee must be paid in the transferred asset" );
@@ -696,6 +772,7 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
+   stealth_count_blind_work( db(), stealth_work_for_stealth_transfer( o ) );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 
@@ -765,6 +842,10 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
               "Turnstile re-proofs are not allowed until the stealth hardfork" );
    stealth_check_blind_gate( d );
+   // F-01 (R9B): one BP+ output plus the conservation kernel (same excess
+   // verifier as a spend, charged the flat kernel allowance).
+   stealth_check_blind_work_gate( d, stealth_work_for_range_proofs( 1 )
+                                     + GRAPHENE_STEALTH_WORK_US_PER_KERNEL );
    stealth_check_asset_gate( d, o.asset_id );
 
    FC_ASSERT( o.fee.asset_id == o.asset_id, "Turnstile fee must be paid in the migrated asset" );
@@ -914,6 +995,8 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid );
    stealth_window_count_add( db(), 1 );
    stealth_count_blind_op( db() );
+   stealth_count_blind_work( db(), stealth_work_for_range_proofs( 1 )
+                                 + GRAPHENE_STEALTH_WORK_US_PER_KERNEL );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 

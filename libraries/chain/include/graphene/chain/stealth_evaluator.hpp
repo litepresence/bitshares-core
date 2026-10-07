@@ -292,12 +292,47 @@ void stealth_window_count_add( database& db, uint32_t n );
  * the proposal path). Split accordingly:
  * - stealth_check_blind_gate: pure check (evaluate + apply paths)
  * - stealth_count_blind_op: counter increment (apply path only)
+ * The F-01 work budget (R9B) rides alongside with the same split:
+ * - stealth_check_blind_work_gate(db, work_us): fail-closed FC_ASSERT when
+ *   the pending block's accumulated work plus this op exceeds
+ *   GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK; no-op pre-fork.
+ * - stealth_count_blind_work(db, work_us): accumulate in do_apply only.
+ * Per-op work comes from the pure calculators below (integer model units,
+ * saturated — never throws, never wraps):
+ * - stealth_work_for_stealth_transfer: 2 x ring.size() per input (dual
+ *   verify) at WORK_US_PER_RING_MEMBER, plus per-output range proofs, plus
+ *   the kernel allowance.
+ * - stealth_work_for_range_proofs(n): n outputs x WORK_US_PER_RANGE_PROOF
+ *   (legacy deposits / blind transfers / turnstile outputs; V1 charged at
+ *   the BP+ rate — conservative over-count, see stealth.hpp).
+ * transfer_from_blind carries no work calls: explicit spends verify no
+ * cryptography (index + owner checks only), so its work is 0 by
+ * construction; the count gate still binds it.
  */
 void stealth_check_blind_gate( const database& db );
 /// Per-asset leg of the blind gate (SUP-07): every blind op evaluator calls
 /// this with its asset right after stealth_check_blind_gate. No-op pre-fork.
 void stealth_check_asset_gate( const database& db, asset_id_type asset );
 void stealth_count_blind_op( database& db );
+/// F-01 work-budget gate (R9B): fail-closed when the pending block's used
+/// work plus work_us exceeds GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK.
+/// No-op pre-fork. Called from do_evaluate right after the count gate.
+void stealth_check_blind_work_gate( const database& db, uint32_t work_us );
+/// F-01 work-budget accumulator (R9B): add work_us to the pending block's
+/// used work (rollover reset like the op counter). do_apply path only.
+void stealth_count_blind_work( database& db, uint32_t work_us );
+/// Work-model units consumed by one stealth_transfer op (R9B): dual-verify
+/// ring cost plus per-output range proofs plus the kernel allowance.
+/// Pure, saturated at 0xFFFFFFFF (a proposal-embedded op bypasses
+/// validate(), so input/ring counts are unbounded at gate time — the gate
+/// still fails closed, never wraps).
+uint32_t stealth_work_for_stealth_transfer( const protocol::stealth_transfer_operation& o );
+/// Work-model units for n range-proven blind outputs (R9B): deposits,
+/// blind transfers, turnstile outputs. Pure, saturated.
+uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );
+/// Verification-work units counted against the budget in the
+/// currently-pending block (0 pre-fork or on rollover).
+uint32_t stealth_blind_work_this_block( const database& db );
 /// Post-STEALTH only (pre-fork no-op): move the per-asset confidential-supply
 /// shadow by the same delta applied to asset_dynamic_data_object.
 void stealth_shadow_add( database& db, asset_id_type asset, share_type delta );

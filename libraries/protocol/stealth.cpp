@@ -35,9 +35,11 @@ namespace graphene { namespace protocol {
  * consensus divergence between validate flavors would fork the network.
  * Every size bound here mirrors the verifier's bounds (same constants) or,
  * for V2 range proofs, stays deliberately looser (756 relay cap vs 592/658
- * exact verifier sizes) so malformed transactions fail early on relays AND
- * identically in consensus — validate() never admits what the verifier
- * rejects, it only pre-rejects a superset early.
+ * exact verifier sizes). The relay direction is fixed: validate() never
+ * REJECTS what the verifier ACCEPTS (valid transactions always relay); it
+ * only pre-rejects a strict subset of what consensus rejects. Admitting a
+ * blob consensus later rejects (e.g. a 593..756-byte V2 blob) is safe: the
+ * evaluator fails closed on the exact size.
  */
 void stealth_transfer_operation::validate()const
 {

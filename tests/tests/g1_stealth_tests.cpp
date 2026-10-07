@@ -1036,7 +1036,10 @@ BOOST_AUTO_TEST_CASE( generator_provenance_vectors )
    // generator change fails loudly here instead of surfacing as liveness
    // ("no honest proof verifies"). J/H pins above unchanged.
    BOOST_CHECK_EQUAL( stealth_BP_count(), 64u );
-   BOOST_CHECK( stealth_BP_G( 0 ) == stealth_BP_G( 0 ) ); // determinism spot
+   // (R9B Minor-3: the old self-comparison determinism spot
+   // BOOST_CHECK(G(0)==G(0)) is removed — a tautology. Determinism is pinned
+   // properly by the golden loop below, which compares every Gi/Hi against
+   // the model-generated vectors.)
 // --- pasted from tooling/g1_gen_vectors.py --cpp ---
 static const char* const BP_G_GOLDEN[64] = {
   "026b5fa2ac909d6f5dca68029ab3c9f59cbf6cf50404abde089bedff033fdc36e7",
@@ -3122,88 +3125,109 @@ BOOST_AUTO_TEST_CASE( bp_plus_vectors_and_budget )
       BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, proof, { Cw }, err ),
                            "BP+ proof for wrong value must reject" );
    }
-   // Verifier budget: worst-case full block = 100 blind txs x (ring-16 +
-   // BP+ 1-output), single-thread (witness validation is serial today:
-   // db_block.cpp "TODO - parallelize"). Must fit 25% of 3s (<= 750000us).
-   {
-      const size_t n = 16;
-      std::vector<std::vector<unsigned char>> Q;
-      for( size_t i = 0; i < n; ++i )
-         Q.push_back( T_commit( T_scalar( "g1b-bench-b|" + std::to_string( i ) ), 500 + i ) );
-      size_t s = 7;
-      BIGNUM* bs = T_scalar( "g1b-bench-b|7" );
-      BIGNUM* bprime = T_scalar( "g1b3-bench-bp" );
-      std::string ms( "g1b-bench-msg-0123456789abcdef", 32 );
-      stealth_ring_input rin = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
-         Q, s, bs, 507, bprime, ms );
-      BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ) );
-      // Kernel leg for the loop: P(1000) - C(990) - 10*H == e*G.
-      BIGNUM* bx = T_scalar( "g1b3-bench-ex" );
-      BIGNUM* by = T_scalar( "g1b3-bench-ey" );
-      auto Pxv = T_commit( bx, 1000 ), Cyv = T_commit( by, 990 );
-      fc::ecc::commitment_type Px = T_commitment( Pxv ), Cy = T_commitment( Cyv );
-      BIGNUM* be = BN_new();
-      BN_mod_sub( be, bx, by, T_order(), T_ctx() );
-      unsigned char beb[32]; BN_bn2binpad( be, beb, 32 );
-      fc::sha256 bex; std::copy( beb, beb + 32, (char*)bex.data() );
-      BOOST_REQUIRE( stealth_verify_excess( { Px }, { Cy }, 10, bex, err ) );
-      fc::time_point start = fc::time_point::now();
-      for( int i = 0; i < 100; ++i )
-      {
-         BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ) );
-         BOOST_REQUIRE( stealth_verify_bp_plus( 1, proof, { Cc }, err ) );
-         BOOST_REQUIRE( stealth_verify_excess( { Px }, { Cy }, 10, bex, err ) );
-      }
-      auto us = ( fc::time_point::now() - start ).count();
-      BOOST_TEST_MESSAGE( "G1b worst-case full block: 100x(bound-ring-16 + BP+1 + excess) = "
-                          << us << "us" );
-      // Finding 6 (Important): the 750000us (25%-of-3s) target is KEPT as
-      // the number, but enforcement stays a recorded measurement, not a
-      // hard gate: the residual over-budget is a backend gap (secp256k1/
-      // OpenSSL vs ed25519; G1b-2 measured 1991ms pre-kernel), closable only
-      // by G1c/audit-level work (libsecp256k1 backend, batch verification,
-      // or cap/budget recalibration). No constant is weakened to turn this
-      // green: WARN keeps the target visible on every run with numbers.
-      BOOST_WARN_MESSAGE( us <= 750000, "verifier budget: " << us << "us > 750000us" );
-      BN_free( bs ); BN_free( bprime ); BN_free( bx ); BN_free( by ); BN_free( be );
-    }
-    // REPAIR-03 (audit-round-1 G1-06): ring-11 full-block loop alongside ring-16.
-    // Same worst-case model (100 blind txs, serial witness validation, 25%-of-3s
-    // envelope) at the floor ring size, so the WARN below covers both ends of the
-    // [11,32] shape range instead of only the top.
+    // F-01 remediation (R9B): the two 100x 1-in/1-out loops that stood here
+    // modeled a shape consensus never bounds (inputs<=8, outputs<=8,
+    // ring<=32, single-version) and understated the permitted worst case
+    // ~23x (space-bunny REVIEW §F-01). DELETED, not annotated: the model was
+    // the artefact that hid the finding for four rounds. The ring-11 loop
+    // went with it (11 is a verifier bound only; the consensus floor is 16,
+    // so a ring-11 "worst case" is doubly misleading). The binding
+    // constraint is now the per-block verification-WORK budget
+    // (GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK, enforced by
+    // stealth_check_blind_work_gate and pinned arithmetically by
+    // r9b_work_budget_arithmetic); this leg measures the single-op
+    // consensus worst case the budget admits — 8 inputs x ring-32 x DUAL
+    // verify + 8 BP+ outputs + kernel — and hard-gates it under the
+    // 750000us envelope (best of 5 passes, scheduling-noise robust —
+    // container hardware varies pass to pass by tens of percent).
+    // Witness validation is serial (db_block.cpp "TODO - parallelize"), so
+    // one pass here is one block's worth of the offender shape.
     {
-       const size_t n = 11;
-       std::vector<std::vector<unsigned char>> Q;
-       for( size_t i = 0; i < n; ++i )
-          Q.push_back( T_commit( T_scalar( "g1b-bench11-b|" + std::to_string( i ) ), 500 + i ) );
-       size_t s = 4;
-       BIGNUM* bs = T_scalar( "g1b-bench11-b|4" );
-       BIGNUM* bprime = T_scalar( "g1b3-bench11-bp" );
-       std::string ms( "g1b-bench11-msg-0123456789abcde", 32 );
-       stealth_ring_input rin = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
-          Q, s, bs, 504, bprime, ms );
-       BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ) );
-       BIGNUM* bx = T_scalar( "g1b3-bench11-ex" );
-       BIGNUM* by = T_scalar( "g1b3-bench11-ey" );
-       auto Pxv = T_commit( bx, 1000 ), Cyv = T_commit( by, 990 );
-       fc::ecc::commitment_type Px = T_commitment( Pxv ), Cy = T_commitment( Cyv );
+       const size_t NK = 8, RK = 32;
+       std::string ms( (const char*)T_secret( "r9bW-msg" ).data(), 32 );
+       std::string msa( (const char*)T_secret( "r9bW-msg-alt" ).data(), 32 );
+       std::vector<stealth_ring_input> rins, alts;
+       std::vector<fc::ecc::commitment_type> pins, outs;
+       std::vector<std::vector<char>> bproofs;
+       std::vector<BIGNUM*> bprimes, gammas;
+       for( size_t k = 0; k < NK; ++k )
+       {
+          std::vector<std::vector<unsigned char>> Qk;
+          size_t sk = k;
+          BIGNUM* bsk = T_scalar( "r9bW-bs|" + std::to_string( k ) );
+          BIGNUM* bpk = T_scalar( "r9bW-bp|" + std::to_string( k ) );
+          for( size_t j = 0; j < RK; ++j )
+          {
+             if( j == sk )
+                Qk.push_back( T_commit( bsk, 1000 ) );
+             else
+                Qk.push_back( T_commit(
+                   T_scalar( "r9bW-d|" + std::to_string( k ) + "|" + std::to_string( j ) ),
+                   500 + j ) );
+          }
+          stealth_ring_input rin = T_make_dual_ring_input( GRAPHENE_STEALTH_PROOF_V2,
+             GRAPHENE_STEALTH_PROOF_V1, Qk, sk, bsk, 1000, bpk, ms, msa );
+          BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ),
+                                 "worst-case setup V2 leg must verify: " << err );
+          pins.push_back( rin.pseudo_output );
+          // Evaluator-style alt-leg rebuild (same ring/pseudo, alt image+sig).
+          stealth_ring_input alt;
+          alt.ring = rin.ring;
+          alt.key_image = rin.alt_key_image;
+          alt.ring_sig = rin.alt_ring_sig;
+          alt.pseudo_output = rin.pseudo_output;
+          BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V1, alt, msa, err ),
+                                 "worst-case setup V1 alt leg must verify: " << err );
+          rins.push_back( rin );
+          alts.push_back( alt );
+          bprimes.push_back( bpk );
+          BN_free( bsk );
+       }
+       // 8 outputs of 990 + fee 80 balance the 8x1000 pseudo-inputs.
+       for( size_t j = 0; j < NK; ++j )
+       {
+          auto Gj = T_blind_secret( "r9bW-g|" + std::to_string( j ) );
+          fc::ecc::commitment_type Cj = fc::ecc::blind( Gj, 990 );
+          std::vector<char> pj = T_bp_prove( Cj, Gj, 990 );
+          BOOST_REQUIRE_MESSAGE( !pj.empty(), "worst-case BP+ prove must produce a blob" );
+          BOOST_REQUIRE_MESSAGE( stealth_verify_bp_plus( 1, pj, { Cj }, err ),
+                                 "worst-case BP+ setup must verify: " << err );
+          outs.push_back( Cj );
+          bproofs.push_back( pj );
+          gammas.push_back( T_bn( Gj ) );
+       }
        BIGNUM* be = BN_new();
-       BN_mod_sub( be, bx, by, T_order(), T_ctx() );
+       BN_copy( be, bprimes[0] );
+       for( size_t k = 1; k < NK; ++k )
+          BN_mod_add( be, be, bprimes[k], T_order(), T_ctx() );
+       for( auto g : gammas )
+          BN_mod_sub( be, be, g, T_order(), T_ctx() );
        unsigned char beb[32]; BN_bn2binpad( be, beb, 32 );
        fc::sha256 bex; std::copy( beb, beb + 32, (char*)bex.data() );
-       BOOST_REQUIRE( stealth_verify_excess( { Px }, { Cy }, 10, bex, err ) );
-       fc::time_point start = fc::time_point::now();
-       for( int i = 0; i < 100; ++i )
+       BOOST_REQUIRE_MESSAGE( stealth_verify_excess( pins, outs, 80, bex, err ),
+                              "worst-case kernel setup must verify: " << err );
+       long long best = -1;
+       for( int pass = 0; pass < 5; ++pass )
        {
-          BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rin, ms, err ) );
-          BOOST_REQUIRE( stealth_verify_bp_plus( 1, proof, { Cc }, err ) );
-          BOOST_REQUIRE( stealth_verify_excess( { Px }, { Cy }, 10, bex, err ) );
+          fc::time_point start = fc::time_point::now();
+          for( size_t k = 0; k < NK; ++k )
+          {
+             BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, rins[k], ms, err ) );
+             BOOST_REQUIRE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V1, alts[k], msa, err ) );
+             BOOST_REQUIRE( stealth_verify_bp_plus( 1, bproofs[k], { outs[k] }, err ) );
+          }
+          BOOST_REQUIRE( stealth_verify_excess( pins, outs, 80, bex, err ) );
+          long long us = ( fc::time_point::now() - start ).count();
+          BOOST_TEST_MESSAGE( "consensus worst-case pass " << pass << ": " << us << "us" );
+          if( best < 0 || us < best ) best = us;
        }
-       auto us = ( fc::time_point::now() - start ).count();
-       BOOST_TEST_MESSAGE( "G1b worst-case full block: 100x(bound-ring-11 + BP+1 + excess) = "
-                           << us << "us" );
-       BOOST_WARN_MESSAGE( us <= 750000, "verifier budget ring-11: " << us << "us > 750000us" );
-        BN_free( bs ); BN_free( bprime ); BN_free( bx ); BN_free( by ); BN_free( be );
+       BOOST_TEST_MESSAGE( "CONSENSUS WORST CASE " << best
+                           << "us (8-in/ring-32/dual + 8 BP+ + kernel)" );
+       BOOST_REQUIRE_MESSAGE( best <= 750000,
+          "CONSENSUS WORST CASE " << best << "us > 750000us" );
+       BN_free( be );
+       for( auto b : bprimes ) BN_free( b );
+       for( auto g : gammas ) BN_free( g );
      }
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -3294,6 +3318,434 @@ BOOST_AUTO_TEST_CASE( v1_range_claims_observed )
       BOOST_CHECK_EQUAL( min_v, 0u );
       BOOST_CHECK_EQUAL( max_v, ( (uint64_t)1 << 50 ) - 1 );
    }
+} FC_CAPTURE_AND_RETHROW() }
+
+// R9B negative vectors (space-bunny §7 Groups A/B + C1/C2 + E7/E8, F-01
+// companion): each asserts the NAMED verifier error string, fail-closed.
+// The ring/BP+ verifiers are fail-closed here already (no consensus change
+// in this batch for them); these vectors pin the exact strings op-level
+// rejections wrap, so a future refactor cannot soften a check silently.
+BOOST_AUTO_TEST_CASE( r9b_ring_scalar_canonicality_vectors )
+{ try {
+   // Group A: c0 / per-member (rb, rv, rd) at (n) or above (n+1) the curve
+   // order must reject as non-canonical (S1 is_reduced discipline).
+   std::string err;
+   const size_t n = 16;
+   std::vector<std::vector<unsigned char>> Q;
+   for( size_t i = 0; i < n; ++i )
+      Q.push_back( T_commit( T_scalar( "r9bA-b|" + std::to_string( i ) ), 500 + i ) );
+   BIGNUM* bs = T_scalar( "r9bA-b|7" );
+   BIGNUM* bprime = T_scalar( "r9bA-bp" );
+   std::string ms( (const char*)T_secret( "r9bA-msg" ).data(), 32 );
+   stealth_ring_input good = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
+      Q, 7, bs, 507, bprime, ms );
+   BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, good, ms, err ),
+                          "control must verify: " << err );
+   unsigned char nbytes[32], n1bytes[32];
+   BN_bn2binpad( T_order(), nbytes, 32 );
+   BIGNUM* n1 = BN_new(); BN_copy( n1, T_order() ); BN_add_word( n1, 1 );
+   BN_bn2binpad( n1, n1bytes, 32 );
+   auto expect_ring_reject = [&]( stealth_ring_input bad, const std::string& why ) {
+      err.clear();
+      BOOST_CHECK_MESSAGE( !stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, bad, ms, err ),
+                           why << ": non-canonical scalar must reject" );
+      BOOST_CHECK_EQUAL( err, why );
+   };
+   { stealth_ring_input bad = good; // A1: c0 == n
+     std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() );
+     expect_ring_reject( bad, "c0 not canonical" ); }
+   { stealth_ring_input bad = good; // A2: c0 == n+1
+     std::copy( n1bytes, n1bytes + 32, bad.ring_sig.begin() );
+     expect_ring_reject( bad, "c0 not canonical" ); }
+   { stealth_ring_input bad = good; // A3: rb_0 == n
+     std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() + 32 );
+     expect_ring_reject( bad, "responses not canonical" ); }
+   { stealth_ring_input bad = good; // A4: rv_0 == n
+     std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() + 64 );
+     expect_ring_reject( bad, "responses not canonical" ); }
+   { stealth_ring_input bad = good; // A5: rd_0 == n
+     std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() + 96 );
+     expect_ring_reject( bad, "responses not canonical" ); }
+   { stealth_ring_input bad = good; // A3-last: rb_{n-1} == n (per-member)
+     std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() + 32 + 96 * ( n - 1 ) );
+     expect_ring_reject( bad, "responses not canonical" ); }
+   BN_free( n1 ); BN_free( bs ); BN_free( bprime );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9b_point_encoding_vectors )
+{ try {
+   // Group B: every 33-byte point field on the ring/BP+ path is strictly
+   // parsed (prefix + oct2point + on-curve + non-identity). Infinity has no
+   // compressed encoding, so an identity smuggle must arrive as an invalid
+   // encoding — pinned with a bad-prefix vector alongside the off-curve
+   // (x >= p) vector for each field.
+   std::string err;
+   const size_t n = 16;
+   std::vector<std::vector<unsigned char>> Q;
+   for( size_t i = 0; i < n; ++i )
+      Q.push_back( T_commit( T_scalar( "r9bB-b|" + std::to_string( i ) ), 500 + i ) );
+   BIGNUM* bs = T_scalar( "r9bB-b|7" );
+   BIGNUM* bprime = T_scalar( "r9bB-bp" );
+   std::string ms( (const char*)T_secret( "r9bB-msg" ).data(), 32 );
+   stealth_ring_input good = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
+      Q, 7, bs, 507, bprime, ms );
+   BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, good, ms, err ),
+                          "control must verify: " << err );
+   std::vector<char> img_prefix( 33, 0 ); img_prefix[0] = 0x04;
+   std::vector<char> img_curve( 33, (char)0xFF ); img_curve[0] = 0x02;
+   std::vector<unsigned char> pt_prefix( 33, 0x00 ); pt_prefix[0] = 0x04;
+   std::vector<unsigned char> pt_curve( 33, 0xFF ); pt_curve[0] = 0x02;
+   auto to_commit = []( const std::vector<unsigned char>& v ) {
+      fc::ecc::commitment_type c;
+      BOOST_REQUIRE( v.size() == 33 );
+      std::copy( v.begin(), v.end(), c.begin() );
+      return c;
+   };
+   auto expect_ring_reject = [&]( stealth_ring_input bad, const std::string& why ) {
+      err.clear();
+      BOOST_CHECK_MESSAGE( !stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, bad, ms, err ),
+                           why << ": bad point encoding must reject" );
+      BOOST_CHECK_EQUAL( err, why );
+   };
+   { stealth_ring_input bad = good; // B1: image, bad prefix
+     bad.key_image = img_prefix;
+     expect_ring_reject( bad, "bad image point" ); }
+   { stealth_ring_input bad = good; // B2/B3: image, off-curve x
+     bad.key_image = img_curve;
+     expect_ring_reject( bad, "bad image point" ); }
+   { stealth_ring_input bad = good; // B4-prefix: ring member, bad prefix
+     bad.ring[3] = to_commit( pt_prefix );
+     expect_ring_reject( bad, "bad ring point" ); }
+   { stealth_ring_input bad = good; // B4-curve: ring member, off-curve x
+     bad.ring[3] = to_commit( pt_curve );
+     expect_ring_reject( bad, "bad ring point" ); }
+   { stealth_ring_input bad = good; // B5-prefix: pseudo-output, bad prefix
+     bad.pseudo_output = to_commit( pt_prefix );
+     expect_ring_reject( bad, "bad pseudo point" ); }
+   { stealth_ring_input bad = good; // B5-curve: pseudo-output, off-curve x
+     bad.pseudo_output = to_commit( pt_curve );
+     expect_ring_reject( bad, "bad pseudo point" ); }
+   // BP+ points A / A1 / B / L0 (wire offsets m=1: A@1 A1@34 B@67 L0@196).
+   fc::ecc::commitment_type Cc;
+   std::vector<char> proof;
+   {
+      auto B = T_blind_secret( "r9bB-bpb" );
+      BIGNUM* bb = T_bn( B );
+      auto Cv = T_commit( bb, 424242 );
+      BN_free( bb );
+      std::copy( Cv.begin(), Cv.end(), Cc.begin() );
+      proof = T_bp_prove( Cc, B, 424242 );
+      BOOST_REQUIRE_MESSAGE( !proof.empty(), "test prover must produce a blob" );
+      BOOST_REQUIRE_MESSAGE( stealth_verify_bp_plus( 1, proof, { Cc }, err ),
+                             "control BP+ must verify: " << err );
+   }
+   auto expect_bp_reject = [&]( std::vector<char> bad, const std::string& why ) {
+      err.clear();
+      BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, bad, { Cc }, err ),
+                           why << ": bad BP+ point must reject" );
+      BOOST_CHECK_EQUAL( err, why );
+   };
+   { std::vector<char> bad = proof; // B6a: A, bad prefix
+     std::copy( pt_prefix.begin(), pt_prefix.end(), bad.begin() + 1 );
+     expect_bp_reject( bad, "bad A" ); }
+   { std::vector<char> bad = proof; // B6a-curve: A, off-curve x
+     std::copy( pt_curve.begin(), pt_curve.end(), bad.begin() + 1 );
+     expect_bp_reject( bad, "bad A" ); }
+   { std::vector<char> bad = proof; // B6b: A1, bad prefix
+     std::copy( pt_prefix.begin(), pt_prefix.end(), bad.begin() + 34 );
+     expect_bp_reject( bad, "bad A1" ); }
+   { std::vector<char> bad = proof; // B6b-curve: A1, off-curve x
+     std::copy( pt_curve.begin(), pt_curve.end(), bad.begin() + 34 );
+     expect_bp_reject( bad, "bad A1" ); }
+   { std::vector<char> bad = proof; // B6c: B, bad prefix
+     std::copy( pt_prefix.begin(), pt_prefix.end(), bad.begin() + 67 );
+     expect_bp_reject( bad, "bad B" ); }
+   { std::vector<char> bad = proof; // B6c-curve: B, off-curve x
+     std::copy( pt_curve.begin(), pt_curve.end(), bad.begin() + 67 );
+     expect_bp_reject( bad, "bad B" ); }
+   { std::vector<char> bad = proof; // B7: L0, bad prefix
+     std::copy( pt_prefix.begin(), pt_prefix.end(), bad.begin() + 196 );
+     expect_bp_reject( bad, "bad L" ); }
+   BN_free( bs ); BN_free( bprime );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9b_bp_shape_scalar_transcript_vectors )
+{ try {
+   // Groups C1/C2 (blob shape), A6-A8 (BP+ scalars), E7 (transcript pin).
+   std::string err;
+   fc::ecc::commitment_type Cc;
+   std::vector<char> proof;
+   {
+      auto B = T_blind_secret( "r9bC-bpb" );
+      BIGNUM* bb = T_bn( B );
+      auto Cv = T_commit( bb, 424242 );
+      BN_free( bb );
+      std::copy( Cv.begin(), Cv.end(), Cc.begin() );
+      proof = T_bp_prove( Cc, B, 424242 );
+      BOOST_REQUIRE_MESSAGE( !proof.empty(), "test prover must produce a blob" );
+      BOOST_REQUIRE_EQUAL( proof.size(), 592u );
+      BOOST_REQUIRE_MESSAGE( stealth_verify_bp_plus( 1, proof, { Cc }, err ),
+                             "control BP+ must verify: " << err );
+   }
+   unsigned char nbytes[32];
+   BN_bn2binpad( T_order(), nbytes, 32 );
+   unsigned char zbytes[32] = { 0 };
+   auto expect_bp_reject = [&]( std::vector<char> bad, const std::string& why ) {
+      err.clear();
+      BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, bad, { Cc }, err ),
+                           why << ": malformed BP+ blob must reject" );
+      BOOST_CHECK_EQUAL( err, why );
+   };
+   { std::vector<char> bad( proof.begin(), proof.end() - 1 ); // C1: 591 B
+     expect_bp_reject( bad, "blob size" ); }
+   { std::vector<char> bad = proof; bad.push_back( (char)0 ); // C2: 593 B
+     BOOST_REQUIRE_EQUAL( bad.size(), 593u );
+     expect_bp_reject( bad, "blob size" ); }
+   // Wire offsets m=1: r1@100 s1@132 d1@164 (32 B each, strict-canonical nonzero).
+   { std::vector<char> bad = proof; // A6: r1 == n
+     std::copy( nbytes, nbytes + 32, bad.begin() + 100 );
+     expect_bp_reject( bad, "bad r1" ); }
+   { std::vector<char> bad = proof; // A7: r1 == 0 (canonical but zero)
+     std::copy( zbytes, zbytes + 32, bad.begin() + 100 );
+     expect_bp_reject( bad, "bad r1" ); }
+   { std::vector<char> bad = proof; // A6: s1 == n
+     std::copy( nbytes, nbytes + 32, bad.begin() + 132 );
+     expect_bp_reject( bad, "bad s1" ); }
+   { std::vector<char> bad = proof; // A8: s1 == 0
+     std::copy( zbytes, zbytes + 32, bad.begin() + 132 );
+     expect_bp_reject( bad, "bad s1" ); }
+   { std::vector<char> bad = proof; // A6: d1 == n
+     std::copy( nbytes, nbytes + 32, bad.begin() + 164 );
+     expect_bp_reject( bad, "bad d1" ); }
+   { std::vector<char> bad = proof; // A8: d1 == 0
+     std::copy( zbytes, zbytes + 32, bad.begin() + 164 );
+     expect_bp_reject( bad, "bad d1" ); }
+   // E7: valid proof with A1/B replaced by the round-0 L/R pair in the `e`
+   // transcript. All four points are valid on-curve, so parsing succeeds;
+   // the equation must still fail (this pins the F-10 ordering dependence:
+   // the G1BPe label is reused across stages and only fixed stage ORDER
+   // keeps round challenges distinct from the final challenge — R9C owns
+   // any relabelling, never a silent patch).
+   { std::vector<char> bad = proof;
+     std::copy( bad.begin() + 196, bad.begin() + 229, bad.begin() + 34 ); // A1 <- L0
+     std::copy( bad.begin() + 229, bad.begin() + 262, bad.begin() + 67 ); // B <- R0
+     err.clear();
+     BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, bad, { Cc }, err ),
+                          "A1/B-swapped transcript must reject: " << err );
+     BOOST_CHECK_EQUAL( err, "multiexp != identity" ); }
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9b_version_binding_e8 )
+{ try {
+   // E8 (sharpest proof-bound test): a valid authorization under one proof
+   // version never verifies under the other. Verifier leg pins the
+   // J-domain separation (same bytes, same message, other version rejects);
+   // op legs pin the consensus binding end to end.
+   std::string err;
+   const size_t n = 16;
+   std::vector<std::vector<unsigned char>> Q;
+   for( size_t i = 0; i < n; ++i )
+      Q.push_back( T_commit( T_scalar( "r9bE-b|" + std::to_string( i ) ), 500 + i ) );
+   BIGNUM* bs = T_scalar( "r9bE-b|7" );
+   BIGNUM* bprime = T_scalar( "r9bE-bp" );
+   std::string ms( (const char*)T_secret( "r9bE-msg" ).data(), 32 );
+   stealth_ring_input v1in = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V1,
+      Q, 7, bs, 507, bprime, ms );
+   stealth_ring_input v2in = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V2,
+      Q, 7, bs, 507, bprime, ms );
+   BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V1, v1in, ms, err ),
+                          "V1 control must verify: " << err );
+   BOOST_REQUIRE_MESSAGE( stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, v2in, ms, err ),
+                          "V2 control must verify: " << err );
+   err.clear();
+   BOOST_CHECK_MESSAGE( !stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V2, v1in, ms, err ),
+                        "V1 authorization under V2 must reject" );
+   BOOST_CHECK_EQUAL( err, "ring did not close" );
+   err.clear();
+   BOOST_CHECK_MESSAGE( !stealth_verify_ring( GRAPHENE_STEALTH_PROOF_V1, v2in, ms, err ),
+                        "V2 authorization under V1 must reject" );
+   BOOST_CHECK_EQUAL( err, "ring did not close" );
+   BN_free( bs ); BN_free( bprime );
+   // Op legs: one funded pool, three fail-closed mutations (all reject in
+   // do_evaluate, so no nullifier/pool state moves between them).
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r9b-e8", 16, true );
+   { // (a) version flip: V1 bytes presented as a V2 op. The V1 Borromean
+     // blobs cannot parse as BP+ (validate would also refuse at relay, so
+     // dispatch past it to pin the CONSENSUS gate specifically).
+     stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+        GRAPHENE_STEALTH_PROOF_V1, "r9b-e8-a", 600, 390, 10 );
+     stop.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+     transaction_evaluation_state es( &db );
+     try
+     {
+        db.apply_operation( es, operation( stop ) );
+        BOOST_FAIL( "version-flipped op must fail closed in do_evaluate" );
+     }
+     catch( const fc::exception& e )
+     {
+        BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+           "Stealth output V2 range proof does not verify" ) != std::string::npos,
+           e.to_detail_string() );
+     }
+   }
+   { // (b) sharp leg: the VALID V2 alternate signature presented as the V1
+     // main leg (images stay distinct, so the duplicate-image tripwire is
+     // not what fires — the version binding itself rejects).
+     stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+        GRAPHENE_STEALTH_PROOF_V1, "r9b-e8-b", 600, 390, 10 );
+     stop.inputs[0].ring_sig = stop.inputs[0].alt_ring_sig;
+     trx.operations = { stop };
+     try
+     {
+        PUSH_TX( db, trx );
+        BOOST_FAIL( "cross-version main leg must reject" );
+     }
+     catch( const fc::exception& e )
+     {
+        BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Ring signature does not verify" )
+                             != std::string::npos, e.to_detail_string() );
+     }
+     trx.clear();
+   }
+   { // (c) E2 companion: altered fee rebinds the ring message (fee rides
+     // stealth_ring_message), so the proven authorization no longer matches.
+     stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+        GRAPHENE_STEALTH_PROOF_V1, "r9b-e8-c", 600, 390, 10 );
+     stop.fee = core.amount( 11 );
+     trx.operations = { stop };
+     try
+     {
+        PUSH_TX( db, trx );
+        BOOST_FAIL( "altered-fee op must reject on the message binding" );
+     }
+     catch( const fc::exception& e )
+     {
+        BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Ring signature does not verify" )
+                             != std::string::npos, e.to_detail_string() );
+     }
+     trx.clear();
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9b_work_budget_rejects_overwork_block )
+{ try {
+   // F-01 work gate (RED first: no work budget exists yet, so the final
+   // spend is wrongly ACCEPTED). Bulk legacy work (56 x 2-output deposits)
+   // plus one honest ring spend exceeds 750000us of verifier work while
+   // staying under the 100-op count gate (57 ops isolates the work gate).
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r9b-w", 16, true );
+   // Pool seeding above costs 20x the seeded need from dan; top up for the
+   // 56 cost-path deposits below (56 x (200 + 1500000) ~= 84M).
+   transfer( account_id_type()(db), dan, core.amount( 500000000 ) );
+   // 56 two-output deposits on the G1c cost path (pinned anchor n=2, no
+   // pool touch, no subsidy-cap units) in ONE pending block.
+   for( int i = 0; i < 56; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 200 );
+      ttb.from = dan.id;
+      auto k1 = fc::ecc::private_key::generate();
+      auto k2 = fc::ecc::private_key::generate();
+      blind_output o1, o2;
+      o1.owner = authority( 1, public_key_type( k1.get_public_key() ), 1 );
+      o2.owner = authority( 1, public_key_type( k2.get_public_key() ), 1 );
+      auto B1 = T_blind_secret( "r9b-w-b1|" + std::to_string( i ) );
+      auto B2 = T_blind_secret( "r9b-w-b2|" + std::to_string( i ) );
+      auto N1 = T_secret( "r9b-w-n1|" + std::to_string( i ) );
+      auto N2 = T_secret( "r9b-w-n2|" + std::to_string( i ) );
+      o1.commitment = fc::ecc::blind( B1, 100 );
+      o1.range_proof = fc::ecc::range_proof_sign( 0, o1.commitment, B1, N1, 0, 0, 100 );
+      o2.commitment = fc::ecc::blind( B2, 100 );
+      o2.range_proof = fc::ecc::range_proof_sign( 0, o2.commitment, B2, N2, 0, 0, 100 );
+      { // wallet convention: the deposit blind is the sum of output blinds
+        BIGNUM* b1 = T_bn( B1 ); BIGNUM* b2 = T_bn( B2 ); BIGNUM* e = BN_new();
+        BN_mod_add( e, b1, b2, T_order(), T_ctx() );
+        unsigned char eb[32]; BN_bn2binpad( e, eb, 32 );
+        fc::sha256 h; std::copy( eb, eb + 32, (char*)h.data() );
+        ttb.blinding_factor = h;
+        BN_free( b1 ); BN_free( b2 ); BN_free( e );
+      }
+      ttb.fee = core.amount( 1500000 ); // pinned cost anchor, n=2: 5+2*5 CORE
+      // Consensus requires blind outputs sorted by commitment id
+      // (confidential.cpp validate); order is cosmetic here (no kernel).
+      if( o2.commitment < o1.commitment )
+         ttb.outputs = { o2, o1 };
+      else
+         ttb.outputs = { o1, o2 };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+   }
+   // One honest ring spend on top must trip the work gate (not the count gate).
+   stealth_transfer_operation stop = t5_build_spend( core, p, 5,
+      GRAPHENE_STEALTH_PROOF_V1, "r9b-w-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "over-work block must fail closed on the verification-work budget" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "verification-work budget" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r9b_work_budget_arithmetic )
+{ try {
+   // F-01 work-budget model pins (pure arithmetic, no chain, no timing):
+   // unit costs, the offender shape, the legacy full-block fit, and the
+   // exact charges the overwork test above relies on.
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK, 750000u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER, 1210u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF, 6322u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_WORK_US_PER_KERNEL, 2048u );
+   // Consensus worst case (8-in / ring-32 / dual + 8 BP+ + kernel) fits, so
+   // ANY single consensus-valid op is admissible...
+   stealth_transfer_operation worst;
+   for( int i = 0; i < 8; ++i )
+   {
+      stealth_ring_input in;
+      in.ring.resize( 32 );
+      worst.inputs.push_back( in );
+   }
+   worst.outputs.resize( 8 );
+   BOOST_REQUIRE_EQUAL( stealth_work_for_stealth_transfer( worst ), 672144u );
+   BOOST_CHECK( stealth_work_for_stealth_transfer( worst )
+                <= GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK );
+   // ...while a block of worst cases cannot (2x offender > budget).
+   BOOST_CHECK( 2u * stealth_work_for_stealth_transfer( worst )
+                > GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK );
+   // Minimal G1 spend (1-in / ring-16 / dual + 2 outputs + kernel).
+   stealth_transfer_operation small;
+   small.inputs.resize( 1 ); small.inputs[0].ring.resize( 16 );
+   small.outputs.resize( 2 );
+   BOOST_REQUIRE_EQUAL( stealth_work_for_stealth_transfer( small ), 53412u );
+   // Legacy full block (100 x 1-output deposits) still fits (tightening-only).
+   BOOST_REQUIRE_EQUAL( stealth_work_for_range_proofs( 1 ), 6322u );
+   BOOST_CHECK( 100u * stealth_work_for_range_proofs( 1 )
+                <= GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK );
+   // Overwork-test charges: 56 x 2-output deposits fit, plus one minimal
+   // spend trips.
+   BOOST_REQUIRE_EQUAL( stealth_work_for_range_proofs( 2 ), 12644u );
+   BOOST_CHECK( 56u * stealth_work_for_range_proofs( 2 )
+                <= GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK );
+   BOOST_CHECK( 56u * stealth_work_for_range_proofs( 2 )
+                + stealth_work_for_stealth_transfer( small )
+                > GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )

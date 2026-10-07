@@ -56,13 +56,47 @@ constexpr uint32_t GRAPHENE_STEALTH_RING_TARGET = 16;
 /// Ceiling ring size: bounds verifier work per input (DoS cap, not privacy).
 constexpr uint32_t GRAPHENE_STEALTH_RING_MAX = 32;
 
-/// Per-block blind-operation budget shared by ops 39/40/41/104/106 (see G1a §4c:
-/// 100 x ring-16 worst case ~= 690ms <= 750ms = 25% of the 3s interval).
-/// Counts every blind op (legacy + stealth) so the budget is one number.
-/// Reserved transparent/market space rides the same counter: when the budget
-/// is exhausted the block simply carries no more blind ops. Parity-pool fee
-/// subsidy and wallet defaults are G1c, explicitly NOT here.
+/// Per-block blind-operation budget shared by ops 39/40/41/104/106: at most
+/// 100 blind ops per block. This is a MARKET-SPACE reservation (a full blind
+/// block must not crowd out the transparent/market traffic patterns the rest
+/// of consensus assumes), NOT a verification-cost bound: 100 minimal G1 ops
+/// already cost ~4.5M us of verifier work against the 750000us envelope
+/// (F-01; the old "100 x ring-16 ~= 690ms" comment was the artefact that hid
+/// it). Verification work is bounded separately by
+/// GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK below; both gates bind
+/// (count AND work). Counts every blind op (legacy + stealth) so the
+/// reservation is one number. Reserved transparent/market space rides the
+/// same counter: when the budget is exhausted the block simply carries no
+/// more blind ops. Parity-pool fee subsidy and wallet defaults are G1c,
+/// explicitly NOT here.
 constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK = 100;
+
+/// Per-block verification-work budget (F-01 remediation, R9B): at most this
+/// many microseconds of proof-verification work per block, counted in
+/// integer microsecond units from the pinned per-component costs below (no
+/// floats, no wall-clock in consensus — the counters accumulate the MODEL,
+/// never a measurement). Offender shape: 8 inputs x ring-32 x dual-verify +
+/// 8 BP+ outputs + kernel = 512*1210 + 8*6322 + 2048 = 672144us, so ANY
+/// single consensus-valid op fits, while a block of them cannot. Tightening
+/// only: pre-activation there is no mainnet G1 traffic, and legacy full
+/// blocks (100 x 1-output deposits = 632200us) still fit.
+constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK = 750000;
+/// Dual-verified ring-member cost, ceil of both measured points (space-bunny
+/// g1-verifier-bench-partial.log @ e7d978c3: ring-16 verify 19337us = 1208.6
+/// per member; ring-32 verify 38665us = 1208.3 per member; single-threaded
+/// OpenSSL EC, container hardware — a LOWER bound, so ceil is the safe
+/// direction). Each stealth input pays 2 x ring.size() units (main + alt leg).
+constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER = 1210;
+/// Range-proof cost per blind output (same log: BP+ m=1 verify 6322us).
+/// Legacy V1 Borromean outputs are charged at the same rate: the fc
+/// libsecp256k1 backend is believed cheaper per proof, so this OVER-counts
+/// legacy work (fail-closed direction for the budget).
+constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF = 6322;
+/// Conservation-kernel allowance per op carrying an excess equation
+/// (stealth_transfer, turnstile_reproof). Measured 471us for 1-in/1-out
+/// (same log); 2048us is ~4x headroom for the 8-in/8-out kernel (2 EC muls
+/// + 16 EC adds), integer, documented.
+constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_KERNEL = 2048;
 
 /// Decoy eligibility: outputs younger than this are ineligible as decoys
 /// (Sybil-poisoning cost: an attacker must park outputs for a full day

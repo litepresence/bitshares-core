@@ -327,20 +327,6 @@ void stealth_count_blind_work( database& db, uint32_t work_us );
 /// validate(), so input/ring counts are unbounded at gate time — the gate
 /// still fails closed, never wraps).
 uint32_t stealth_work_for_stealth_transfer( const protocol::stealth_transfer_operation& o );
-
-/// F-08 option B (R14): is the turnstile's supplied recovery extension present?
-/// Typed accessor so the evaluator never hand-walks the flat_set.
-const protocol::turnstile_recovery_extension* turnstile_recovery_of(
-      const protocol::turnstile_reproof_operation& o );
-
-/// F-08 option B (R14): true when the turnstile may proceed.
-///   - no extension  -> the pre-B rule, unchanged: the balance must not be spent.
-///   - with extension -> consult the NULLIFIER set for BOTH supplied images.
-/// The caller MUST have checked `bal.owner == o.owner` first; the extension
-/// carries no authority of its own. Design:
-/// docs/superpowers/specs/2026-10-07-f08-option-b-design.md
-bool stealth_turnstile_recovery_ok( const database& db, bool balance_spent,
-                                    const protocol::turnstile_reproof_operation& o );
 /// Work-model units for n range-proven blind outputs (R9B): deposits,
 /// blind transfers, turnstile outputs. Pure, saturated.
 uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );

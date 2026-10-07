@@ -3684,9 +3684,21 @@ BOOST_AUTO_TEST_CASE( r9c_flat_transcript_rejects )
    }
    BOOST_CHECK_MESSAGE( flat != chained,
                         "flat and chained transcripts must diverge" );
+   // Non-vacuity, asserted rather than asserted-in-a-comment: the SAME
+   // fixture's chained proof must verify, so the rejection below is
+   // attributable to the transcript and not to a broken fixture.
+   err.clear();
+   BOOST_REQUIRE_MESSAGE( stealth_verify_bp_plus( 1, chained, { Cc }, err ),
+                          "chained control must verify: " << err );
    err.clear();
    BOOST_CHECK_MESSAGE( !stealth_verify_bp_plus( 1, flat, { Cc }, err ),
                         "flat-transcript proof must reject post-R9C" );
+   // Pin WHY it rejects. Without this the test would still pass if the flat
+   // blob were refused for an unrelated reason (blob size, bad point
+   // encoding), which would make the protocol-break pin vacuous. The chained
+   // verifier must fail the equation itself, because the flat challenges are
+   // not functions of the threaded state.
+   BOOST_CHECK_EQUAL( err, "multiexp != identity" );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( r9c_transcript_dependency_mutation )
@@ -3998,6 +4010,67 @@ BOOST_AUTO_TEST_CASE( r9b_work_budget_rejects_overwork_block )
                            != std::string::npos, e.to_detail_string() );
    }
    trx.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( r13e_ring_message_partition_is_unambiguous )
+{ try {
+   // F-03 (mimo-2.6): the G1RM ring-message preimage concatenated
+   //   ring[33n] || pseudo[33] || outputs[33m] || fee
+   // with NO canonical count for n or m, so two different partitions of the
+   // same byte string hashed identically. This is the structural ambiguity,
+   // stated as a property test rather than a captured collision:
+   //
+   //   A: ring={c0,c1},  pseudo=c2, outputs={c3}    (n=2, m=1)
+   //   B: ring={c0,c1,c2}, pseudo=c3, outputs={}    (n=3, m=0)
+   //
+   // Both preimages are the flat byte run c0|c1|c2|c3 followed by the fee.
+   // The fix prepends canonical varints n and m, so the counts are part of
+   // what is hashed and A != B. Before the fix these two hashes are equal —
+   // which is exactly the defect, so this assertion FAILS until it is fixed.
+   std::vector<std::vector<unsigned char>> pt;
+   for( int i = 0; i < 4; ++i )
+      pt.push_back( T_commit( T_scalar( "r13e-part|" + std::to_string( i ) ), 900 + i ) );
+
+   const uint8_t ver = GRAPHENE_STEALTH_PROOF_V2;
+   const asset_id_type a_self  = asset_id_type();
+   const asset_id_type a_other = asset_id_type( 1 );
+   std::vector<char> img( 33 );
+   std::copy( pt[0].begin(), pt[0].end(), img.begin() );
+   fc::ecc::commitment_type c0 = T_commitment( pt[0] );
+   fc::ecc::commitment_type c1 = T_commitment( pt[1] );
+   fc::ecc::commitment_type c2 = T_commitment( pt[2] );
+   fc::ecc::commitment_type c3 = T_commitment( pt[3] );
+   const share_type fee( 4242 );
+
+   // A: (n=2, m=1)
+   fc::sha256 ha = stealth_ring_message( ver, a_self, img,
+      { c0, c1 }, c2, { c3 }, fee );
+   // B: (n=3, m=0) — identical flat byte run c0|c1|c2|c3
+   fc::sha256 hb = stealth_ring_message( ver, a_self, img,
+      { c0, c1, c2 }, c3, {}, fee );
+   BOOST_REQUIRE_MESSAGE( ha != hb,
+      "F-03: (n=2,m=1) and (n=3,m=0) must not share a G1RM preimage; equal "
+      "hashes mean the ring/output counts are not bound into the message" );
+
+   // The counts themselves must be bound, not merely incidental: shifting a
+   // single entry between ring and outputs has to change the hash.
+   fc::sha256 h1 = stealth_ring_message( ver, a_self, img,
+      { c0, c1 }, c2, { c3 }, fee );
+   fc::sha256 h2 = stealth_ring_message( ver, a_self, img,
+      { c0, c1, c2 }, c3, { c0 }, fee );
+   BOOST_REQUIRE( h1 != h2 );
+
+   // Sanity: identical partitions still agree (the fix must not disturb the
+   // normal path), and the existing version/asset/fee bindings still hold.
+   fc::sha256 h3 = stealth_ring_message( ver, a_self, img,
+      { c0, c1 }, c2, { c3 }, fee );
+   BOOST_REQUIRE_EQUAL( h1, h3 );
+   BOOST_REQUIRE( stealth_ring_message( GRAPHENE_STEALTH_PROOF_V1, a_self, img,
+                  { c0, c1 }, c2, { c3 }, fee ) != h1 );
+   BOOST_REQUIRE( stealth_ring_message( ver, a_other, img,
+                  { c0, c1 }, c2, { c3 }, fee ) != h1 );
+   BOOST_REQUIRE( stealth_ring_message( ver, a_self, img,
+                  { c0, c1 }, c2, { c3 }, share_type( 4243 ) ) != h1 );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( r9b_work_budget_arithmetic )

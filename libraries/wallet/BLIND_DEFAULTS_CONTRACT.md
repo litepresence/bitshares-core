@@ -148,3 +148,14 @@ MUSE-R12 item, BSIP-2 §4):
   set instead of the spent flag (precise, privacy-preserving); the ring
   gate keeps the flag regardless. Until then, treat every blind receipt as
   spendable exactly once — by you, or destroyed as someone else's decoy.
+- **Scale escalation — read this before the book leaves pilot size.** The
+  disclosure above is pilot-adequate and nothing more. Below pilot size a
+  single griefing fee already costs more than the value at risk, so the
+  vector is a nuisance. At $5M+ book the same action becomes a cheap
+  denial-of-service: an attacker drains the decoy pool for a trivial
+  fraction of what they destroy, and honest spends keep paying the ring-depth
+  cost on top. Wallets MUST NOT present the ≤$20k pilot economics as a
+  general property of this protocol, and MUST NOT describe longer disclosure
+  as a remedy. Leaving pilot scale requires a pre-scale CONSENSUS change
+  (the nullifier check above), separately specified, audited and activated —
+  it cannot be substituted by any amount of warning text.

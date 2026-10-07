@@ -400,9 +400,13 @@ size_t stealth_BP_count() { return STEALTH_BP_N; }
 // ---------------------------------------------------------------------------
 // Transcript
 // ---------------------------------------------------------------------------
-// AUDIT: the G1R2 domain separates the pseudo-output-bound statement from
-// the G1R1 pre-kernel domain; equal domains would let pre-kernel signatures
-// verify as bound and vice versa.
+// AUDIT: "G1R2" is the ONLY ring-challenge domain in the tree. The G1b-2
+// pre-kernel domain "G1R1" that this label was chosen to differ from no
+// longer exists anywhere under libraries/ — `rg -n "pre-kernel" libraries/`
+// returns these comments and nothing else. So there is no sibling domain to
+// collide with; what actually prevents a pre-kernel signature from verifying
+// here is that no pre-kernel path is produced or accepted at all. The ring
+// message uses a separate domain, "G1RM" (see stealth_ring_message).
 fc::sha256 stealth_challenge( const std::string& msg32,
                               const std::vector<unsigned char>& L33,
                               const std::vector<unsigned char>& R33,
@@ -457,6 +461,19 @@ fc::sha256 stealth_ring_message( uint8_t version,
 {
    std::string pre = "G1RM";
    pre.push_back( (char)version );
+   // F-03 (mimo-2.6): bind the ring length and output count BEFORE the
+   // commitment run. Without them the flat preimage cannot be re-partitioned:
+   // ring[33n] || pseudo[33] || outputs[33m] is a fixed-stride byte string, so
+   // (n,m)=(k+1,j) and (k,j+1) collide whenever ring[k]==pseudo'. Fixed-width
+   // little-endian counts (not varints) keep the encoding canonical by
+   // construction and deterministic on every node; 64-bit so no caller can
+   // truncate a count.
+   {
+      auto nvec = fc::raw::pack( (uint64_t)ring.size() );
+      pre.append( nvec.data(), nvec.size() );
+      auto mvec = fc::raw::pack( (uint64_t)outputs.size() );
+      pre.append( mvec.data(), mvec.size() );
+   }
    auto avec = fc::raw::pack( asset );
    pre.append( avec.data(), avec.size() );
    pre.append( image33.data(), image33.size() );

@@ -73,9 +73,12 @@ size_t stealth_BP_count();
 // ---------------------------------------------------------------------------
 
 /// Ring challenge: c_{i+1} = H("G1R2" || m || L_i || R_i || M_i) mod n.
-/// The G1R2 domain marks the pseudo-output-bound statement (G1b-3 kernel);
-/// it differs from the G1b-2 G1R1 domain so pre-kernel signatures never
-/// verify under the bound verifier (and vice versa).
+/// G1R2 is the only ring-challenge domain in the tree. It was originally
+/// chosen to differ from the G1b-2 "G1R1" pre-kernel domain, but G1R1 no
+/// longer exists anywhere under libraries/ — the pre-kernel path was replaced
+/// by the bound (pseudo-output-carrying) kernel, so a pre-kernel signature
+/// cannot be produced or verified here. The ring message is a different
+/// domain entirely ("G1RM").
 fc::sha256 stealth_challenge( const std::string& msg32,
                               const std::vector<unsigned char>& L33,
                               const std::vector<unsigned char>& R33,
@@ -98,6 +101,12 @@ fc::sha256 stealth_bp_hash( const std::string& domain,
  * The pseudo-output rides the message so the spend authorization covers the
  * exact kernel input the excess equation consumes (defense in depth: the M
  * equation already binds P cryptographically).
+ *
+ * Preimage (F-03, R13-E): "G1RM" || version || LE64(n) || LE64(m) || asset ||
+ * image33 || ring[33n] || pseudo[33] || outputs[33m] || fee. The counts MUST
+ * be hashed: without them the fixed-stride commitment run is re-partitionable
+ * and (n,m)=(k+1,j) collides with (k,j+1) whenever ring[k]==pseudo'. This is a
+ * message-hash change, so it is only legal PRE-ACTIVATION.
  */
 fc::sha256 stealth_ring_message( uint8_t version,
                                  const protocol::asset_id_type& asset,

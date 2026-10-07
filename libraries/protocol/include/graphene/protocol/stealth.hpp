@@ -343,6 +343,37 @@ struct stealth_blind_output
 };
 
 /**
+ * @brief F-08 option B (R14): owner-supplied key images for turnstile recovery.
+ * @ingroup g1_stealth
+ *
+ * A ring spend flags EVERY ring member spent, so a stranger can brick anyone's
+ * stealth output as a decoy. The turnstile then refused it forever. This
+ * extension lets the OWNER recover: the chain checks the NULLIFIER set
+ * (authoritative — a real spend always registers one) instead of the spent flag
+ * (a proxy that cannot tell real from decoy).
+ *
+ * BOTH images are required, not one. During the dual-verify window the same
+ * opening yields different nullifier bytes per version (J1_v1/J2_v1 vs
+ * J1_v2/J2_v2), so a single-image form would miss a V1-registered nullifier and
+ * accept a genuine double spend. The chain cannot derive the other image: the
+ * turnstile reveals the blinds for conservation but never the amount, and both
+ * images need the amount.
+ *
+ * PRE-ACTIVATION ONLY: this changes a consensus operation's wire format.
+ * Design: docs/superpowers/specs/2026-10-07-f08-option-b-design.md
+ */
+struct turnstile_recovery_extension
+{
+   /// Key image of the old balance's opening under the V1 domain.
+   commitment_type key_image_v1;
+   /// Key image of the old balance's opening under the V2 domain.
+   commitment_type key_image_v2;
+};
+
+using turnstile_future_extensions = static_variant<void_t, turnstile_recovery_extension>;
+using turnstile_extensions_type = turnstile_future_extensions::flat_set_type;
+
+/**
  * @brief Ring-signed blind-to-blind transfer (new stealth path).
  * @ingroup g1_stealth
  *
@@ -434,7 +465,7 @@ struct turnstile_reproof_operation : public base_operation
    stealth_blind_output  new_output;
    uint8_t               new_proof_version = GRAPHENE_STEALTH_PROOF_V2;
 
-   extensions_type       extensions; ///< appended-last
+   turnstile_extensions_type extensions; ///< appended-last (F-08 option B)
 
    account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
    void            validate()const;
@@ -498,6 +529,7 @@ FC_REFLECT( graphene::protocol::parity_review_operation,
 FC_REFLECT( graphene::protocol::stealth_transfer_operation::fee_params_t, (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation::fee_params_t, (fee)(price_per_output) )
+FC_REFLECT( graphene::protocol::turnstile_recovery_extension, (key_image_v1)(key_image_v2) )
 FC_REFLECT( graphene::protocol::parity_review_operation::fee_params_t, (fee) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )

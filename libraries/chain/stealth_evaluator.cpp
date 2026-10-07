@@ -850,6 +850,48 @@ void_result freeze_blind_evaluator::do_apply( const freeze_blind_operation& o )
 // turnstile_reproof (transparent migration leg, conservation-checkable)
 // ---------------------------------------------------------------------------
 
+const protocol::turnstile_recovery_extension* turnstile_recovery_of(
+      const protocol::turnstile_reproof_operation& o )
+{
+   if( o.extensions.empty() ) return nullptr;
+   for( const auto& fx : o.extensions )
+      if( fx.which() == 1 )
+         return &fx.get<protocol::turnstile_recovery_extension>();
+   return nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// F-08 option B (R14): turnstile recovery guard
+// ---------------------------------------------------------------------------
+
+bool stealth_turnstile_recovery_ok( const database& db, bool balance_spent,
+                                    const turnstile_reproof_operation& o )
+{
+   const auto* rec = turnstile_recovery_of( o );
+   // No extension: pre-B behaviour, byte-identical, including the message.
+   if( !rec )
+      return !balance_spent;
+
+   // AUDIT: the nullifier set is AUTHORITATIVE ("this opening was really
+   // spent"); the spent flag is a proxy that cannot tell real from decoy,
+   // which is exactly why a stranger could brick anyone's output. Note the
+   // caller has already checked ownership, so an owner supplying a bogus
+   // image only ever spends their OWN balance.
+   //
+   // BOTH images are consulted. A successful ring spend registers BOTH version
+   // legs atomically (do_apply, M05/GC-07: "either leg alone would leave the
+   // other spendable"), so either image catches a real spend; requiring both
+   // is defence in depth against a future single-leg registration path. The
+   // chain cannot derive the missing image itself: the turnstile reveals the
+   // blinds for conservation but never the amount, and both images need it.
+   const auto& nul = db.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
+   std::vector<char> i1( 33 ), i2( 33 );
+   std::copy( rec->key_image_v1.begin(), rec->key_image_v1.end(), i1.begin() );
+   std::copy( rec->key_image_v2.begin(), rec->key_image_v2.end(), i2.begin() );
+   return nul.find( nullifier_key( i1 ) ) == nul.end()
+       && nul.find( nullifier_key( i2 ) ) == nul.end();
+}
+
 void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_operation& o )
 { try {
    const database& d = db();
@@ -881,8 +923,15 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( itr->asset_id == o.asset_id, "Turnstile asset mismatch" );
    FC_ASSERT( itr->owner == o.owner, "Turnstile owner mismatch" );
    // Task 5 (M04/V-04): cross-path double-spend guard — a stealth-spent
-   // commitment stays indexed as a decoy and must not migrate.
-   FC_ASSERT( !itr->spent, "Turnstile old commitment already spent (stealth transfer)" );
+   // commitment stays indexed as a decoy and must not migrate. F-08 option B:
+   // ownership is checked ABOVE, so when the owner supplies their key images
+   // the guard consults the authoritative NULLIFIER set instead of the spent
+   // proxy. Without the extension this is the original assert, unchanged.
+   if( turnstile_recovery_of( o ) )
+      FC_ASSERT( stealth_turnstile_recovery_ok( d, itr->spent, o ),
+                 "Turnstile old commitment already spent (nullifier registered)" );
+   else
+      FC_ASSERT( !itr->spent, "Turnstile old commitment already spent (stealth transfer)" );
    FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
               "Turnstile new commitment already exists" );
 

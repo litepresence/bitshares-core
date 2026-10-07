@@ -103,10 +103,27 @@ fc::sha256 stealth_bp_hash( const std::string& domain,
  * equation already binds P cryptographically).
  *
  * Preimage (F-03, R13-E): "G1RM" || version || LE64(n) || LE64(m) || asset ||
- * image33 || ring[33n] || pseudo[33] || outputs[33m] || fee. The counts MUST
- * be hashed: without them the fixed-stride commitment run is re-partitionable
- * and (n,m)=(k+1,j) collides with (k,j+1) whenever ring[k]==pseudo'. This is a
- * message-hash change, so it is only legal PRE-ACTIVATION.
+ * image33 || ring[33n] || pseudo[33] || outputs[33m] || fee.
+ *
+ * ENCODINGS — a third-party prover has no BP+ prover to copy (none exists under
+ * libraries/), so it builds this preimage from this comment alone. Spell it out:
+ *   version   1 byte
+ *   n, m      fixed-width 64-bit little-endian (fc::raw::pack of uint64_t).
+ *             NOT varints: fixed width is canonical by construction, so there
+ *             is no alternate encoding of the same count to collide with.
+ *   asset     fc::raw::pack(asset_id_type) = fc::varint encoding of the id.
+ *             VARIABLE length (1 byte for id 0, 5 bytes for 0x1fffffff) — do
+ *             not assume a fixed width here.
+ *   image33   the 33 raw bytes, uncompressed-point encoding as carried
+ *   ring[]    n x 33 raw bytes
+ *   pseudo    33 raw bytes
+ *   outputs[] m x 33 raw bytes
+ *   fee       fc::raw::pack(share_type) = 8 bytes little-endian, FIXED width
+ *
+ * The counts MUST be hashed: without them the fixed-stride commitment run is
+ * re-partitionable and (n,m)=(k+1,j) collides with (k,j+1) whenever
+ * ring[k]==pseudo'. This is a message-hash change, so it is only legal
+ * PRE-ACTIVATION.
  */
 fc::sha256 stealth_ring_message( uint8_t version,
                                  const protocol::asset_id_type& asset,

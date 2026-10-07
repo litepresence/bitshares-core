@@ -4024,8 +4024,8 @@ BOOST_AUTO_TEST_CASE( r13e_ring_message_partition_is_unambiguous )
    //   B: ring={c0,c1,c2}, pseudo=c3, outputs={}    (n=3, m=0)
    //
    // Both preimages are the flat byte run c0|c1|c2|c3 followed by the fee.
-   // The fix prepends canonical varints n and m, so the counts are part of
-   // what is hashed and A != B. Before the fix these two hashes are equal —
+   // The fix prepends fixed-width LE64 counts n and m, so the counts are part
+   // of what is hashed and A != B. Before the fix these two hashes are equal —
    // which is exactly the defect, so this assertion FAILS until it is fixed.
    std::vector<std::vector<unsigned char>> pt;
    for( int i = 0; i < 4; ++i )
@@ -4052,16 +4052,50 @@ BOOST_AUTO_TEST_CASE( r13e_ring_message_partition_is_unambiguous )
       "F-03: (n=2,m=1) and (n=3,m=0) must not share a G1RM preimage; equal "
       "hashes mean the ring/output counts are not bound into the message" );
 
-   // The counts themselves must be bound, not merely incidental: shifting a
-   // single entry between ring and outputs has to change the hash.
-   fc::sha256 h1 = stealth_ring_message( ver, a_self, img,
-      { c0, c1 }, c2, { c3 }, fee );
-   fc::sha256 h2 = stealth_ring_message( ver, a_self, img,
-      { c0, c1, c2 }, c3, { c0 }, fee );
-   BOOST_REQUIRE( h1 != h2 );
+   // Second case, chosen to be F-03-DISCRIMINATING (the first pair above is
+   // the primary RED witness; this one would ALSO have collided pre-fix, so
+   // it fails if the counts are unbound, and would NOT have separated them
+   // merely because the commitment runs differ in length):
+   //   C: ring={c0,c1},  pseudo=c2, outputs={c2}    (n=2, m=1)  -> c0|c1|c2|c2
+   //   D: ring={c0,c1,c2}, pseudo=c2, outputs={}    (n=3, m=0)  -> c0|c1|c2|c2
+   fc::sha256 hc = stealth_ring_message( ver, a_self, img,
+      { c0, c1 }, c2, { c2 }, fee );
+   fc::sha256 hd = stealth_ring_message( ver, a_self, img,
+      { c0, c1, c2 }, c2, {}, fee );
+   BOOST_REQUIRE_MESSAGE( hc != hd,
+      "F-03: a commitment repeated as pseudo-output and as output must still "
+      "separate from the same commitment placed at the end of the ring" );
+
+   // Pin WHY these two cases discriminate, so they cannot silently stop being
+   // F-03 witnesses: reconstruct the PRE-FIX preimage (no counts) and show it
+   // genuinely collided. If this ever stops holding, the cases above are no
+   // longer testing the defect they claim to test.
+   {
+      auto old_preimage = [&]( const std::vector<fc::ecc::commitment_type>& r,
+                               const fc::ecc::commitment_type& p,
+                               const std::vector<fc::ecc::commitment_type>& outs ) {
+         std::string pre = "G1RM";
+         pre.push_back( (char)ver );
+         auto av = fc::raw::pack( a_self );
+         pre.append( av.data(), av.size() );
+         pre.append( img.data(), img.size() );
+         for( const auto& c : r ) pre.append( (const char*)c.data(), 33 );
+         pre.append( (const char*)p.data(), 33 );
+         for( const auto& c : outs ) pre.append( (const char*)c.data(), 33 );
+         auto fv = fc::raw::pack( fee );
+         pre.append( fv.data(), fv.size() );
+         return fc::sha256::hash( pre.data(), pre.size() );
+      };
+      BOOST_REQUIRE_EQUAL( old_preimage( { c0, c1 }, c2, { c2 } ),
+                           old_preimage( { c0, c1, c2 }, c2, {} ) );
+      BOOST_REQUIRE( old_preimage( { c0, c1 }, c2, { c3 } )
+                      == old_preimage( { c0, c1, c2 }, c3, {} ) );
+   }
 
    // Sanity: identical partitions still agree (the fix must not disturb the
    // normal path), and the existing version/asset/fee bindings still hold.
+   fc::sha256 h1 = stealth_ring_message( ver, a_self, img,
+      { c0, c1 }, c2, { c3 }, fee );
    fc::sha256 h3 = stealth_ring_message( ver, a_self, img,
       { c0, c1 }, c2, { c3 }, fee );
    BOOST_REQUIRE_EQUAL( h1, h3 );

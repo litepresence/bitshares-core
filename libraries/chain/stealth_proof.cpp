@@ -407,6 +407,9 @@ size_t stealth_BP_count() { return STEALTH_BP_N; }
 // collide with; what actually prevents a pre-kernel signature from verifying
 // here is that no pre-kernel path is produced or accepted at all. The ring
 // message uses a separate domain, "G1RM" (see stealth_ring_message).
+// CAUTION when searching for the old label: a bare `rg G1R1 libraries/` also
+// matches libraries/egenesis/genesis.json, where the byte sequence occurs
+// inside base58-encoded witness keys. Search for "pre-kernel" instead.
 fc::sha256 stealth_challenge( const std::string& msg32,
                               const std::vector<unsigned char>& L33,
                               const std::vector<unsigned char>& R33,

@@ -702,6 +702,11 @@ bool stealth_verify_recovery_proof( const fc::ecc::commitment_type& C,
    fc::sha256 h = sha256_of( pre );
    bn c;
    scalar_from_sha( c.b, h );
+   // R15C-04 defense-in-depth: c == 0 collapses every leg to
+   // s_b*P + s_v*Q == A, dropping the (I1, I2) image binding entirely.
+   // Unreachable by grinding (2^-256), and honest proofs never hit it,
+   // so refuse fail-closed.
+   if( BN_is_zero( c.b ) ) { err = "recovery challenge-zero"; return false; }
 
    // One leg: s_b*P + s_v*Q == A + c*S, via two batched EC_POINTs_mul
    // multiexps + EC_POINT_cmp (same pattern as stealth_verify_ring).

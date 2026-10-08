@@ -889,6 +889,10 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( itr != bbi.end(), "Turnstile old commitment is not a live blinded balance" );
    FC_ASSERT( itr->asset_id == o.asset_id, "Turnstile asset mismatch" );
    FC_ASSERT( itr->owner == o.owner, "Turnstile owner mismatch" );
+   // R15B-01: cheap new-commitment uniqueness precedes the expensive
+   // recovery-proof verification (message identical; refusal order only).
+   FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
+               "Turnstile new commitment already exists" );
     // R15: two-branch spent gate. No extension = unchanged fail-closed refusal.
     // Extension = representation proof binds (I1,I2) to old_commitment's opening
     // (F08B-01 class: nothing submitter-supplied is trusted), then the BOUND
@@ -916,11 +920,11 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
        const std::vector<char> r15_i2( ext.key_image_v2.begin(), ext.key_image_v2.end() );
        FC_ASSERT( nul.find( nullifier_key( r15_i1 ) ) == nul.end(),
                   "Turnstile recovery refused: V1 image nullified (really spent)" );
-       FC_ASSERT( nul.find( nullifier_key( r15_i2 ) ) == nul.end(),
-                  "Turnstile recovery refused: V2 image nullified (really spent)" );
-    }
-   FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
-              "Turnstile new commitment already exists" );
+        FC_ASSERT( nul.find( nullifier_key( r15_i2 ) ) == nul.end(),
+                   "Turnstile recovery refused: V2 image nullified (really spent)" );
+     }
+   // (R15B-01: the new-commitment uniqueness check now runs above, before
+   // the recovery-proof verification.)
 
    // Conservation over the transparent leg: the blinds are revealed, so
    // C_old - C_new - fee*H must equal (b_old - b_new)*G. This binds the hidden

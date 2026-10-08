@@ -6841,4 +6841,325 @@ BOOST_AUTO_TEST_CASE( r15_recovery_fee_exact )
    BOOST_CHECK( bbi.find( t.new_output.commitment ) != bbi.end() );
 } FC_CAPTURE_AND_RETHROW() }
 
+// R15C-01: substituting a SINGLE image under the otherwise-true proof
+// refuses, in both directions. The Fiat-Shamir challenge binds BOTH images
+// (C || I1 || I2 sit in the preimage), so any substitution changes c and
+// the C leg — checked first — deterministically mismatches. Both legs are
+// exercised so a verifier checking only one image leg cannot pass this
+// case; the gate pins the proof-layer message in both directions.
+BOOST_AUTO_TEST_CASE( r15_recovery_single_image_substitution_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-s1", 16, true );
+   const size_t s = 3, f = 7;
+   const uint64_t aid = core.get_id().instance.value;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   // Foreign images: another pool member's valid on-curve images.
+   fc::ecc::commitment_type fI1, fI2; std::vector<char> fproof;
+   T_r15_prove_true( p, f, core.get_id(), fI1, fI2, fproof );
+   BOOST_REQUIRE( fI1 != I1 );
+   BOOST_REQUIRE( fI2 != I2 );
+
+   // Direct verifier: true I1 + foreign I2 under the true proof refuses.
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], I1, fI2,
+                            proof, aid, err ), "true-I1/foreign-I2 must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "recovery equation C mismatch" ) != std::string::npos, err );
+   }
+   // Direct verifier: foreign I1 + true I2 under the true proof refuses.
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], fI1, I2,
+                            proof, aid, err ), "foreign-I1/true-I2 must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "recovery equation C mismatch" ) != std::string::npos, err );
+   }
+
+   // Gate: true I1 + foreign I2 refuses with the proof-layer message.
+   {
+      turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-s1-bn-a" );
+      T_set_recovery_v2( t, I1, fI2, proof );
+      set_expiration( db, trx );
+      trx.operations = { t };
+      sign( trx, p.keys[s] );
+      try {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "true-I1/foreign-I2 recovery must be refused" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "does not verify" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   // Gate: foreign I1 + true I2 refuses with the proof-layer message.
+   {
+      turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-s1-bn-b" );
+      T_set_recovery_v2( t, fI1, I2, proof );
+      set_expiration( db, trx );
+      trx.operations = { t };
+      sign( trx, p.keys[s] );
+      try {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "foreign-I1/true-I2 recovery must be refused" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "does not verify" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear_signatures(); trx.operations.clear();
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// R15C-02 (plus R15B-02 tag pin): the recovery extension survives binary
+// round-trip with stable variant tags. Tag order is consensus (P2P fork risk
+// on reorder), so it is pinned both as constructed (void_t=0, recovery=1)
+// and on the wire, and the payload round-trips byte-identical.
+BOOST_AUTO_TEST_CASE( r15_recovery_wire_round_trip )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-w", 16, true );
+   const size_t s = 3;
+
+   // Tag-order pin: void_t is tag 0, the recovery extension is tag 1.
+   {
+      turnstile_extensions_v2 v0{ graphene::protocol::void_t{} };
+      BOOST_CHECK( v0.which() == 0 );
+      fc::ecc::commitment_type I1x, I2x; std::vector<char> px;
+      T_r15_prove_true( p, s, core.get_id(), I1x, I2x, px );
+      turnstile_extensions_v2 v1( turnstile_recovery_v2_extension{ I1x, I2x, px } );
+      BOOST_CHECK( v1.which() == 1 );
+   }
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-w-bn" );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_set_recovery_v2( t, I1, I2, proof );
+   BOOST_REQUIRE( t.extensions.size() == 1 );
+   BOOST_CHECK( t.extensions.begin()->which() == 1 );
+
+   const std::vector<char> bytes = fc::raw::pack( t );
+   const turnstile_reproof_operation back =
+      fc::raw::unpack<turnstile_reproof_operation>( bytes );
+   BOOST_REQUIRE( back.extensions.size() == 1 );
+   BOOST_CHECK( back.extensions.begin()->which() == 1 );
+   const auto& e = back.extensions.begin()->get<turnstile_recovery_v2_extension>();
+   BOOST_CHECK_MESSAGE( e.key_image_v1 == I1, "I1 must survive round-trip" );
+   BOOST_CHECK_MESSAGE( e.key_image_v2 == I2, "I2 must survive round-trip" );
+   BOOST_CHECK_MESSAGE( e.recovery_proof.proof_bytes == proof,
+                        "proof_bytes must survive round-trip" );
+   // Re-pack stability: serialization is a fixed point (no P2P drift).
+   BOOST_CHECK_MESSAGE( fc::raw::pack( back ) == bytes,
+                        "re-pack must be byte-identical" );
+} FC_CAPTURE_AND_RETHROW() }
+
+// R15C-03/R15B-02: >1 extensions refuse at the gate (size pinned before any
+// proof work), with the gate-layer message.
+BOOST_AUTO_TEST_CASE( r15_recovery_oversize_extension_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ov", 16, true );
+   const size_t s = 3;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ov-bn" );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_set_recovery_v2( t, I1, I2, proof );
+   t.extensions.insert( turnstile_extensions_v2( graphene::protocol::void_t() ) );
+   BOOST_REQUIRE( t.extensions.size() == 2 );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "more than one recovery extension must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "Turnstile recovery takes one extension" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// R15C-03/R15B-02: a singleton void_t entry refuses — the gate's throwing
+// get<> rejects the wrong variant type before any image is read.
+BOOST_AUTO_TEST_CASE( r15_recovery_wrongtype_extension_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-wt", 16, true );
+   const size_t s = 3;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-wt-bn" );
+   t.extensions.insert( turnstile_extensions_v2( graphene::protocol::void_t() ) );
+   BOOST_REQUIRE( t.extensions.size() == 1 );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "a void_t recovery extension must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "does not contain a value of type" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// R15C-03: empty proof_bytes refuse — the direct verifier names the shape
+// refusal, the gate pins its 163-byte message.
+BOOST_AUTO_TEST_CASE( r15_recovery_empty_proof_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ep", 16, true );
+   const size_t s = 3;
+   const uint64_t aid = core.get_id().instance.value;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   const std::vector<char> empty;
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            empty, aid, err ), "empty proof must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "recovery proof size" ) != std::string::npos, err );
+   }
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ep-bn" );
+   T_set_recovery_v2( t, I1, I2, empty );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "empty recovery proof must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "Turnstile recovery proof must be 163 bytes" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// R15C-03: non-canonical s_v refuses. The existing suite mutates only s_b;
+// this is the s_v half (bytes [131,163) set past the curve order). The
+// direct verifier names s_v; the gate pins the proof-layer message.
+BOOST_AUTO_TEST_CASE( r15_recovery_noncanonical_sv_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-sv", 16, true );
+   const size_t s = 3;
+   const uint64_t aid = core.get_id().instance.value;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   fc::ecc::commitment_type I1, I2; std::vector<char> good;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   BOOST_REQUIRE( good.size() == 163 );
+   std::vector<char> bad = good;
+   for( int i = 131; i < 163; ++i ) bad[i] = (char)0xFF;
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            bad, aid, err ), "non-canonical s_v must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "recovery s_v not canonical" ) != std::string::npos, err );
+   }
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-sv-bn" );
+   T_set_recovery_v2( t, I1, I2, bad );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "non-canonical s_v recovery must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "does not verify" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// R15C-04: the verifier rejects c == 0 fail-closed (defense-in-depth;
+// grinding c == 0 is ~2^-256, so it is not constructible in-test). This
+// case pins the honest path instead: the true proof verifies (the guard
+// did not misfire) and its recomputed challenge is nonzero (the guard's
+// post-condition holds on real inputs).
+BOOST_AUTO_TEST_CASE( r15_recovery_challenge_zero_guard )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-c0", 16, true );
+   const size_t s = 3;
+   const uint64_t aid = core.get_id().instance.value;
+
+   fc::ecc::commitment_type I1, I2; std::vector<char> good;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   BOOST_REQUIRE( good.size() == 163 );
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            good, aid, err ), "honest proof must verify: " << err );
+   }
+
+   // Recompute c exactly as stealth_verify_recovery_proof does and pin
+   // nonzero: domain || C || I1 || I2 || A_C || A_1 || A_2 || aid_le64 || C.
+   std::vector<unsigned char> Cvec( p.commits[s].begin(), p.commits[s].end() );
+   std::vector<unsigned char> I1v( I1.begin(), I1.end() ), I2v( I2.begin(), I2.end() );
+   std::vector<unsigned char> aC( good.begin(), good.begin() + 33 ),
+                              a1( good.begin() + 33, good.begin() + 66 ),
+                              a2( good.begin() + 66, good.begin() + 99 );
+   std::string pre = "BTS-STEALTH-RECOVERY-v1";
+   pre.append( (const char*)Cvec.data(), 33 );
+   pre.append( (const char*)I1v.data(), 33 );
+   pre.append( (const char*)I2v.data(), 33 );
+   pre.append( (const char*)aC.data(), 33 );
+   pre.append( (const char*)a1.data(), 33 );
+   pre.append( (const char*)a2.data(), 33 );
+   for( int i = 0; i < 8; ++i ) pre.push_back( (char)( aid >> (8*i) ) );
+   pre.append( (const char*)Cvec.data(), 33 );
+   fc::sha256 h = fc::sha256::hash( pre.c_str(), (uint32_t)pre.size() );
+   BIGNUM* c = BN_new();
+   BOOST_REQUIRE( c != nullptr );
+   BN_bin2bn( (const unsigned char*)h.data(), 32, c );
+   BN_mod( c, c, T_order(), T_ctx() );
+   BOOST_CHECK_MESSAGE( !BN_is_zero( c ), "honest challenge must be nonzero" );
+   BN_free( c );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

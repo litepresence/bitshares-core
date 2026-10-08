@@ -408,6 +408,38 @@ struct freeze_blind_operation : public base_operation
 };
 
 /**
+ * @brief R15 recovery proof: Sigma proof of equal representation binding
+ * both version-domain key images to the old commitment's opening.
+ * @ingroup g1_stealth
+ * Layout: A_C(33) || A_1(33) || A_2(33) || s_b(32) || s_v(32) = 163 bytes.
+ * Design: docs/superpowers/specs/2026-10-08-f08-representation-proof-recovery-design.md
+ *
+ * NOTE: declared BEFORE turnstile_reproof_operation (R14 pattern) — the op's
+ * extension-set field names this alias, so it must precede the op. The brief's
+ * "after the op" location cannot compile; names/fields match the brief verbatim
+ * otherwise.
+ */
+struct stealth_recovery_proof
+{
+   std::vector<char> proof_bytes; ///< 163-byte canonical encoding above
+   stealth_recovery_proof() = default;
+   stealth_recovery_proof( const std::vector<char>& b ) : proof_bytes( b ) {}
+   stealth_recovery_proof( std::vector<char>&& b ) : proof_bytes( std::move(b) ) {}
+};
+/**
+ * @brief R15 recovery extension: bound images + proof. The chain derives
+ * NOTHING from trust — verification binds I1/I2 to old_commitment's opening
+ * (F08B-01 class closed by construction), then nullifier-checks them.
+ */
+struct turnstile_recovery_v2_extension
+{
+   commitment_type       key_image_v1; ///< bound by proof, then nullifier-checked
+   commitment_type       key_image_v2; ///< bound by proof, then nullifier-checked
+   stealth_recovery_proof recovery_proof;
+};
+using turnstile_extensions_v2 = static_variant<void_t, turnstile_recovery_v2_extension>;
+
+/**
  * @brief Turnstile migration of a V1 blind balance to a newer proof version.
  * @ingroup g1_stealth
  *
@@ -434,7 +466,7 @@ struct turnstile_reproof_operation : public base_operation
    stealth_blind_output  new_output;
    uint8_t               new_proof_version = GRAPHENE_STEALTH_PROOF_V2;
 
-   extensions_type       extensions; ///< appended-last
+   turnstile_extensions_v2::flat_set_type extensions; ///< appended-last (R15 recovery set; R14 pattern)
 
    account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
    void            validate()const;
@@ -493,6 +525,8 @@ FC_REFLECT( graphene::protocol::freeze_blind_operation,
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation,
             (fee)(asset_id)(old_commitment)(owner)(old_blind)(new_blind)
             (new_output)(new_proof_version)(extensions) )
+FC_REFLECT( graphene::protocol::stealth_recovery_proof, (proof_bytes) )
+FC_REFLECT( graphene::protocol::turnstile_recovery_v2_extension, (key_image_v1)(key_image_v2)(recovery_proof) )
 FC_REFLECT( graphene::protocol::parity_review_operation,
             (fee)(voter)(kind)(note)(extensions) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation::fee_params_t, (fee)(price_per_output) )

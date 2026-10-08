@@ -641,6 +641,106 @@ fail:
 }
 
 // ---------------------------------------------------------------------------
+// R15 representation proof (F-08 recovery; spec
+// 2026-10-08-f08-representation-proof-recovery-design.md §3.2)
+// ---------------------------------------------------------------------------
+
+bool stealth_verify_recovery_proof( const fc::ecc::commitment_type& C,
+                                    const fc::ecc::commitment_type& I1,
+                                    const fc::ecc::commitment_type& I2,
+                                    const std::vector<char>& proof,
+                                    uint64_t asset_id, std::string& err )
+{
+   // ---- wire parse (exact 163B: A_C || A_1 || A_2 || s_b || s_v) ----
+   if( proof.size() != 163 ) { err = "recovery proof size"; return false; }
+   bn_ctx ctx;
+   const EC_GROUP* g = secp_group();
+   std::vector<unsigned char> aC( proof.begin(), proof.begin() + 33 ),
+                              a1( proof.begin() + 33, proof.begin() + 66 ),
+                              a2( proof.begin() + 66, proof.begin() + 99 );
+   pt AC( g ), A1( g ), A2( g );
+   if( !point_from_bytes( AC.p, aC ) ) { err = "bad recovery A_C"; return false; }
+   if( !point_from_bytes( A1.p, a1 ) ) { err = "bad recovery A_1"; return false; }
+   if( !point_from_bytes( A2.p, a2 ) ) { err = "bad recovery A_2"; return false; }
+   bn sb, sv;
+   if( !scalar_parse_strict( sb.b, (const unsigned char*)proof.data() + 99, 32 ) )
+      { err = "recovery s_b not canonical"; return false; }
+   if( !scalar_parse_strict( sv.b, (const unsigned char*)proof.data() + 131, 32 ) )
+      { err = "recovery s_v not canonical"; return false; }
+
+   // ---- statement points (rejects bad/off-curve/identity) ----
+   pt Cp( g ), I1p( g ), I2p( g );
+   if( !point_from_commit( Cp.p, C ) ) { err = "bad recovery C"; return false; }
+   if( !point_from_commit( I1p.p, I1 ) ) { err = "bad recovery I1"; return false; }
+   if( !point_from_commit( I2p.p, I2 ) ) { err = "bad recovery I2"; return false; }
+
+   // ---- generators (same derivation as the ring path) ----
+   pt Hp( g ), J1_1( g ), J2_1( g ), J1_2( g ), J2_2( g );
+   auto Hb = stealth_H_point();
+   auto J1_1b = stealth_J1_point( GRAPHENE_STEALTH_PROOF_V1 );
+   auto J2_1b = stealth_J2_point( GRAPHENE_STEALTH_PROOF_V1 );
+   auto J1_2b = stealth_J1_point( GRAPHENE_STEALTH_PROOF_V2 );
+   auto J2_2b = stealth_J2_point( GRAPHENE_STEALTH_PROOF_V2 );
+   if( !point_from_bytes( Hp.p, Hb ) ||
+       !point_from_bytes( J1_1.p, J1_1b ) || !point_from_bytes( J2_1.p, J2_1b ) ||
+       !point_from_bytes( J1_2.p, J1_2b ) || !point_from_bytes( J2_2.p, J2_2b ) )
+      { err = "generators unavailable"; return false; }
+   const EC_POINT* G = EC_GROUP_get0_generator( g );
+
+   // ---- Fiat-Shamir challenge: byte order matches T_prove_recovery exactly:
+   // "BTS-STEALTH-RECOVERY-v1" || C || I1 || I2 || A_C || A_1 || A_2
+   //   || asset_id_le64 || C (trailing C binds the statement's commitment) ----
+   std::string pre = "BTS-STEALTH-RECOVERY-v1";
+   pre.append( (const char*)C.data(), 33 );
+   pre.append( (const char*)I1.data(), 33 );
+   pre.append( (const char*)I2.data(), 33 );
+   pre.append( (const char*)aC.data(), 33 );
+   pre.append( (const char*)a1.data(), 33 );
+   pre.append( (const char*)a2.data(), 33 );
+   for( int i = 0; i < 8; ++i ) pre.push_back( (char)( asset_id >> (8*i) ) );
+   pre.append( (const char*)C.data(), 33 );
+   fc::sha256 h = sha256_of( pre );
+   bn c;
+   scalar_from_sha( c.b, h );
+
+   // One leg: s_b*P + s_v*Q == A + c*S, via two batched EC_POINTs_mul
+   // multiexps + EC_POINT_cmp (same pattern as stealth_verify_ring).
+   auto check_leg = [&]( const EC_POINT* P, const EC_POINT* Q,
+                         const EC_POINT* A, const EC_POINT* S ) -> bool {
+      pt LHS( g ), RHS( g );
+      {
+         const EC_POINT* pts[2] = { P, Q };
+         const BIGNUM* scs[2] = { sb.b, sv.b };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+         if( EC_POINTs_mul( (EC_GROUP*)g, LHS.p, nullptr, 2,
+                            pts, scs, ctx.c ) != 1 )
+            return false;
+#pragma GCC diagnostic pop
+      }
+      {
+         const EC_POINT* pts[2] = { A, S };
+         const BIGNUM* scs[2] = { BN_value_one(), c.b };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+         if( EC_POINTs_mul( (EC_GROUP*)g, RHS.p, nullptr, 2,
+                            pts, scs, ctx.c ) != 1 )
+            return false;
+#pragma GCC diagnostic pop
+      }
+      return EC_POINT_cmp( g, LHS.p, RHS.p, ctx.c ) == 0;
+   };
+
+   if( !check_leg( G, Hp.p, AC.p, Cp.p ) )
+      { err = "recovery equation C mismatch"; return false; }
+   if( !check_leg( J1_1.p, J2_1.p, A1.p, I1p.p ) )
+      { err = "recovery equation I1 mismatch"; return false; }
+   if( !check_leg( J1_2.p, J2_2.p, A2.p, I2p.p ) )
+      { err = "recovery equation I2 mismatch"; return false; }
+   return true;
+}
+
+// ---------------------------------------------------------------------------
 // Conservation kernel
 // ---------------------------------------------------------------------------
 

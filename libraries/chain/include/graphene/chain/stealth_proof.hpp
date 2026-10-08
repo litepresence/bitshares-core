@@ -170,9 +170,17 @@ fc::sha256 stealth_ring_message( uint8_t version,
  * Returns false (never throws) on any malformed input; err describes why.
  */
 bool stealth_verify_ring( uint8_t version,
-                          const protocol::stealth_ring_input& in,
-                          const std::string& msg32,
-                          std::string& err );
+                           const protocol::stealth_ring_input& in,
+                           const std::string& msg32,
+                           std::string& err );
+
+/**
+ * R15: verify Sigma representation proof binding (I1,I2) to C's opening.
+ * Deterministic; no secrets; strict canonical parsing throughout.
+ */
+bool stealth_verify_recovery_proof( const fc::ecc::commitment_type& C,
+   const fc::ecc::commitment_type& I1, const fc::ecc::commitment_type& I2,
+   const std::vector<char>& proof, uint64_t asset_id, std::string& err );
 
 /**
  * Conservation kernel (Mimblewimble-style):

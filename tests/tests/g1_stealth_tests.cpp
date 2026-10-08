@@ -6523,9 +6523,32 @@ BOOST_AUTO_TEST_CASE( r15_recovery_malformed_proof_refuses )
       BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
       trx.clear_signatures(); trx.operations.clear();
    }
-   // NOTE for Task 2 / audit: the compressed-identity encoding (if any is
-   // accepted by the point parser) must likewise refuse — covered by strict
-   // parsing, pinned here as a requirement, not a vector.
+   // (d) identity-adjacent encoding: 33 zero bytes (0x00 first byte =
+   // invalid compressed prefix). SEC-1 compressed identity is 1 byte 0x00,
+   // so no 33-byte compressed identity exists; 33x0x00 must fail prefix
+   // validation in point_from_bytes — this vector pins that. Fed as A_C
+   // and once as I1; both must refuse.
+   {
+      std::vector<char> bad = good;
+      for( int i = 0; i < 33; ++i ) bad[i] = 0;
+      turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-m-bn-d1" );
+      T_set_recovery_v2( t, I1, I2, bad );
+      set_expiration( db, trx );
+      trx.operations = { t };
+      sign( trx, p.keys[s] );
+      BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   {
+      fc::ecc::commitment_type zero_I1; zero_I1.fill( 0 );
+      turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-m-bn-d2" );
+      T_set_recovery_v2( t, zero_I1, I2, good );
+      set_expiration( db, trx );
+      trx.operations = { t };
+      sign( trx, p.keys[s] );
+      BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+      trx.clear_signatures(); trx.operations.clear();
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

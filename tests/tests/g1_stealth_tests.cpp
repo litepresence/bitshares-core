@@ -6045,9 +6045,12 @@ BOOST_AUTO_TEST_CASE( blind_wallet_defaults )
 /// Test-only representation prover (wallets own proving; consensus never
 /// proves). Mirrors T_prove_ring structure. Random nonces via BN_rand_range
 /// are test-only and fine here (no consensus path touches this function).
-static void T_prove_recovery( const std::vector<unsigned char>& C_bytes,
+/// The domain parameter exists so Task 5 can pin domain separation: only the
+/// exact consensus domain verifies; any other tag must refuse.
+static void T_prove_recovery_with_domain( const std::vector<unsigned char>& C_bytes,
                               const BIGNUM* b, uint64_t v,
                               asset_id_type asset,
+                              const std::string& domain,
                               fc::ecc::commitment_type& I1_out,
                               fc::ecc::commitment_type& I2_out,
                               std::vector<char>& proof_out )
@@ -6095,9 +6098,9 @@ static void T_prove_recovery( const std::vector<unsigned char>& C_bytes,
                               A1c = T_compress( A1 ),
                               A2c = T_compress( A2 );
 
-   // c = scalar( sha256( domain || C || I1 || I2 || A_C || A_1 || A_2
-   //                      || asset_id_le64 || C ) ).
-   std::string pre = "BTS-STEALTH-RECOVERY-v1";
+    // c = scalar( sha256( domain || C || I1 || I2 || A_C || A_1 || A_2
+    //                      || asset_id_le64 || C ) ).
+    std::string pre = domain;
    pre.append( (const char*)C_bytes.data(), 33 );
    pre.append( (const char*)I1c.data(), 33 );
    pre.append( (const char*)I2c.data(), 33 );
@@ -6139,6 +6142,18 @@ static void T_prove_recovery( const std::vector<unsigned char>& C_bytes,
    BN_free( c ); BN_free( sb ); BN_free( sv ); BN_free( t );
 }
 
+/// Consensus-domain wrapper: every honest proof uses this tag.
+static void T_prove_recovery( const std::vector<unsigned char>& C_bytes,
+                              const BIGNUM* b, uint64_t v,
+                              asset_id_type asset,
+                              fc::ecc::commitment_type& I1_out,
+                              fc::ecc::commitment_type& I2_out,
+                              std::vector<char>& proof_out )
+{
+   T_prove_recovery_with_domain( C_bytes, b, v, asset,
+      "BTS-STEALTH-RECOVERY-v1", I1_out, I2_out, proof_out );
+}
+
 /// Attach the (not-yet-existing) R15 recovery extension. Aggregate field
 /// order { I1, I2, proof } is the wire contract Task 2 must implement.
 static void T_set_recovery_v2( turnstile_reproof_operation& t,
@@ -6161,12 +6176,17 @@ static void T_r15_mark_decoyed( database& db, const fc::ecc::commitment_type& c 
    db.modify( *itr, []( blinded_balance_object& b ) { b.spent = true; } );
 }
 
-/// Turnstile for pool output #s: 1000 -> 990 new blind output + 10 fee.
-static turnstile_reproof_operation T_r15_turnstile( const asset_object& core,
+/// Turnstile for pool output #s with an explicit (new_value, fee) split:
+/// 1000 -> new_value new blind output + fee. The default (990, 10) is the
+/// standard split; Task 5 uses a non-default fee to prove the supply delta
+/// tracks the op fee exactly rather than a hardcoded constant.
+static turnstile_reproof_operation T_r15_turnstile_value( const asset_object& core,
                                                     const t5_pool& p, size_t s,
-                                                    const std::string& tag )
+                                                    const std::string& tag,
+                                                    int64_t new_value, int64_t fee )
 {
    BOOST_REQUIRE( p.each == 1000 );
+   BOOST_REQUIRE( new_value + fee == p.each );
    turnstile_reproof_operation t;
    t.asset_id = core.get_id();
    t.old_commitment = p.commits[s];
@@ -6176,16 +6196,24 @@ static turnstile_reproof_operation T_r15_turnstile( const asset_object& core,
    auto Bn = T_blind_secret( tag );
    {
       BIGNUM* bnn = T_bn( Bn );
-      no.commitment = T_commitment( T_commit( bnn, 990 ) );
+      no.commitment = T_commitment( T_commit( bnn, (uint64_t)new_value ) );
       BN_free( bnn );
    }
-   no.range_proof = T_bp_prove( no.commitment, Bn, 990 );
+   no.range_proof = T_bp_prove( no.commitment, Bn, (uint64_t)new_value );
    no.owner = p.owners[s];
    t.new_output = no;
-   t.fee = core.amount( 10 );
+   t.fee = core.amount( fee );
    t.old_blind = p.blinds[s];
    t.new_blind = Bn;
    return t;
+}
+
+/// Turnstile for pool output #s: 1000 -> 990 new blind output + 10 fee.
+static turnstile_reproof_operation T_r15_turnstile( const asset_object& core,
+                                                    const t5_pool& p, size_t s,
+                                                    const std::string& tag )
+{
+   return T_r15_turnstile_value( core, p, s, tag, 990, 10 );
 }
 
 /// Prove the true opening of pool output #s over its own commitment bytes.
@@ -6549,6 +6577,268 @@ BOOST_AUTO_TEST_CASE( r15_recovery_malformed_proof_refuses )
       BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
       trx.clear_signatures(); trx.operations.clear();
    }
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 5 (R15 hardening): off-curve I1 refuses. The statement images are
+// consensus-parsed (point_from_commit rejects bad/off-curve/identity), so a
+// well-sized but off-curve I1 must fail before any equation runs. Positive
+// control: the true I1 verifies against the same (C, I2, proof).
+BOOST_AUTO_TEST_CASE( r15_recovery_offcurve_I1_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-i1", 16, true );
+   const size_t s = 11;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   fc::ecc::commitment_type I1, I2; std::vector<char> good;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   const uint64_t aid = core.get_id().instance.value;
+
+   // Positive control: true material verifies at the consensus entry point.
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            good, aid, err ), "true I1 must verify: " << err );
+   }
+
+   // Tweak I1's last byte until compressed-point decode fails (same search as
+   // the off-curve A_1 vector above — half of x values are non-residues).
+   std::vector<unsigned char> off( I1.begin(), I1.end() );
+   bool found = false;
+   for( int k = 1; k < 256 && !found; ++k )
+   {
+      off[32] = (unsigned char)( (unsigned char)I1[32] ^ (unsigned char)k );
+      EC_POINT* q = EC_POINT_new( T_group() );
+      if( EC_POINT_oct2point( T_group(), q, off.data(), 33, nullptr ) != 1 )
+         found = true;
+      EC_POINT_free( q );
+   }
+   BOOST_REQUIRE_MESSAGE( found, "test must find an off-curve tweak of I1" );
+   fc::ecc::commitment_type bad_I1;
+   std::copy( off.begin(), off.end(), bad_I1.begin() );
+
+   // Negative control: off-curve I1 fails the direct verifier (parse level).
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], bad_I1,
+                            I2, good, aid, err ), "off-curve I1 must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "bad recovery I1" ) != std::string::npos, err );
+   }
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-i1-bn" );
+   T_set_recovery_v2( t, bad_I1, I2, good );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "off-curve I1 must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "does not verify" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 5 (R15 hardening): a proof built over the wrong Fiat-Shamir domain tag
+// refuses. The responses satisfy the WRONG challenge, so the consensus
+// equations (recomputed under "BTS-STEALTH-RECOVERY-v1") mismatch — this pins
+// domain separation against cross-protocol replay. The wrong-domain proof is
+// well-formed (parse-level clean: the refusal names an equation mismatch),
+// proving the guard exercised is the domain binding, not shape.
+BOOST_AUTO_TEST_CASE( r15_recovery_wrong_domain_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-wd", 16, true );
+   const size_t s = 12;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   fc::ecc::commitment_type I1, I2; std::vector<char> good;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   const uint64_t aid = core.get_id().instance.value;
+
+   // Positive control: consensus-domain proof verifies.
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            good, aid, err ), "consensus-domain proof must verify: " << err );
+   }
+
+   // Same opening, wrong domain tag: images identical (domain-independent),
+   // responses bound to the wrong challenge.
+   fc::ecc::commitment_type wI1, wI2; std::vector<char> wrong;
+   {
+      BIGNUM* bb = T_bn( p.blinds[s] );
+      std::vector<unsigned char> Cvec( p.commits[s].begin(), p.commits[s].end() );
+      T_prove_recovery_with_domain( Cvec, bb, (uint64_t)p.each, core.get_id(),
+         "BTS-STEALTH-RECOVERY-v0", wI1, wI2, wrong );
+      BN_free( bb );
+   }
+   BOOST_REQUIRE( wI1 == I1 );
+   BOOST_REQUIRE( wI2 == I2 );
+   BOOST_REQUIRE( wrong.size() == 163 );
+
+   // Negative control: wrong-domain proof parses but mismatches equations.
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            wrong, aid, err ), "wrong-domain proof must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "mismatch" ) != std::string::npos, err );
+   }
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-wd-bn" );
+   T_set_recovery_v2( t, I1, I2, wrong );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "wrong-domain proof must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "does not verify" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 5 (R15 hardening): asset_id context mismatch refuses. The challenge
+// binds asset_id_le64, so a proof minted for asset 7 does not transfer to the
+// CORE op — this pins op-context binding (no cross-asset proof replay).
+// Positive control: the same proof verifies under its own asset context.
+BOOST_AUTO_TEST_CASE( r15_recovery_asset_context_mismatch_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ax", 16, true );
+   const size_t s = 13;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+
+   // Prove the TRUE opening but under a foreign asset context (7 is only
+   // hashed into the challenge — it need not exist on-chain).
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   {
+      BIGNUM* bb = T_bn( p.blinds[s] );
+      std::vector<unsigned char> Cvec( p.commits[s].begin(), p.commits[s].end() );
+      T_prove_recovery( Cvec, bb, (uint64_t)p.each, asset_id_type( 7 ), I1, I2, proof );
+      BN_free( bb );
+   }
+   const uint64_t core_aid = core.get_id().instance.value;
+
+   // Positive control: verifies under its own (foreign) asset context...
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            proof, 7, err ), "proof must verify in its own context: " << err );
+   }
+   // ...but not under the op's CORE context (equation-level mismatch).
+   {
+      std::string err;
+      BOOST_CHECK_MESSAGE( !stealth_verify_recovery_proof( p.commits[s], I1, I2,
+                            proof, core_aid, err ), "cross-asset proof must not verify" );
+      BOOST_CHECK_MESSAGE( err.find( "mismatch" ) != std::string::npos, err );
+   }
+
+   // Submitted against the CORE op: owner/asset legs pass (op is CORE), the
+   // proof leg must refuse.
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ax-bn" );
+   BOOST_REQUIRE( t.asset_id == core.get_id() );
+   T_set_recovery_v2( t, I1, I2, proof );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "cross-asset proof must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "does not verify" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 5 (R15 hardening): recovery of a NEVER-SPENT output with the extension
+// succeeds. The binding path (owner + valid proof + nullifier-absent) is a
+// SUPERSET of the plain path (owner + nullifier-absent + !spent): it must
+// accept every output the plain path accepts, proving the extension is a
+// bound alternative, not a bypass that only fires on spent outputs.
+BOOST_AUTO_TEST_CASE( r15_recovery_never_spent_with_extension_succeeds )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ns", 16, true );
+   const size_t s = 14;
+
+   // NOTE: no T_r15_mark_decoyed — the output is live and unspent.
+   const int64_t live = t5_supply( db, core );
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ns-bn" );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_set_recovery_v2( t, I1, I2, proof );
+
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   generate_block();
+   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( p.commits[s] ) == bbi.end() ); // old consumed
+   BOOST_CHECK( bbi.find( t.new_output.commitment ) != bbi.end() ); // fresh V2 output exists
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live - 10 ); // fee leg identical
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 5 (R15 hardening): fee accounting is exact — confidential_supply delta
+// == -fee for a NON-DEFAULT fee (37 over a 963 output), proving the delta
+// tracks the op fee rather than a hardcoded constant. Conservation
+// (1000 == 963 + 37) is enforced by the excess kernel; the supply leg is
+// enforced by do_apply (supply -= fee).
+BOOST_AUTO_TEST_CASE( r15_recovery_fee_exact )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-fe", 16, true );
+   const size_t s = 15;
+
+   T_r15_mark_decoyed( db, p.commits[s] );
+   const int64_t live = t5_supply( db, core );
+
+   const int64_t fee = 37, out_v = 963;
+   turnstile_reproof_operation t = T_r15_turnstile_value( core, p, s,
+      "r15-fe-bn", out_v, fee );
+   BOOST_REQUIRE_EQUAL( t.fee.amount.value, fee );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_set_recovery_v2( t, I1, I2, proof );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   generate_block();
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live - fee );
+   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( t.new_output.commitment ) != bbi.end() );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

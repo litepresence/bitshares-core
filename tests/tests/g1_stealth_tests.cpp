@@ -7162,4 +7162,96 @@ BOOST_AUTO_TEST_CASE( r15_recovery_challenge_zero_guard )
    BN_free( c );
 } FC_CAPTURE_AND_RETHROW() }
 
+// AUDIT FINDING (pool-floor counter double-decrement on the recovery path):
+// the documented invariant of stealth_pool_count_add is "unspent
+// metadata-bearing balances per asset" (spent-but-retained outputs do NOT
+// count). The ring spend already consumed every member it transitioned
+// !spent->spent, so a GRIEFED (spent) balance has LEFT the unspent set long
+// before recovery. The turnstile must therefore NOT decrement again for it:
+// the migrated output joins the set 1:1, so the recovery nets exactly +1 and
+// the counter keeps matching the chain's true unspent metadata-bearing set.
+// Nothing pinned the counter through recovery before (the only other suite
+// reference seeds it by hand), which is exactly the gap that let a double
+// decrement ship: the counter drifted -1 per recovery (understating floor
+// depth, and approaching the "Blind pool counter underflow" assert that
+// would hard-fail a legitimate — and NOT floor-gated — recovery).
+BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-pc", 16, true );
+   const size_t s    = 3; // grief TARGET: consumed as a DECOY of the ring below
+   const size_t real = 7; // honest real input of the grief ring (different owner key)
+
+   // Chain-derived truth: metadata-bearing unspent blinded balances of this
+   // asset (the set the counter is supposed to MEASURE, never assume).
+   auto true_depth = [&]() {
+      uint32_t n = 0;
+      const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      for( const auto& b : bbi )
+         if( b.asset_id == core.get_id() && b.created_block != 0 && !b.spent )
+            ++n;
+      return n;
+   };
+   auto counter = [&]() {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto itr = st.unspent_blind_count.find( core.get_id() );
+      return ( itr == st.unspent_blind_count.end() ) ? uint32_t( 0 ) : itr->second;
+   };
+
+   // 16 fresh (unspent, metadata-bearing) outputs: counter == truth.
+   BOOST_REQUIRE_EQUAL( counter(), 16u );
+   BOOST_REQUIRE_EQUAL( counter(), true_depth() );
+
+   // Grief for real: a genuine ring spend whose ring carries the target as a
+   // DECOY. The target is spent-flagged by the whole-ring write, but its key
+   // images are NOT nullified (only the real input's are), so the R15
+   // representation proof below is still admissible.
+   stealth_transfer_operation stop = t5_build_spend( core, p, real,
+      GRAPHENE_STEALTH_PROOF_V2, "r15-pc-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   {
+      const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      auto itr = bbi.find( p.commits[s] );
+      BOOST_REQUIRE( itr != bbi.end() );
+      BOOST_REQUIRE( itr->spent ); // griefed: spent, images never nullified
+   }
+   // Every fresh member left the set once; only the two new outputs joined.
+   const uint32_t after_grief = counter();
+   BOOST_REQUIRE_EQUAL( counter(), true_depth() );
+   const int64_t supply_before_recovery = t5_supply( db, core );
+
+   // Recovery of the griefed balance (R15 extension path).
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-pc-bn" );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_set_recovery_v2( t, I1, I2, proof );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   generate_block();
+
+   // Recovery succeeded: old balance consumed, migrated output live/unspent.
+   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( p.commits[s] ) == bbi.end() );
+   auto ntr = bbi.find( t.new_output.commitment );
+   BOOST_REQUIRE( ntr != bbi.end() );
+   BOOST_CHECK( !ntr->spent );
+   // Conservation: recovery moved value by the fee only.
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), supply_before_recovery - t.fee.amount.value );
+
+   // THE PIN: the migrated output replaces the consumed one 1:1 — exactly one
+   // increment across the recovery, no second decrement for a balance that
+   // already left the unspent set at ring-spend time.
+   BOOST_CHECK_EQUAL( counter(), after_grief + 1u );
+   BOOST_CHECK_EQUAL( counter(), true_depth() );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

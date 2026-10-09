@@ -1023,6 +1023,17 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    auto itr = bbi.find( o.old_commitment );
    FC_ASSERT( itr != bbi.end() );
    const bool had_metadata = ( itr->created_block != 0 );
+   // AUDIT (pool-floor counter double-decrement on the recovery path): the
+   // counter measures the UNSPENT metadata-bearing set, so a balance that is
+   // already spent is not in it — the ring spend consumed it at its
+   // !spent->spent transition (stealth_pool_count_add at the ring member
+   // loop). Capture spent BEFORE the remove, or the removal would make the
+   // flag unreadable and the decrement below would fire twice per griefed
+   // balance (drift -1 per recovery: understated floor depth, eventually
+   // tripping the underflow assert on a legitimate, non-floor-gated
+   // recovery). Non-recovery turnstiles take the !spent branch and still
+   // decrement exactly as before.
+   const bool was_spent = itr->spent;
    db().remove( *itr );
    db().create<blinded_balance_object>( [&]( blinded_balance_object& b ) {
       b.asset_id = o.asset_id;
@@ -1037,10 +1048,12 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
       FC_ASSERT( obj.confidential_supply >= 0 );
    } );
    stealth_shadow_add( db(), o.asset_id, share_type( -o.fee.amount.value ) );
-   // Pool floor counter: the consumed balance leaves the unspent set only
-   // if it was counted (grandfathered balances never were); the migrated
-   // output always joins it.
-   if( had_metadata )
+   // Pool floor counter: the consumed balance leaves the unspent set only if
+   // it was counted (grandfathered balances never were) AND it was still in
+   // it (a griefed/spent balance already left at ring-spend time — see the
+   // AUDIT note above); the migrated output always joins it, so recovery
+   // nets exactly +1 and the counter keeps tracking the real set.
+   if( had_metadata && !was_spent )
       stealth_pool_count_add( db(), o.asset_id, -1 );
    stealth_pool_count_add( db(), o.asset_id, 1 );
    // G1c: parity subsidy settlement + skew histogram (one new output).

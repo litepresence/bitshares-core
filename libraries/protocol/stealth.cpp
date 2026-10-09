@@ -123,6 +123,29 @@ void turnstile_reproof_operation::validate()const
    FC_ASSERT( !new_output.range_proof.empty(), "range proof required" );
    FC_ASSERT( new_output.range_proof.size() <= 8192, "range proof too large" );
    FC_ASSERT( !owner.is_impossible() );
+   // A1 (mimo-2.6 re-audit): wire-level shape gate, mirroring the evaluator's
+   // recovery-path checks (stealth_evaluator.cpp:917-922) so malformed
+   // extensions are refused at validate() with identical pinned messages
+   // instead of being type-dispatched further down the path. Size 0 stays
+   // legal (plain turnstile; recovery is only required once the old
+   // commitment is unknown at evaluation time).
+   FC_ASSERT( extensions.size() <= 1, "Turnstile recovery takes one extension" );
+   if( extensions.size() == 1 )
+   {
+      const auto& ext = *extensions.begin();
+      // which()-guarded so a wrong type produces a clean FC_ASSERT with the
+      // same wording get<> uses, never a raw static_variant throw.
+      FC_ASSERT( ext.which() == 1,
+                 "static_variant does not contain a value of type ${t}",
+                 ("t", "turnstile_recovery_v2_extension") );
+      FC_ASSERT( ext.get<turnstile_recovery_v2_extension>().recovery_proof.proof_bytes.size()
+                    == 163,
+                 "Turnstile recovery proof must be 163 bytes" );
+   }
+   // A2 (validate leg): the STORED owner (do_apply writes it to the migrated
+   // blind balance) must be possible — same class of guard as the old-owner
+   // check above, applied to the authority that will actually be persisted.
+   FC_ASSERT( !new_output.owner.is_impossible(), "Migrated output owner is impossible" );
 }
 
 share_type turnstile_reproof_operation::calculate_fee( const fee_params_t& k )const

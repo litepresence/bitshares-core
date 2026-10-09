@@ -882,6 +882,16 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( !o.new_output.range_proof.empty(), "Migrated output must carry a range proof" );
    for( const auto& a : o.owner.account_auths )
       a.first( d );
+   // A2 (mimo-2.6 re-audit): the STORED migrated owner must resolve too —
+   // do_apply writes b.owner = o.new_output.owner, so an unresolvable
+   // account reference would brick the output's spend path. Same loop every
+   // other blind-output path runs (confidential_evaluator.cpp:46-47; the
+   // outputs loop at stealth_evaluator.cpp:518-524). Divergence from
+   // o.owner is legitimate (owner-controlled re-key; the OLD authority
+   // signed the op), so this validates the new owner in isolation — it is
+   // never forced equal to the old one.
+   for( const auto& a : o.new_output.owner.account_auths )
+      a.first( d );
 
    // The spent balance must exist with a matching owner.
    const auto& bbi = d.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
@@ -889,10 +899,10 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( itr != bbi.end(), "Turnstile old commitment is not a live blinded balance" );
    FC_ASSERT( itr->asset_id == o.asset_id, "Turnstile asset mismatch" );
    FC_ASSERT( itr->owner == o.owner, "Turnstile owner mismatch" );
-   // R15B-01: cheap new-commitment uniqueness precedes the expensive
-   // recovery-proof verification (message identical; refusal order only).
-   FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
-               "Turnstile new commitment already exists" );
+    // R15B-01: cheap new-commitment uniqueness precedes the expensive
+    // recovery-proof verification (message identical; refusal order only).
+    FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
+                "Turnstile new commitment already exists" );
     // R15: two-branch spent gate. No extension = unchanged fail-closed refusal.
     // Extension = representation proof binds (I1,I2) to old_commitment's opening
     // (F08B-01 class: nothing submitter-supplied is trusted), then the BOUND

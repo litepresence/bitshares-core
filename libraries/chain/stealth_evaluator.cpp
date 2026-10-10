@@ -97,6 +97,11 @@ bool parity_fee_share_opted_in( const database& db, asset_id_type recv_asset )
    return opt.valid() && *opt;
 }
 
+} // anonymous namespace
+
+// Exported to the test suite via stealth_evaluator.hpp (Task 3): the single
+// definition of the nullifier identity — tests must link this, never
+// duplicate the sha256 hash.
 fc::sha256 nullifier_key( const std::vector<char>& image33 )
 {
    // AUDIT: nullifier identity IS sha256(image) — double-spend detection
@@ -104,8 +109,6 @@ fc::sha256 nullifier_key( const std::vector<char>& image33 )
    // domain change here breaks cross-path linkage silently.
    return fc::sha256::hash( image33.data(), image33.size() );
 }
-
-} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // Introspection
@@ -445,7 +448,7 @@ void stealth_shadow_add( database& db, asset_id_type asset, share_type delta )
    } );
 }
 
-/// Pool-count bookkeeping: post-STEALTH only. Counts unspent
+/// Pool-count bookkeeping: post-STEALTH only. Counts LIVE
 /// metadata-bearing balances per asset (decoy candidates for the floor).
 void stealth_pool_count_add( database& db, asset_id_type asset, int32_t delta )
 {
@@ -615,13 +618,9 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
          FC_ASSERT( itr != bbi.end(), "Ring member is not a live blinded balance" );
          FC_ASSERT( itr->asset_id == o.asset_id, "Ring member asset mismatch" );
          FC_ASSERT( itr->created_block != 0, "Grandfathered outputs are not decoy-eligible" );
-         // Task 6 (R7 C-02): spent outputs are excluded from ring
-         // membership. The spent flag is chain-visible, so a spent member
-         // could never be the real input — admitting one would shrink the
-         // plausible-real set to the unspent remainder (privacy leak, not
-         // just hygiene). Decoys are one-time-use: every ring member of a
-         // successful spend is spent-flagged in do_apply below.
-         FC_ASSERT( !itr->spent, "Ring member already spent (spent outputs are not decoy-eligible)" );
+         // DELETED (Task 3, nullifier migration). The spent flag is retired;
+         // nullified outputs are decoy-eligible again so the anonymity set
+         // grows with usage instead of draining.
          heights.push_back( itr->created_block );
          times.push_back( itr->created_time );
       }
@@ -703,11 +702,11 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
    // it by conservation), the evaluator framework debits it after do_apply.
    db().adjust_balance( o.fee_payer(), o.fee );
    // Record nullifiers (double-spend set) and create the new blinded balances
-   // with decoy metadata. The real spent inputs stay in the index but are
-   // spent-FLAGGED (Task 6, R7 C-02): spent flags are chain-visible, so
-   // flagged outputs are excluded from future rings AND from the explicit
-   // legs — re-spend is blocked by the nullifier set and the membership
-   // gate alike.
+   // with decoy metadata. Task 3 (nullifier migration): the real spent
+   // inputs stay in the index AND stay decoy-eligible — re-spend is blocked
+   // by the nullifier set alone. Griefing by decoy-inclusion is impossible:
+   // a ring spend nullifies only the real input's images (a decoy's opening
+   // is unknown to the spender), so the decoy owner spends normally.
    // Task 5 (M05/GC-07): BOTH version legs are nullified (the opening was
    // authorized under both; either leg alone would leave the other spendable).
    const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
@@ -726,52 +725,13 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
          n.created = db().head_block_time();
       } );
    }
-     // Task 6 (R7 C-02 + Task 5 concern #1): mark every ring member spent,
-     // and consume each newly-spent member from the pool-depth counter. The
-     // evaluator cannot identify the real input without breaking ring
-     // privacy, so the whole anonymity set is consumed: the explicit legs
-     // (op40/op41/op85) refuse spent commitments, closing stealth->legacy
-     // re-spend, AND future rings refuse them (spent flags are public, so
-     // they could never be plausible-real decoys). AVAILABILITY COST
-     // (accepted): each ring spend consumes ring-size fresh outputs from
-     // the counter — the floor gate then halts spends honestly when the
-     // pool runs thin, instead of overstating fresh depth. The counter is
-     // decremented exactly on the !spent -> spent transition (a member
-     // shared across inputs consumes once), so it always equals the
-     // metadata-bearing unspent set the floor gate means to measure.
-     // R9C F-08 (mimo-2.6 HIGH — disclosure only, semantics UNCHANGED
-     // here): whole-ring flagging renders EVERY member — including
-     // strangers' decoyed outputs — unspendable on ALL legs (ring
-     // membership above, op40/op41, op85 turnstile; the flag is never
-     // cleared), and anyone can target-destroy any stealth output for one
-     // fee since membership requires no ownership. Disclosed in BSIP-2 §4
-     // (6th MUSE-R12 item) + the wallet contract (BLIND_DEFAULTS_CONTRACT
-     // §9) with pilot pool-burn rates, and pinned (not fixed) by
-     // r9c_decoy_owner_explicit_spend_refused. Design-owner option (NOT
-     // implemented): explicit legs check owner-supplied key images against
-     // the nullifier set instead of the spent flag — precise and
-     // privacy-preserving — while the ring gate keeps the flag for C-02
-     // hygiene. No production wallet ring-builder exists in-tree, so this
-     // materializes when the spec'd sampler ships, if ever.
-    {
-       const auto& bbi = db().get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-       for( const auto& in : o.inputs )
-       for( const auto& c : in.ring )
-       {
-          auto itr = bbi.find( c );
-          FC_ASSERT( itr != bbi.end() );
-          if( !itr->spent )
-          {
-             db().modify( *itr, []( blinded_balance_object& b ) { b.spent = true; } );
-             // Every ring member is metadata-bearing by the membership rule
-             // in do_evaluate, so every transition leaves the unspent set
-             // (this replaces the old inputs.size() decrement, which
-             // overstated fresh depth by counting retained-spent members
-             // as candidates).
-             stealth_pool_count_add( db(), o.asset_id, -1 );
-          }
-       }
-    }
+     // Task 3 (nullifier migration): the whole-ring spent write is retired
+      // (griefing section above). A ring spend removes nothing from the
+      // index, so it must not reduce the live count either — only the new
+      // outputs join it below.
+      // DELETED: for every ring member: db().modify( *itr,
+      //   []( blinded_balance_object& b ) { b.spent = true; } );
+      // DELETED: the coupled stealth_pool_count_add( db(), o.asset_id, -1 ).
    for( const auto& out : o.outputs )
    {
       db().create<blinded_balance_object>( [&]( blinded_balance_object& b ) {
@@ -789,8 +749,8 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
       FC_ASSERT( obj.confidential_supply >= 0 );
    } );
    stealth_shadow_add( db(), o.asset_id, share_type( -o.fee.amount.value ) );
-   // Pool floor counter: the ring-consumption above already removed every
-   // newly-spent member from the unspent set; only the new outputs join it.
+   // Pool floor counter (live-set semantics, Task 3): the ring removes
+   // nothing from the index, so only the new outputs join the count.
    stealth_pool_count_add( db(), o.asset_id, (int32_t)o.outputs.size() );
    // G1c: settle the parity subsidy (pool debit + issuer credit + cap unit),
    // and count the new outputs in the skew histogram window.
@@ -1046,17 +1006,12 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    auto itr = bbi.find( o.old_commitment );
    FC_ASSERT( itr != bbi.end() );
    const bool had_metadata = ( itr->created_block != 0 );
-   // AUDIT (pool-floor counter double-decrement on the recovery path): the
-   // counter measures the UNSPENT metadata-bearing set, so a balance that is
-   // already spent is not in it — the ring spend consumed it at its
-   // !spent->spent transition (stealth_pool_count_add at the ring member
-   // loop). Capture spent BEFORE the remove, or the removal would make the
-   // flag unreadable and the decrement below would fire twice per griefed
-   // balance (drift -1 per recovery: understated floor depth, eventually
-   // tripping the underflow assert on a legitimate, non-floor-gated
-   // recovery). Non-recovery turnstiles take the !spent branch and still
-   // decrement exactly as before.
-   const bool was_spent = itr->spent;
+   // Task 3 (nullifier migration, reverts 113202ea): the counter measures
+   // the LIVE metadata-bearing set, so every consumed metadata-bearing
+   // balance leaves it exactly once — unconditionally on had_metadata. The
+   // reverted guard (had_metadata && !was_spent) was correct under unspent
+   // semantics (a griefed balance had already left at ring-spend time) and
+   // is wrong under live semantics (it never left — same drift, inverted).
    db().remove( *itr );
    db().create<blinded_balance_object>( [&]( blinded_balance_object& b ) {
       b.asset_id = o.asset_id;
@@ -1071,12 +1026,10 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
       FC_ASSERT( obj.confidential_supply >= 0 );
    } );
    stealth_shadow_add( db(), o.asset_id, share_type( -o.fee.amount.value ) );
-   // Pool floor counter: the consumed balance leaves the unspent set only if
-   // it was counted (grandfathered balances never were) AND it was still in
-   // it (a griefed/spent balance already left at ring-spend time — see the
-   // AUDIT note above); the migrated output always joins it, so recovery
-   // nets exactly +1 and the counter keeps tracking the real set.
-   if( had_metadata && !was_spent )
+   // Pool floor counter: the consumed balance leaves the live set only if
+   // it was counted (grandfathered balances never were); the migrated
+   // output always joins it.
+   if( had_metadata )
       stealth_pool_count_add( db(), o.asset_id, -1 );
    stealth_pool_count_add( db(), o.asset_id, 1 );
    // G1c: parity subsidy settlement + skew histogram (one new output).

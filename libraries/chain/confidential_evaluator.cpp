@@ -130,9 +130,12 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       FC_ASSERT( itr != cidx.end() );
       FC_ASSERT( itr->asset_id == o.fee.asset_id );
       FC_ASSERT( itr->owner == in.owner );
-      // Task 5 (M04/V-04): stealth-spent commitments stay indexed as decoys;
-      // the explicit legs must refuse them (cross-path double-spend guard).
-      FC_ASSERT( !itr->spent, "Commitment already spent (stealth transfer)" );
+      // Task 3 (nullifier migration): post-fork stealth outputs spend ONLY
+      // via op108, which nullifier-checks the opening. Grandfathered
+      // (pre-fork, created_block == 0) balances keep using this legacy leg
+      // exactly as before. Evaluator-only (no wire change: replay-safe).
+      FC_ASSERT( itr->created_block == 0,
+                 "Post-fork stealth output must be spent via stealth_explicit_spend" );
    }
    // G1: shared blind gate; V1 spends are spend-only-via-turnstile past sunset.
    if( HARDFORK_STEALTH_PASSED( d.head_block_time() ) )
@@ -155,7 +158,7 @@ void_result transfer_from_blind_evaluator::do_apply( const transfer_from_blind_o
    db().adjust_balance( o.to, o.amount );
    const auto& bbi = db().get_index_type<blinded_balance_index>();
    const auto& cidx = bbi.indices().get<by_commitment>();
-   int32_t spent_counted = 0; // metadata-bearing balances leaving the unspent set
+   int32_t spent_counted = 0; // metadata-bearing balances leaving the live set
    for( const auto& in : o.inputs )
    {
       auto itr = cidx.find( in.commitment );
@@ -204,8 +207,12 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       GRAPHENE_ASSERT( itr != cidx.end(), blind_transfer_unknown_commitment, "", ("commitment",in.commitment) );
       FC_ASSERT( itr->asset_id == o.fee.asset_id );
       FC_ASSERT( itr->owner == in.owner );
-      // Task 5 (M04/V-04): cross-path double-spend guard (see op41 above).
-      FC_ASSERT( !itr->spent, "Commitment already spent (stealth transfer)" );
+      // Task 3 (nullifier migration): post-fork stealth outputs spend ONLY
+      // via op108, which nullifier-checks the opening. Grandfathered
+      // (pre-fork, created_block == 0) balances keep using this legacy leg
+      // exactly as before. Evaluator-only (no wire change: replay-safe).
+      FC_ASSERT( itr->created_block == 0,
+                 "Post-fork stealth output must be spent via stealth_explicit_spend" );
    }
    // G1: shared blind gate (closes the live gap uniformly), V1 sunset, and
    // sound range proofs on every output (a mismatched-but-well-formed proof

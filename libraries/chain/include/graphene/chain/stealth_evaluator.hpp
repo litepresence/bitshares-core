@@ -24,8 +24,9 @@ namespace graphene { namespace chain {
  * `stealth_check_blind_gate` (hardfork active, not halted, block budget left)
  * and increments the per-block counter in apply only. Rings are consensus
  * floor 16 (TARGET everywhere, thin or deep; pool halt below 11, warning
- * below 22), cap 32; members must be unspent (spent outputs are excluded —
- * their flags are public, so they could never be plausible-real decoys);
+ * below 22), cap 32; nullified members stay decoy-eligible (the nullifier
+ * set is keyed by sha256(image), uncomputable without the opening, so a
+ * nullified decoy is indistinguishable from a live one);
  * decoys must be 24h old with skew guards.
  * Markets, margin, pools, settlement, vaults, and oracles stay transparent —
  * blindness never touches price discovery or coverage accounting.
@@ -134,9 +135,13 @@ bool stealth_asset_halted( const database& db, asset_id_type asset );
 uint32_t stealth_tripwire_fire_block( const database& db );
 /// Blind ops counted against the cap in the currently-pending block.
 uint32_t stealth_blind_count_this_block( const database& db );
-/// Unspent decoy-candidate blinded balances of an asset (O(1) cached
+/// Live decoy-candidate blinded balances of an asset (O(1) cached
 /// counter, maintained on insert/spend by the blind evaluators; see
-/// stealth_pool_count_add). Spent-but-retained outputs do not count.
+/// stealth_pool_count_add). Task 3 (nullifier migration): live-set
+/// semantics — every indexed metadata-bearing balance counts, including
+/// nullified ones (they stay decoy-eligible, so the set grows with usage).
+/// Historical field name `unspent_blind_count` retained (object reflection
+/// + API surface); the misnomer is documented, not renamed.
 uint32_t stealth_pool_depth( const database& db, asset_id_type asset );
 /// Vote freshness: voted_at within the 24h expiry at head-block time.
 bool stealth_vote_fresh( fc::time_point_sec now, fc::time_point_sec voted_at );
@@ -355,6 +360,11 @@ uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );
 /// kernel + per-input recovery proofs + per-output range proofs. Pure,
 /// saturated. Called from do_evaluate (gate) and do_apply (accounting).
 uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o );
+/// Nullifier identity: sha256 over the 33-byte key image (single definition
+/// in stealth_evaluator.cpp; moved out of the anonymous namespace in Task 3
+/// so the test suite links the exact production identity — never duplicated).
+/// Takes vector<char>, NOT commitment_type; callers convert explicitly.
+fc::sha256 nullifier_key( const std::vector<char>& image33 );
 /// Verification-work units counted against the budget in the
 /// currently-pending block (0 pre-fork or on rollover).
 uint32_t stealth_blind_work_this_block( const database& db );
@@ -363,14 +373,13 @@ uint32_t stealth_blind_work_this_block( const database& db );
 void stealth_shadow_add( database& db, asset_id_type asset, share_type delta );
 /**
  * Post-STEALTH only (pre-fork no-op): maintain the per-asset count of
- * unspent metadata-bearing blinded balances backing stealth_pool_depth.
+ * LIVE metadata-bearing blinded balances backing stealth_pool_depth.
  * Positive delta on creation of a balance WITH post-fork metadata;
  * negative delta on consumption of such a balance (callers check
  * created_block != 0 for explicitly-consumed balances, which may be
- * grandfathered). Stealth spends consume every newly-spent ring member
- * (the whole anonymity set is spent-flagged — the real input is
- * unidentifiable — and flagged outputs leave the unspent set) and create
- * outputs.size() new ones. Bounded: zero entries are removed.
+ * grandfathered). Task 3 (nullifier migration): ring spends remove nothing
+ * from the index, so they add outputs.size() only — nullified outputs stay
+ * indexed and decoy-eligible. Bounded: zero entries are removed.
  */
 void stealth_pool_count_add( database& db, asset_id_type asset, int32_t delta );
 /**

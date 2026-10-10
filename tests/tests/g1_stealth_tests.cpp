@@ -837,6 +837,46 @@ static void g1c_seed_pool( database& db, account_id_type payer,
    db.pay_market_fees( nullptr, core, core.amount( fee ), true, core.amount( fee ) );
 }
 
+// Task 3 (flag retirement): give a post-fork-created balance grandfathered
+// status so the legacy op40/op41 legs still accept it. Mirrors exactly what
+// a pre-fork balance looks like: created_block == 0 (never counted — back
+// out the +1 the post-fork create added). Supply/shadow untouched, so
+// verify_asset_supplies and the shadow reconciliation cannot see it.
+static void T_grandfather( database& db, asset_id_type asset,
+                           const fc::ecc::commitment_type& c )
+{
+   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   auto itr = bbi.find( c );
+   BOOST_REQUIRE( itr != bbi.end() );
+   db.modify( *itr, []( blinded_balance_object& b ) { b.created_block = 0; } );
+   stealth_pool_count_add( db, asset, -1 );
+}
+
+// Task 3 (flag retirement): replacement for T_r15_mark_decoyed. The flag
+// conflated "was a ring member" with "was really spent"; under nullifier
+// semantics those are distinct, and the recovery guard is about the second.
+// Inserts the nullifiers the real spend would have left (both version legs,
+// mirroring the ring do_apply write). Callers pass the commitment's REAL
+// I1/I2 from the proof helper. Links the single production identity
+// (nullifier_key, stealth_evaluator.hpp) — never duplicated.
+static void T_r15_nullify( database& db,
+                           const fc::ecc::commitment_type& I1,
+                           const fc::ecc::commitment_type& I2 )
+{
+   // nullifier_key takes const std::vector<char>&; commitment_type does NOT
+   // convert implicitly. Convert explicitly, mirroring the turnstile.
+   const std::vector<char> i1( I1.begin(), I1.end() );
+   const std::vector<char> i2( I2.begin(), I2.end() );
+   db.create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
+      n.key_image = nullifier_key( i1 ); n.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+      n.created = db.head_block_time();
+   } );
+   db.create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
+      n.key_image = nullifier_key( i2 ); n.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+      n.created = db.head_block_time();
+   } );
+}
+
 BOOST_FIXTURE_TEST_SUITE( g1_stealth_tests, database_fixture )
 
 /// V-03 (audit-round-2): every stealth operation must be refused before the
@@ -1331,6 +1371,9 @@ BOOST_AUTO_TEST_CASE( negative_mint_rejected )
       trx.operations = { fund };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear();
+      // Task 3: the forgery below must reach the sound-range-proof gate, not
+      // the legacy-leg created_block gate — grandfather the funded input.
+      T_grandfather( db, core.get_id(), fo.commitment );
       generate_block();
    }
 
@@ -1674,25 +1717,21 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
       BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
       trx.clear();
    }
-     // ...and the new outputs exist as blinded balances.
-     // Task 6 (R7 C-02): the real spent input is NOT removed — the evaluator
-     // cannot identify it without breaking ring privacy (and removing all
-     // members would steal honest decoys). Spent inputs stay indexed but are
-     // spent-FLAGGED: re-spend is blocked by the nullifier set (proven by the
-     // double-spend rejection above) AND by the ring-membership exclusion
-     // below, so flagged outputs are never decoy-eligible again.
-     {
-        const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-        BOOST_CHECK( idx.find( so1.commitment ) != idx.end() );
-        BOOST_CHECK( idx.find( so2.commitment ) != idx.end() );
-        BOOST_CHECK( idx.find( commits[s] ) != idx.end() ); // retained (spent-flagged)
-     }
-     // Honest pool counter (Task 6 rework): 16 funded, all 16 ring members
-     // consumed (real input unidentifiable — the whole set is spent-flagged
-     // and excluded from future rings), 2 outputs created -> 2 fresh
-     // decoy candidates. Each ring spend consumes its ring: availability
-     // yields to privacy, and the floor gate (not this counter) enforces it.
-     BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 2u );
+      // ...and the new outputs exist as blinded balances.
+      // Task 3 (nullifier migration): every member stays indexed AND stays
+      // decoy-eligible — re-spend is blocked by the nullifier set alone
+      // (proven by the double-spend rejection above), while the anonymity
+      // set grows with usage instead of draining.
+      {
+         const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+         BOOST_CHECK( idx.find( so1.commitment ) != idx.end() );
+         BOOST_CHECK( idx.find( so2.commitment ) != idx.end() );
+         BOOST_CHECK( idx.find( commits[s] ) != idx.end() ); // retained (still live)
+      }
+      // Live-set pool counter (Task 3): 16 funded, the ring removes nothing,
+      // 2 outputs created -> 18 decoy candidates. Each ring spend grows the
+      // set; the floor gate (not this counter) enforces thin-pool halts.
+      BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
     BN_free( bs ); BN_free( bprime );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -1914,11 +1953,12 @@ BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
 // ---------------------------------------------------------------------------
 // Task 5 (M04/M05/SUP-03/GC-07/V-04/V-05): G1 double-spend closure.
 // A stealth-spent commitment stays indexed (future decoy), so the legacy
-// explicit-spend legs must refuse it (spent flag); one opening must not spend
-// once per proof version (dual-image linkage); amount/fee asset confusion
-// must fail in consensus, not just relay validate. The supply identity
-// (confidential_supply == test-ledger sum over live unspent blinds, all
-// values test-known) pins that refused re-spends move nothing.
+// explicit-spend legs must refuse it (created_block gate: post-fork spends
+// route to op108); one opening must not spend once per proof version
+// (dual-image linkage); amount/fee asset confusion must fail in consensus,
+// not just relay validate. The supply identity (confidential_supply ==
+// test-ledger sum over live blinds, all values test-known) pins that
+// refused re-spends move nothing.
 // ---------------------------------------------------------------------------
 
 // Funded pool with KNOWN blinds AND owner keys, so every spend leg (ring +
@@ -2106,7 +2146,15 @@ BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_withdrawal )
    set_expiration( db, trx );
    trx.operations = { x };
    sign( trx, p.keys[s] );
-   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception ); // ...consensus refuses
+   // Task 3: post-fork balances refuse the legacy legs — the ring spend left
+   // this commitment indexed with metadata, so op41 routes to op108.
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "post-fork transfer_from_blind must be routed to stealth_explicit_spend" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "stealth_explicit_spend" )
+                           != std::string::npos, e.to_detail_string() );
+   }
    trx.clear_signatures(); trx.operations.clear();
    // Supply identity: the refused re-spend moved nothing; the test ledger
    // (15 live deposits + 600 + 390) matches the chain counter.
@@ -2147,7 +2195,16 @@ BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_blind_transfer )
    set_expiration( db, trx );
    trx.operations = { btx };
    sign( trx, p.keys[s] );
-   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+   // Task 3: post-fork balances refuse the legacy legs (spec §6 item 3 keeps
+   // the refusal, item 5 changes the reason) — the ring spend left this
+   // commitment indexed with metadata, so op40 routes to op108.
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "post-fork blind_transfer must be routed to stealth_explicit_spend" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "stealth_explicit_spend" )
+                           != std::string::npos, e.to_detail_string() );
+   }
    trx.clear_signatures(); trx.operations.clear();
    BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
    BOOST_CHECK_EQUAL( t5_supply( db, core ), 15 * p.each + 600 + 390 );
@@ -2215,11 +2272,9 @@ BOOST_AUTO_TEST_CASE( cross_version_double_spend_rejected )
    generate_block();
    BOOST_REQUIRE_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
    // Same opening, fresh outputs, now versioned V2: the V1 leg already
-   // nullified this opening's alternate image AND spent-flagged every ring
-   // member (Task 6 exclusion), so consensus must refuse — at the spent
-   // ring-member gate (before the nullifier check). Top the pool back over
-   // the floor first (the honest spend consumed its ring: 16 - 16 + 2), with
-   // cost-path deposits and a direct pool top-up — no time jump, so no
+   // nullified this opening's images, so consensus must refuse — at the
+   // nullifier gate. Top the pool up with cost-path deposits and a direct
+   // pool top-up (the honest spend grew it 16 + 2) — no time jump, so no
    // maintenance recomputes burn-critical under the attempt.
    for( int i = 0; i < 14; ++i )
    {
@@ -2286,12 +2341,12 @@ BOOST_AUTO_TEST_CASE( v2_stealth_transfer_end_to_end )
       db.get_index_type<stealth_nullifier_index>().indices().size();
    BOOST_CHECK_EQUAL( nul_after - nul_before, 2u ); // main + alternate image
    const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-   BOOST_CHECK( idx.find( v2.outputs[0].commitment ) != idx.end() );
-   BOOST_CHECK( idx.find( v2.outputs[1].commitment ) != idx.end() );
-    BOOST_CHECK( idx.find( p.commits[5] ) != idx.end() ); // retained (spent-flagged)
-    // Honest pool counter (Task 6 rework): 16 funded, all 16 ring members
-    // consumed, 2 outputs created -> 2 fresh decoy candidates.
-    BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 2u );
+    BOOST_CHECK( idx.find( v2.outputs[0].commitment ) != idx.end() );
+    BOOST_CHECK( idx.find( v2.outputs[1].commitment ) != idx.end() );
+     BOOST_CHECK( idx.find( p.commits[5] ) != idx.end() ); // retained (still live)
+     // Live-set pool counter (Task 3): 16 funded, the ring removes nothing,
+     // 2 outputs created -> 18 decoy candidates.
+     BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
    BOOST_CHECK_EQUAL( t5_supply( db, core ), p.funded_total - 10 );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -2508,6 +2563,9 @@ BOOST_AUTO_TEST_CASE( transfer_from_blind_asset_gate_consensus )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      // Task 3: the control leg below must reach the asset gate (and apply),
+      // not the legacy-leg created_block gate — grandfather the balance.
+      T_grandfather( db, core.get_id(), o.commitment );
       c = o.commitment;
       own = o.owner;
    }
@@ -3035,6 +3093,10 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
          BOOST_REQUIRE( itr != idx.end() );
          target = itr->get_id();
          target_c = o.commitment;
+         // Task 3: the legacy-spend rejection below must fire at the V1
+         // sunset gate, not the legacy-leg created_block gate — the turnstile
+         // migration after it exercises the same balance on the R15 path.
+         T_grandfather( db, core.get_id(), o.commitment );
       }
    }
    // Pass the V1 sunset.
@@ -3790,13 +3852,12 @@ BOOST_AUTO_TEST_CASE( r9c_v1_verify_cost_pin )
    BOOST_TEST_MESSAGE( "V1 BORROMEAN VERIFY " << best << "us (1 proof, best of 21)" );
 } FC_CAPTURE_AND_RETHROW() }
 
-// R9C F-08 disclosure pin (mimo-2.6 F-08 HIGH): ring spends consume
-// their decoys — after spend A consumes ring R, the DECOY owner's
-// explicit spend refuses via the spent flag. This documents CURRENT
-// semantics (any output can be rendered unspendable by a third party
-// that includes it as a decoy); it does NOT change them. The
-// nullifier-set redesign stays a design-owner option (recorded at
-// stealth_transfer_evaluator::do_apply, never implemented here).
+// R9C F-08 disclosure pin (mimo-2.6 F-08 HIGH), Task 3 update: the
+// whole-ring spent flag is RETIRED, so decoys stay live — the decoy owner's
+// op108 spend succeeds (pinned by
+// g1_decoyed_output_remains_spendable_after_flag_retirement). What this case
+// still pins: the LEGACY op41 leg refuses her post-fork output (created_block
+// gate), routing her to op108.
 BOOST_AUTO_TEST_CASE( r9c_decoy_owner_explicit_spend_refused )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -3817,7 +3878,10 @@ BOOST_AUTO_TEST_CASE( r9c_decoy_owner_explicit_spend_refused )
    const int64_t live = t5_supply( db, core );
    // The decoy owner spends her OWN output explicitly (owner-signed,
    // conservation-exact: 990 + 10 == 1000 under the true blind) — and
-   // is refused: her output died as someone else's decoy (F-08).
+   // is refused on the legacy leg: post-fork outputs spend only via op108
+   // (Task 3; the F-08 "output died as someone else's decoy" rationale is
+   // retired — the output is live, and its op108 spend is pinned by
+   // g1_decoyed_output_remains_spendable_after_flag_retirement).
    transfer_from_blind_operation x;
    x.to = dan.id;
    x.amount = core.amount( 990 );
@@ -3832,11 +3896,11 @@ BOOST_AUTO_TEST_CASE( r9c_decoy_owner_explicit_spend_refused )
    try
    {
       PUSH_TX( db, trx );
-      BOOST_FAIL( "decoy-owner explicit spend must refuse (spent flag, F-08)" );
+      BOOST_FAIL( "decoy-owner legacy explicit spend must refuse (post-fork routes to op108)" );
    }
    catch( const fc::exception& e )
    {
-      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "spent" ) != std::string::npos,
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "stealth_explicit_spend" ) != std::string::npos,
                            e.to_detail_string() );
    }
    trx.clear_signatures(); trx.operations.clear();
@@ -4232,6 +4296,10 @@ BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      // Task 3: every deposit from this lambda is withdrawn via the legacy
+      // op41 leg below — grandfather each so the fee rule (not the
+      // created_block gate) decides every leg.
+      T_grandfather( db, core.get_id(), o.commitment );
       return { o.commitment, B };
    };
    // transfer_from_blind conservation is exact at validate time (input
@@ -4364,6 +4432,9 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      // Task 3: all 52 are withdrawn via the legacy op41 leg below —
+      // grandfather each so the CAP rule (not the created_block gate) decides.
+      T_grandfather( db, core.get_id(), o.commitment );
       cs.push_back( o.commitment );
       bs.push_back( B );
    }
@@ -4536,6 +4607,10 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      // Task 3: all three are withdrawn via the legacy op41 leg below —
+      // grandfather each so the review/funding gates (not the
+      // created_block gate) decide every leg.
+      T_grandfather( db, core.get_id(), o.commitment );
       cs.push_back( o.commitment );
       bs.push_back( B );
    }
@@ -4742,6 +4817,12 @@ BOOST_AUTO_TEST_CASE( parity_alarms_computed_and_queryable )
       cs.push_back( o.commitment );
       bs.push_back( B );
    }
+   // Task 3: the two withdrawn below (cs[0], cs[1]) go through the legacy
+   // op41 leg — grandfather them so the subsidy gates (not the
+   // created_block gate) decide. cs[2] stays post-fork (counted), so the
+   // effective-set pin keeps measuring a live member.
+   T_grandfather( db, core.get_id(), cs[0] );
+   T_grandfather( db, core.get_id(), cs[1] );
    generate_block();
    auto withdraw = [&]( size_t ci ) {
       transfer_from_blind_operation x;
@@ -4768,7 +4849,7 @@ BOOST_AUTO_TEST_CASE( parity_alarms_computed_and_queryable )
       const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
       auto eitr = st.alarms.effective_set.find( core_id );
       BOOST_REQUIRE( eitr != st.alarms.effective_set.end() );
-      BOOST_CHECK_EQUAL( eitr->second, 2u ); // 3 created - 1 spent
+      BOOST_CHECK_EQUAL( eitr->second, 1u ); // 3 created - 2 grandfathered (never counted)
       BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 50u ); // 500000/1000000
       BOOST_CHECK( st.alarms.burn_warn );
       BOOST_CHECK( !st.alarms.burn_critical );
@@ -5068,10 +5149,11 @@ BOOST_AUTO_TEST_CASE( thin_pool_decoy_tightening )
    // (depth 16 < 64, target-size ring, 4x4 windows at exactly 25%).
 } FC_CAPTURE_AND_RETHROW() }
 
-// Task 6 (R7 C-02): spent outputs are excluded from ring membership. A ring
-// that reuses even one spent-flagged output refuses at the membership gate —
-// spent flags are chain-visible, so admitting spent members would shrink the
-// plausible-real set to the unspent remainder (privacy leak, not just hygiene).
+// Task 3 (nullifier migration): the retired spent-membership exclusion is
+// now enforced by the nullifier set. A ring reusing a REALLY-spent output
+// (same opening: same images, already nullified) still refuses — at the
+// nullifier gate, with the images pinned — while mere decoys stay reusable
+// (pinned by g1_decoyed_output_remains_spendable_after_flag_retirement).
 BOOST_AUTO_TEST_CASE( spent_ring_member_excluded )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -5081,16 +5163,16 @@ BOOST_AUTO_TEST_CASE( spent_ring_member_excluded )
    const asset_object& core = asset_id_type()(db);
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t6-spent", 16, true );
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
-   // Honest spend consumes the whole 16-ring (Task 6 accounting: 16 - 16 + 2).
+   // Honest spend grows the live set (Task 3: 16 - 0 + 2).
    stealth_transfer_operation first = t5_build_spend( core, p, 5,
       GRAPHENE_STEALTH_PROOF_V1, "t6-spent-1", 600, 390, 10 );
    trx.operations = { first };
    PUSH_TX( db, trx ); trx.clear();
    generate_block();
-   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 2u );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
    // Top the pool back over the floor with fresh cost-path deposits (fee 1M
    // = the n=1 anchor: no subsidy involvement either way). No time jump:
-   // the spent-membership gate fires before any age/policy math, and jumping
+   // the nullifier gate fires before any age/policy math, and jumping
    // would cross a maintenance that recomputes burn-critical from the
    // spend's interval flow and block the attempt at the fee gate instead.
    for( int i = 0; i < 16; ++i )
@@ -5115,24 +5197,25 @@ BOOST_AUTO_TEST_CASE( spent_ring_member_excluded )
       generate_block();
    }
    set_expiration( db, trx );
-   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 34u );
    // Re-arm the subsidy path deterministically (direct pool top-up: no blocks,
    // no maintenance, no burn recompute) so the attempt below reaches the
-   // spent-membership gate instead of the fee gate.
+   // nullifier gate instead of the fee gate.
    g1c_seed_pool( db, dan_id, core, 5000000 );
-   // Second spend reusing one spent member (first in the ring, so the
-   // membership loop meets it before any policy math) must refuse there.
+   // Second spend reusing the same real opening (first in the ring, so the
+   // per-input loop meets its nullified images before any policy math) must
+   // refuse there.
    stealth_transfer_operation second = t5_build_spend( core, p, 5,
       GRAPHENE_STEALTH_PROOF_V1, "t6-spent-2", 600, 390, 10 );
    trx.operations = { second };
    try
    {
       PUSH_TX( db, trx );
-      BOOST_FAIL( "ring reusing a spent member must reject" );
+      BOOST_FAIL( "ring reusing a really-spent opening must reject" );
    }
    catch( const fc::exception& e )
    {
-      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "spent" ) != std::string::npos,
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Key image already spent" ) != std::string::npos,
                            e.to_detail_string() );
    }
    trx.clear();
@@ -5212,7 +5295,7 @@ BOOST_AUTO_TEST_CASE( ring_sampler_rule_conformance )
    auto now = db.head_block_time();
    // Synthetic eligible pool: 100 candidates, 10 per 100-block window over
    // 10 windows, all older than 24h (metadata-bearing by construction here;
-   // the metadata/spent gates are op-level, pinned by their own tests).
+   // the metadata/nullifier gates are op-level, pinned by their own tests).
    std::vector<uint32_t> pool_h;
    for( uint32_t w = 0; w < 10; ++w )
       for( uint32_t k = 0; k < 10; ++k )
@@ -5336,6 +5419,10 @@ BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      // Task 3: every deposit from this lambda is withdrawn via the legacy
+      // op41 leg below — grandfather each so the halt/cost gates (not the
+      // created_block gate) decide every leg.
+      T_grandfather( db, core.get_id(), o.commitment );
       return { o.commitment, B };
    };
    // Exact-conservation inputs: parity leg spends 900 + 490000, cost leg
@@ -6010,10 +6097,11 @@ BOOST_AUTO_TEST_CASE( blind_wallet_defaults )
 // ===========================================================================
 // R15 (F-08 representation-proof recovery): RED tests (TDD).
 //
-// Defect (spec 2026-10-08-f08-representation-proof-recovery-design.md §1): a
-// ring spend spent-flags EVERY ring member, so a stranger can brick any stealth
-// output for one fee by including it as a decoy; the turnstile
-// (stealth_evaluator.cpp:885) then refuses it forever. Recovery: the turnstile
+// Defect (spec 2026-10-08-f08-representation-proof-recovery-design.md §1,
+// RETIRED by the Task 3 nullifier migration): a ring spend spent-flagged
+// EVERY ring member, so a stranger could brick any stealth output for one
+// fee by including it as a decoy; the turnstile
+// (stealth_evaluator.cpp:885) then refused it forever. Recovery: the turnstile
 // takes an optional extension carrying the output's two key images (V1/V2
 // domains) plus a Sigma representation proof binding both images to the old
 // commitment's opening (b, v):
@@ -6038,8 +6126,9 @@ BOOST_AUTO_TEST_CASE( blind_wallet_defaults )
 // - verify: s_b*G+s_v*H == A_C+c*C, s_b*J1_1+s_v*J2_1 == A_1+c*I1,
 //   s_b*J1_2+s_v*J2_2 == A_2+c*I2; strict parsing throughout.
 // - gate: owner+authority, then proof verify, then nullifier check on the
-//   BOUND images (either present -> refuse, message names "nullifier"), then
-//   allow despite spent. Absent extension: current behavior byte-identical.
+//   BOUND images (either present -> refuse, message names "nullifier").
+//   Absent extension: the retired-flag branch (interim hole until Task 4
+//   requires the extension on every path).
 // ===========================================================================
 
 /// Test-only representation prover (wallets own proving; consensus never
@@ -6164,18 +6253,6 @@ static void T_set_recovery_v2( turnstile_reproof_operation& t,
    t.extensions.insert( turnstile_recovery_v2_extension{ I1, I2, proof } );
 }
 
-/// Simulate decoy consumption: the whole-ring spent write at
-/// stealth_evaluator.cpp:750-752, isolated so these cases exercise the
-/// recovery GUARD, not decoy mechanics (already covered by
-/// r9c_decoy_owner_explicit_spend_refused).
-static void T_r15_mark_decoyed( database& db, const fc::ecc::commitment_type& c )
-{
-   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-   auto itr = bbi.find( c );
-   BOOST_REQUIRE( itr != bbi.end() );
-   db.modify( *itr, []( blinded_balance_object& b ) { b.spent = true; } );
-}
-
 /// Turnstile for pool output #s with an explicit (new_value, fee) split:
 /// 1000 -> new_value new blind output + fee. The default (990, 10) is the
 /// standard split; Task 5 uses a non-default fee to prove the supply delta
@@ -6228,8 +6305,13 @@ static void T_r15_prove_true( const t5_pool& p, size_t s, asset_id_type asset,
    BN_free( bb );
 }
 
-// Spec §7.1: decoyed (spent, no nullifier) output with a valid proof recovers.
-BOOST_AUTO_TEST_CASE( r15_recovery_decoyed_succeeds )
+// Task 3 (flag retirement): a really-spent output (nullifiers present) with
+// a VALID proof still refuses — fail-closed on either image. Formerly
+// r15_recovery_decoyed_succeeds: the old helper only set the retired flag
+// (no nullifier), so recovery succeeded; inserting the TRUE nullifiers is
+// the exact production guard, and the proof passes while the nullifier
+// lookup refuses.
+BOOST_AUTO_TEST_CASE( r15_recovery_nullified_refuses )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
@@ -6238,23 +6320,27 @@ BOOST_AUTO_TEST_CASE( r15_recovery_decoyed_succeeds )
    const asset_object& core = asset_id_type()( db );
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-a", 16, true );
    const size_t s = 3;
+   const int64_t live = t5_supply( db, core );
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
-   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-a-bn" );
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-a-bn" );
    T_set_recovery_v2( t, I1, I2, proof );
 
    set_expiration( db, trx );
    trx.operations = { t };
    sign( trx, p.keys[s] );
-   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "a nullified output must NOT be recoverable, even with a valid proof" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "nullifier" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
    trx.clear_signatures(); trx.operations.clear();
-   generate_block();
-   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-   BOOST_CHECK( bbi.find( p.commits[s] ) == bbi.end() ); // old consumed
-   BOOST_CHECK( bbi.find( t.new_output.commitment ) != bbi.end() ); // fresh V2 output exists
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live ); // refused recovery moved nothing
 } FC_CAPTURE_AND_RETHROW() }
 
 // Spec §7.2 (the F08B-04 missing test): a really-spent output (nullifier
@@ -6305,7 +6391,13 @@ BOOST_AUTO_TEST_CASE( r15_recovery_wrong_opening_fails )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-c", 16, true );
    const size_t s = 5;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
+   // Nullify the TRUE images (the foreign proof below still refuses at the
+   // proof layer, before any nullifier is read).
+   {
+      fc::ecc::commitment_type tI1, tI2; std::vector<char> tproof;
+      T_r15_prove_true( p, s, core.get_id(), tI1, tI2, tproof );
+      T_r15_nullify( db, tI1, tI2 );
+   }
 
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-c-bn" );
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
@@ -6347,12 +6439,12 @@ BOOST_AUTO_TEST_CASE( r15_recovery_swapped_images_fail )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-d", 16, true );
    const size_t s = 6;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
    BOOST_REQUIRE( p.commits.size() > 9 );
 
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-d-bn" );
-   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
-   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
    BOOST_REQUIRE( I1 != I2 ); // versions MUST produce different bytes
    T_set_recovery_v2( t, I2, I1, proof ); // swapped
    set_expiration( db, trx );
@@ -6386,7 +6478,13 @@ BOOST_AUTO_TEST_CASE( r15_recovery_replay_fails )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-e", 16, true );
    const size_t sa = 3, sb = 5;
 
-   T_r15_mark_decoyed( db, p.commits[sb] );
+   // Nullify sb's TRUE images (the replayed proof below still refuses at
+   // the proof layer — the challenge binds the statement commitment).
+   {
+      fc::ecc::commitment_type tI1, tI2; std::vector<char> tproof;
+      T_r15_prove_true( p, sb, core.get_id(), tI1, tI2, tproof );
+      T_r15_nullify( db, tI1, tI2 );
+   }
 
    // Prove over A's opening, submit against B's (decoyed) commitment.
    turnstile_reproof_operation t = T_r15_turnstile( core, p, sb, "r15-e-bn" );
@@ -6412,9 +6510,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_replay_fails )
    trx.clear_signatures(); trx.operations.clear();
 } FC_CAPTURE_AND_RETHROW() }
 
-// Spec §7.6: without the extension nothing changes — a decoyed output still
-// refuses with the EXACT pre-R15 message, and an unspent output still
-// migrates normally.
+// Spec §7.6 (Task 3 interim): the no-extension branch still reads the
+// retired flag and nothing else — a nullified output migrates without proof
+// (the hole Task 4 closes), while an unspent output still migrates normally.
 BOOST_AUTO_TEST_CASE( r15_no_extension_unchanged )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -6424,23 +6522,22 @@ BOOST_AUTO_TEST_CASE( r15_no_extension_unchanged )
    const asset_object& core = asset_id_type()( db );
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-f", 16, true );
 
-   // (a) decoyed + no extension: refused, pre-R15 message pinned.
+   // (a) nullified + no extension: INTERIM HOLE (Task 3 only). The retired
+   // flag is never written, so the no-extension branch (which still reads
+   // it until Task 4) passes and the migration succeeds — a really-spent
+   // output re-migrates with no proof. Task 4 closes this by requiring the
+   // extension on every path; this leg pins the hole it closes.
    {
       const size_t s = 7;
-      T_r15_mark_decoyed( db, p.commits[s] );
+      fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+      T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+      T_r15_nullify( db, I1, I2 );
       turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-f-bn-a" );
       BOOST_REQUIRE( t.extensions.empty() );
       set_expiration( db, trx );
       trx.operations = { t };
       sign( trx, p.keys[s] );
-      try {
-         PUSH_TX( db, trx );
-         BOOST_FAIL( "without the extension a decoyed output must still be refused" );
-      } catch( const fc::exception& e ) {
-         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
-            "Turnstile old commitment already spent (stealth transfer)" ) != std::string::npos,
-            e.to_detail_string() );
-      }
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
       trx.clear_signatures(); trx.operations.clear();
    }
    // (b) unspent + no extension: normal migration still works.
@@ -6468,11 +6565,11 @@ BOOST_AUTO_TEST_CASE( r15_owner_mismatch_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-g", 16, true );
    const size_t s = 8;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
-   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-g-bn" );
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-g-bn" );
    T_set_recovery_v2( t, I1, I2, proof );
    // Eve claims ownership with her own key authority (same shape t5_fund_pool uses).
    t.owner = authority( 1, public_key_type( eve_private_key.get_public_key() ), 1 );
@@ -6490,10 +6587,12 @@ BOOST_AUTO_TEST_CASE( r15_owner_mismatch_refuses )
    trx.clear_signatures(); trx.operations.clear();
 } FC_CAPTURE_AND_RETHROW() }
 
-// Spec §7.8: recovery preserves confidential_supply accounting exactly — the
-// 1000-value input becomes a 990 output with the 10 fee leaving supply, no
-// mint and no burn beyond the explicit fee (do_apply: supply -= fee).
-BOOST_AUTO_TEST_CASE( r15_supply_conservation )
+// Task 3 (flag retirement): a nullified output's refused recovery moves no
+// supply — the do_evaluate refusal precedes do_apply, so confidential_supply
+// is untouched. Formerly r15_supply_conservation (success-path supply pin on
+// a flag-decoyed output); the success-path supply pin now lives on the
+// never-spent superset case (r15_recovery_never_spent_with_extension_succeeds).
+BOOST_AUTO_TEST_CASE( r15_nullified_recovery_moves_no_supply )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
@@ -6503,20 +6602,25 @@ BOOST_AUTO_TEST_CASE( r15_supply_conservation )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-h", 16, true );
    const size_t s = 9;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
    const int64_t live = t5_supply( db, core );
 
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-h-bn" );
-   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
-   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
    T_set_recovery_v2( t, I1, I2, proof );
    set_expiration( db, trx );
    trx.operations = { t };
    sign( trx, p.keys[s] );
-   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "nullified recovery must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "nullifier" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
    trx.clear_signatures(); trx.operations.clear();
-   generate_block();
-   BOOST_CHECK_EQUAL( t5_supply( db, core ), live - 10 );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
 } FC_CAPTURE_AND_RETHROW() }
 
 // Spec §7.9 (canonical-encoding negatives): non-canonical scalar,
@@ -6532,10 +6636,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_malformed_proof_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-m", 16, true );
    const size_t s = 10;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    fc::ecc::commitment_type I1, I2; std::vector<char> good;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   T_r15_nullify( db, I1, I2 );
    BOOST_REQUIRE( good.size() == 163 );
 
    // (a) non-canonical s_b: 0xFF*32 exceeds the curve order, must refuse.
@@ -6680,10 +6783,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_offcurve_I1_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-i1", 16, true );
    const size_t s = 11;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    fc::ecc::commitment_type I1, I2; std::vector<char> good;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   T_r15_nullify( db, I1, I2 );
    const uint64_t aid = core.get_id().instance.value;
 
    // Positive control: true material verifies at the consensus entry point.
@@ -6748,10 +6850,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_wrong_domain_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-wd", 16, true );
    const size_t s = 12;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    fc::ecc::commitment_type I1, I2; std::vector<char> good;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   T_r15_nullify( db, I1, I2 );
    const uint64_t aid = core.get_id().instance.value;
 
    // Positive control: consensus-domain proof verifies.
@@ -6812,8 +6913,6 @@ BOOST_AUTO_TEST_CASE( r15_recovery_asset_context_mismatch_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ax", 16, true );
    const size_t s = 13;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    // Prove the TRUE opening but under a foreign asset context (7 is only
    // hashed into the challenge — it need not exist on-chain).
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
@@ -6823,6 +6922,10 @@ BOOST_AUTO_TEST_CASE( r15_recovery_asset_context_mismatch_refuses )
       T_prove_recovery( Cvec, bb, (uint64_t)p.each, asset_id_type( 7 ), I1, I2, proof );
       BN_free( bb );
    }
+   // Images are domain-independent (pinned below: wI1 == I1), so these are
+   // the commitment's real images — nullify them. The submitted proof still
+   // refuses at the proof layer (wrong asset context), first.
+   T_r15_nullify( db, I1, I2 );
    const uint64_t core_aid = core.get_id().instance.value;
 
    // Positive control: verifies under its own (foreign) asset context...
@@ -6859,9 +6962,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_asset_context_mismatch_refuses )
 
 // Task 5 (R15 hardening): recovery of a NEVER-SPENT output with the extension
 // succeeds. The binding path (owner + valid proof + nullifier-absent) is a
-// SUPERSET of the plain path (owner + nullifier-absent + !spent): it must
+// SUPERSET of the plain path (owner + nullifier-absent): it must
 // accept every output the plain path accepts, proving the extension is a
-// bound alternative, not a bypass that only fires on spent outputs.
+// bound alternative, not a bypass that only fires on nullified outputs.
 BOOST_AUTO_TEST_CASE( r15_recovery_never_spent_with_extension_succeeds )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -6872,7 +6975,7 @@ BOOST_AUTO_TEST_CASE( r15_recovery_never_spent_with_extension_succeeds )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ns", 16, true );
    const size_t s = 14;
 
-   // NOTE: no T_r15_mark_decoyed — the output is live and unspent.
+   // NOTE: no T_r15_nullify — the output is live and un-nullified.
    const int64_t live = t5_supply( db, core );
 
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ns-bn" );
@@ -6892,12 +6995,13 @@ BOOST_AUTO_TEST_CASE( r15_recovery_never_spent_with_extension_succeeds )
    BOOST_CHECK_EQUAL( t5_supply( db, core ), live - 10 ); // fee leg identical
 } FC_CAPTURE_AND_RETHROW() }
 
-// Task 5 (R15 hardening): fee accounting is exact — confidential_supply delta
-// == -fee for a NON-DEFAULT fee (37 over a 963 output), proving the delta
-// tracks the op fee rather than a hardcoded constant. Conservation
-// (1000 == 963 + 37) is enforced by the excess kernel; the supply leg is
-// enforced by do_apply (supply -= fee).
-BOOST_AUTO_TEST_CASE( r15_recovery_fee_exact )
+// Task 3 (flag retirement): a nullified output's refused recovery moves no
+// supply even with a NON-DEFAULT fee (37 over a 963 output) — the
+// do_evaluate refusal precedes do_apply, so no fee leaves supply. Formerly
+// r15_recovery_fee_exact (success-path fee-exactness pin on a flag-decoyed
+// output); the success-path fee pin now lives on the never-spent superset
+// case (r15_recovery_never_spent_with_extension_succeeds).
+BOOST_AUTO_TEST_CASE( r15_nullified_nondefault_fee_refuses_cleanly )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
@@ -6907,25 +7011,28 @@ BOOST_AUTO_TEST_CASE( r15_recovery_fee_exact )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-fe", 16, true );
    const size_t s = 15;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
    const int64_t live = t5_supply( db, core );
 
    const int64_t fee = 37, out_v = 963;
    turnstile_reproof_operation t = T_r15_turnstile_value( core, p, s,
       "r15-fe-bn", out_v, fee );
    BOOST_REQUIRE_EQUAL( t.fee.amount.value, fee );
-   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
-   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
    T_set_recovery_v2( t, I1, I2, proof );
    set_expiration( db, trx );
    trx.operations = { t };
    sign( trx, p.keys[s] );
-   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "nullified recovery must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "nullifier" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
    trx.clear_signatures(); trx.operations.clear();
-   generate_block();
-   BOOST_CHECK_EQUAL( t5_supply( db, core ), live - fee );
-   const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
-   BOOST_CHECK( bbi.find( t.new_output.commitment ) != bbi.end() );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
 } FC_CAPTURE_AND_RETHROW() }
 
 // R15C-01: substituting a SINGLE image under the otherwise-true proof
@@ -6945,10 +7052,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_single_image_substitution_refuses )
    const size_t s = 3, f = 7;
    const uint64_t aid = core.get_id().instance.value;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
    // Foreign images: another pool member's valid on-curve images.
    fc::ecc::commitment_type fI1, fI2; std::vector<char> fproof;
    T_r15_prove_true( p, f, core.get_id(), fI1, fI2, fproof );
@@ -7062,11 +7168,11 @@ BOOST_AUTO_TEST_CASE( r15_recovery_oversize_extension_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-ov", 16, true );
    const size_t s = 3;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
-   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ov-bn" );
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-ov-bn" );
    T_set_recovery_v2( t, I1, I2, proof );
    t.extensions.insert( turnstile_extensions_v2( graphene::protocol::void_t() ) );
    BOOST_REQUIRE( t.extensions.size() == 2 );
@@ -7096,7 +7202,13 @@ BOOST_AUTO_TEST_CASE( r15_recovery_wrongtype_extension_refuses )
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-wt", 16, true );
    const size_t s = 3;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
+   // Nullify the true images (the void_t gate throws before any image is
+   // read, so the refusal layer is unchanged).
+   {
+      fc::ecc::commitment_type tI1, tI2; std::vector<char> tproof;
+      T_r15_prove_true( p, s, core.get_id(), tI1, tI2, tproof );
+      T_r15_nullify( db, tI1, tI2 );
+   }
 
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-wt-bn" );
    t.extensions.insert( turnstile_extensions_v2( graphene::protocol::void_t() ) );
@@ -7128,10 +7240,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_empty_proof_refuses )
    const size_t s = 3;
    const uint64_t aid = core.get_id().instance.value;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_r15_nullify( db, I1, I2 );
    const std::vector<char> empty;
    {
       std::string err;
@@ -7170,10 +7281,9 @@ BOOST_AUTO_TEST_CASE( r15_recovery_noncanonical_sv_refuses )
    const size_t s = 3;
    const uint64_t aid = core.get_id().instance.value;
 
-   T_r15_mark_decoyed( db, p.commits[s] );
-
    fc::ecc::commitment_type I1, I2; std::vector<char> good;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, good );
+   T_r15_nullify( db, I1, I2 );
    BOOST_REQUIRE( good.size() == 163 );
    std::vector<char> bad = good;
    for( int i = 131; i < 163; ++i ) bad[i] = (char)0xFF;
@@ -7259,19 +7369,14 @@ BOOST_AUTO_TEST_CASE( r15_recovery_honest_challenge_nonzero )
    BN_free( c );
 } FC_CAPTURE_AND_RETHROW() }
 
-// AUDIT FINDING (pool-floor counter double-decrement on the recovery path):
-// the documented invariant of stealth_pool_count_add is "unspent
-// metadata-bearing balances per asset" (spent-but-retained outputs do NOT
-// count). The ring spend already consumed every member it transitioned
-// !spent->spent, so a GRIEFED (spent) balance has LEFT the unspent set long
-// before recovery. The turnstile must therefore NOT decrement again for it:
-// the migrated output joins the set 1:1, so the recovery nets exactly +1 and
-// the counter keeps matching the chain's true unspent metadata-bearing set.
-// Nothing pinned the counter through recovery before (the only other suite
-// reference seeds it by hand), which is exactly the gap that let a double
-// decrement ship: the counter drifted -1 per recovery (understating floor
-// depth, and approaching the "Blind pool counter underflow" assert that
-// would hard-fail a legitimate — and NOT floor-gated — recovery).
+// Task 3 (flag retirement, live-set rewrite): the counter measures the LIVE
+// metadata-bearing set. A ring spend removes nothing (no per-member decrement;
+// the two new outputs join: 16 -> 18), and a turnstile recovery swaps the
+// consumed member for the migrated one 1:1 (net 0: -1 on had_metadata, +1 on
+// create). The counter must equal the chain-derived live set after every leg.
+// (The reverted 113202ea guard is behavior-neutral here — was_spent is now
+// unwritable, so both guards agree — but the read of the retired field had
+// to go with the field's retirement.)
 BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -7280,16 +7385,16 @@ BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()( db );
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-pc", 16, true );
-   const size_t s    = 3; // grief TARGET: consumed as a DECOY of the ring below
-   const size_t real = 7; // honest real input of the grief ring (different owner key)
+   const size_t s    = 3; // decoy of the ring below: stays live throughout
+   const size_t real = 7; // honest real input of the ring (different owner key)
 
-   // Chain-derived truth: metadata-bearing unspent blinded balances of this
-   // asset (the set the counter is supposed to MEASURE, never assume).
+   // Chain-derived truth: metadata-bearing blinded balances of this asset
+   // (the set the counter is supposed to MEASURE, never assume).
    auto true_depth = [&]() {
       uint32_t n = 0;
       const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
       for( const auto& b : bbi )
-         if( b.asset_id == core.get_id() && b.created_block != 0 && !b.spent )
+         if( b.asset_id == core.get_id() && b.created_block != 0 )
             ++n;
       return n;
    };
@@ -7299,14 +7404,13 @@ BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
       return ( itr == st.unspent_blind_count.end() ) ? uint32_t( 0 ) : itr->second;
    };
 
-   // 16 fresh (unspent, metadata-bearing) outputs: counter == truth.
+   // 16 fresh metadata-bearing outputs: counter == truth.
    BOOST_REQUIRE_EQUAL( counter(), 16u );
    BOOST_REQUIRE_EQUAL( counter(), true_depth() );
 
-   // Grief for real: a genuine ring spend whose ring carries the target as a
-   // DECOY. The target is spent-flagged by the whole-ring write, but its key
-   // images are NOT nullified (only the real input's are), so the R15
-   // representation proof below is still admissible.
+   // Genuine ring spend whose ring carries the target as a DECOY. Post-Task 3
+   // the decoy is untouched: still indexed, images never nullified, still
+   // counted — griefing by decoy-inclusion is impossible (§3.8).
    stealth_transfer_operation stop = t5_build_spend( core, p, real,
       GRAPHENE_STEALTH_PROOF_V2, "r15-pc-sp", 600, 390, 10 );
    trx.operations = { stop };
@@ -7315,15 +7419,15 @@ BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
    {
       const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
       auto itr = bbi.find( p.commits[s] );
-      BOOST_REQUIRE( itr != bbi.end() );
-      BOOST_REQUIRE( itr->spent ); // griefed: spent, images never nullified
+      BOOST_REQUIRE( itr != bbi.end() ); // decoy survives: still indexed
    }
-   // Every fresh member left the set once; only the two new outputs joined.
-   const uint32_t after_grief = counter();
+   // The ring removed nothing; only the two new outputs joined: 16 -> 18.
+   BOOST_REQUIRE_EQUAL( counter(), 18u );
    BOOST_REQUIRE_EQUAL( counter(), true_depth() );
+   const uint32_t after_spend = counter();
    const int64_t supply_before_recovery = t5_supply( db, core );
 
-   // Recovery of the griefed balance (R15 extension path).
+   // Recovery of the decoyed balance (R15 extension path).
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-pc-bn" );
    fc::ecc::commitment_type I1, I2; std::vector<char> proof;
    T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
@@ -7335,19 +7439,17 @@ BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
    trx.clear_signatures(); trx.operations.clear();
    generate_block();
 
-   // Recovery succeeded: old balance consumed, migrated output live/unspent.
+   // Recovery succeeded: old balance consumed, migrated output live.
    const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
    BOOST_CHECK( bbi.find( p.commits[s] ) == bbi.end() );
    auto ntr = bbi.find( t.new_output.commitment );
    BOOST_REQUIRE( ntr != bbi.end() );
-   BOOST_CHECK( !ntr->spent );
    // Conservation: recovery moved value by the fee only.
    BOOST_CHECK_EQUAL( t5_supply( db, core ), supply_before_recovery - t.fee.amount.value );
 
-   // THE PIN: the migrated output replaces the consumed one 1:1 — exactly one
-   // increment across the recovery, no second decrement for a balance that
-   // already left the unspent set at ring-spend time.
-   BOOST_CHECK_EQUAL( counter(), after_grief + 1u );
+   // THE PIN: the migrated output replaces the consumed one 1:1 — net zero
+   // across the recovery, and the counter still tracks the live set.
+   BOOST_CHECK_EQUAL( counter(), after_spend );
    BOOST_CHECK_EQUAL( counter(), true_depth() );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -7792,9 +7894,8 @@ BOOST_AUTO_TEST_CASE( r15_recover_then_ring_spend_old_refuses )
 // B5 (matrix pair f): ring-spend the MIGRATED output after an EXTENSION
 // recovery — expect success as a single spend, and the pool counter
 // unchanged by the migration (the recovery swaps the consumed member for
-// the migrated one 1:1, so the counter's promise — unspent metadata-bearing
-// balances — still holds before and after; the spend then decrements it
-// truthfully like any other ring spend).
+// the migrated one 1:1 under live-set semantics; the spend then only adds
+// its outputs, like any other ring spend).
 BOOST_AUTO_TEST_CASE( r15_migrated_output_ring_spend_succeeds )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
@@ -7816,7 +7917,7 @@ BOOST_AUTO_TEST_CASE( r15_migrated_output_ring_spend_succeeds )
       uint32_t n = 0;
       const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
       for( const auto& b : bbi )
-         if( b.asset_id == core.get_id() && b.created_block != 0 && !b.spent )
+         if( b.asset_id == core.get_id() && b.created_block != 0 )
             ++n;
       return n;
    };
@@ -7914,12 +8015,12 @@ BOOST_AUTO_TEST_CASE( r15_migrated_output_ring_spend_succeeds )
    trx.operations.clear();
    generate_block();
 
-   // Single spend: the migrated output is consumed (whole-ring flag write).
+   // Single spend: the migrated output stays indexed (ring spends remove
+   // nothing; the nullifier set, not the index, records the spend).
    {
       const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
       auto ntr = bbi.find( t.new_output.commitment );
       BOOST_REQUIRE( ntr != bbi.end() );
-      BOOST_CHECK( ntr->spent );
    }
    // Fee-only supply movement across the spend, and the counter STILL
    // tracks the chain-derived truth through recovery + spend.
@@ -8050,6 +8151,62 @@ static stealth_explicit_spend_operation T_op108_exit_true( const asset_object& c
    return o;
 }
 
+// ---- op108 blind->blind over pool output s with the TRUE images ---------
+// Single 1000-value input into two V2 outputs (600 + 390, fee 10); excess =
+// b_in - b_o1 - b_o2 (mod n), mirroring the ring-spend excess pattern in
+// t5_build_spend. Pins the blind->blind leg's stealth_verify_excess kernel
+// (the Task-2 suite exercises only the exit leg).
+static stealth_explicit_spend_operation T_op108_blind_true( const asset_object& core,
+      const t5_pool& p, size_t s, const std::string& tag )
+{
+   stealth_explicit_spend_operation o;
+   o.fee = core.amount( 10 );
+   o.asset_id = core.get_id();
+   o.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   stealth_spend_input in;
+   in.commitment = p.commits[s];
+   in.owner = p.owners[s];
+   BIGNUM* bb = T_bn( p.blinds[s] );
+   std::vector<unsigned char> Cvec( p.commits[s].begin(), p.commits[s].end() );
+   std::vector<char> proof;
+   T_prove_recovery( Cvec, bb, (uint64_t)p.each, core.get_id(),
+                     in.key_image_v1, in.key_image_v2, proof );
+   BN_free( bb );
+   in.recovery_proof = stealth_recovery_proof( proof );
+   o.inputs.push_back( in );
+   auto Bo1 = T_blind_secret( tag + "-o1" );
+   auto Bo2 = T_blind_secret( tag + "-o2" );
+   stealth_blind_output so1, so2;
+   {
+      BIGNUM* b1 = T_bn( Bo1 );
+      so1.commitment = T_commitment( T_commit( b1, (uint64_t)600 ) );
+      BN_free( b1 );
+   }
+   {
+      BIGNUM* b2 = T_bn( Bo2 );
+      so2.commitment = T_commitment( T_commit( b2, (uint64_t)390 ) );
+      BN_free( b2 );
+   }
+   so1.range_proof = T_bp_prove( so1.commitment, Bo1, (uint64_t)600 );
+   so2.range_proof = T_bp_prove( so2.commitment, Bo2, (uint64_t)390 );
+   so1.owner = p.owners[s];
+   so2.owner = p.owners[s];
+   o.outputs = { so1, so2 };
+   {
+      BIGNUM* e = BN_new();
+      BIGNUM* bi = T_bn( p.blinds[s] );
+      BIGNUM* b1 = T_bn( Bo1 );
+      BIGNUM* b2 = T_bn( Bo2 );
+      BN_copy( e, bi );
+      BN_mod_sub( e, e, b1, T_order(), T_ctx() );
+      BN_mod_sub( e, e, b2, T_order(), T_ctx() );
+      unsigned char eb[32]; BN_bn2binpad( e, eb, 32 );
+      std::copy( eb, eb + 32, (char*)o.excess.data() );
+      BN_free( e ); BN_free( bi ); BN_free( b1 ); BN_free( b2 );
+   }
+   return o;
+}
+
 // ---- op108 fabricated-image double spend (Task 2, spec §3.2a) ------
 BOOST_AUTO_TEST_CASE( op108_rejects_fabricated_images_on_ring_spent_output )
 { try {
@@ -8091,12 +8248,13 @@ BOOST_AUTO_TEST_CASE( op108_rejects_fabricated_images_on_ring_spent_output )
    }
    trx.clear_signatures(); trx.operations.clear();
    // Refusal happened in do_evaluate before do_apply: no nullifier was
-   // recorded for the fabricated images.
+   // recorded for the fabricated images (linked through the single
+   // production nullifier_key identity, never a duplicated hash).
    {
       const auto& nul = db.get_index_type<stealth_nullifier_index>()
                            .indices().get<by_nullifier_image>();
       const std::vector<char> fake( p.commits[s].begin(), p.commits[s].end() );
-      BOOST_CHECK( nul.find( fc::sha256::hash( fake.data(), fake.size() ) ) == nul.end() );
+      BOOST_CHECK( nul.find( nullifier_key( fake ) ) == nul.end() );
    }
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -8259,6 +8417,247 @@ BOOST_AUTO_TEST_CASE( op108_proposal_gated_before_hardfork )
             e.to_detail_string() );
       }
       trx.clear();
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- flag retirement (Task 3, spec §6 items 1+12) ----------------------
+// Under the old flag, an output used as a ring decoy was permanently
+// unspendable on every leg. After retirement it must still be spendable by
+// its owner via op108 (blind->blind leg: the Task-2 suite covers only the
+// exit leg), and must still be decoy-eligible (reusable in a later ring).
+BOOST_AUTO_TEST_CASE( g1_decoyed_output_remains_spendable_after_flag_retirement )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "t3-decoy", 16, true );
+   const size_t s = 5; // honest real input of the first ring
+   const size_t d = 7; // decoy target: never the real input, never nullified
+   const int64_t live = t5_supply( db, core );
+
+   // Ring spend #1 (real s, d rides as a decoy). Only s's images nullify.
+   stealth_transfer_operation stop1 = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V2, "t3-decoy-sp1", 600, 390, 10 );
+   trx.operations = { stop1 };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   // Live-set counter: the ring removes nothing, two outputs join it.
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
+
+   // Re-arm the subsidy path so spend #2 and the op108 leg reach their
+   // gates (not the fee gate): the 16 funding deposits already consumed
+   // ~16M of the 21M seed, and the three legs below need ~4.5M combined.
+   transfer( account_id_type()(db), dan, core.amount( 1000000000 ) );
+   generate_block();
+   g1c_seed_pool( db, dan.get_id(), core, 10000000 );
+
+   // Ring spend #2 over the SAME ring with a different real input: d is a
+   // decoy again. Pre-retirement this refuses at the spent-membership gate
+   // (every member was whole-ring flagged); post-retirement it succeeds.
+   stealth_transfer_operation stop2 = t5_build_spend( core, p, d,
+      GRAPHENE_STEALTH_PROOF_V2, "t3-decoy-sp2", 600, 390, 10 );
+   trx.operations = { stop2 };
+   set_expiration( db, trx );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear();
+   generate_block();
+
+   // Owner-spendability: d was a decoy twice, never nullified — op108
+   // blind->blind with the true opening succeeds.
+   stealth_explicit_spend_operation o = T_op108_blind_true( core, p, d, "t3-decoy-x" );
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[d] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   generate_block();
+
+   // Chain-derived truth: the counter equals the live metadata-bearing set.
+   {
+      uint32_t n = 0;
+      const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      for( const auto& b : bbi )
+         if( b.asset_id == core.get_id() && b.created_block != 0 )
+            ++n;
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto itr = st.unspent_blind_count.find( core.get_id() );
+      BOOST_REQUIRE( itr != st.unspent_blind_count.end() );
+      BOOST_CHECK_EQUAL( itr->second, n );
+   }
+   // Three blind fees left the pool: two ring spends + one explicit spend.
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live - 10 - 10 - 10 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- spec §6 item 4: grandfathered balances still spend via legacy legs -
+// A balance with created_block == 0 (pre-fork/grandfathered) MUST still be
+// spendable by op40 (blind_transfer) and op41 (transfer_from_blind) exactly
+// as before: the new created_block gate must not brick the migration path.
+BOOST_AUTO_TEST_CASE( g1_grandfathered_balance_still_spends_via_legacy_legs )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()(db), dan, core.amount( 500000000 ) );
+   generate_block();
+   // Legacy legs still settle parity subsidies post-fork (fee 10 carries a
+   // full anchor gap), so seed the pool past both gaps before spending.
+   g1c_seed_pool( db, dan.get_id(), core, 5000000 );
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   // Two post-fork deposits, then grandfathered: created_block == 0,
+   // never counted — exactly what a pre-fork balance looks like.
+   std::vector<fc::ecc::commitment_type> cs;
+   std::vector<fc::sha256> bs;
+   for( int i = 0; i < 2; ++i )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      blind_output bo;
+      bo.owner = own;
+      ttb.fee = core.amount( 1000000 ); // cost path: pool reserved for the legs
+      auto B = T_blind_secret( std::string( "t3-gf-b|" ) + std::to_string( i ) );
+      auto N = T_secret( std::string( "t3-gf-n|" ) + std::to_string( i ) );
+      bo.commitment = fc::ecc::blind( B, 1000 );
+      bo.range_proof = fc::ecc::range_proof_sign( 0, bo.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { bo };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      T_grandfather( db, core.get_id(), bo.commitment );
+      cs.push_back( bo.commitment );
+      bs.push_back( B );
+   }
+   generate_block();
+   // (a) op40 blind_transfer on a grandfathered balance (1000 -> 990 under
+   // the same blind + fee 10, real V1 range proof).
+   {
+      blind_transfer_operation btx;
+      btx.fee = core.amount( 10 );
+      blind_input bi; bi.commitment = cs[0]; bi.owner = own;
+      btx.inputs = { bi };
+      blind_output bo;
+      bo.owner = own;
+      auto N = T_secret( "t3-gf-nout" );
+      bo.commitment = fc::ecc::blind( bs[0], 990 );
+      bo.range_proof = fc::ecc::range_proof_sign( 0, bo.commitment, bs[0], N, 0, 0, 990 );
+      btx.outputs = { bo };
+      BOOST_CHECK_NO_THROW( btx.validate() );
+      set_expiration( db, trx );
+      trx.operations = { btx };
+      sign( trx, k );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   // (b) op41 transfer_from_blind on a grandfathered balance (990 + 10).
+   {
+      transfer_from_blind_operation x;
+      x.to = dan.id;
+      x.amount = core.amount( 990 );
+      x.fee = core.amount( 10 );
+      blind_input bi; bi.commitment = cs[1]; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = bs[1];
+      BOOST_CHECK_NO_THROW( x.validate() );
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   generate_block();
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- spec §6 item 5: post-fork balances refuse the legacy legs ---------
+// A balance with created_block != 0 (post-fork) MUST be refused by op40 AND
+// op41 with the new message, routing the spender to op108.
+BOOST_AUTO_TEST_CASE( g1_postfork_balance_refuses_legacy_legs )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()(db), dan, core.amount( 500000000 ) );
+   generate_block();
+   g1c_seed_pool( db, dan.get_id(), core, 5000000 );
+   auto k = fc::ecc::private_key::generate();
+   authority own( 1, public_key_type( k.get_public_key() ), 1 );
+   // One post-fork deposit (created_block != 0, counted — NOT grandfathered).
+   fc::ecc::commitment_type c;
+   fc::sha256 B;
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 1000 );
+      ttb.from = dan.id;
+      blind_output bo;
+      bo.owner = own;
+      ttb.fee = core.amount( 1000000 );
+      B = T_blind_secret( "t3-pf-b" );
+      auto N = T_secret( "t3-pf-n" );
+      bo.commitment = fc::ecc::blind( B, 1000 );
+      bo.range_proof = fc::ecc::range_proof_sign( 0, bo.commitment, B, N, 0, 0, 1000 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { bo };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      c = bo.commitment;
+   }
+   generate_block();
+   // (a) op40 refuses with the new message (not the old spent-flag one).
+   {
+      blind_transfer_operation btx;
+      btx.fee = core.amount( 10 );
+      blind_input bi; bi.commitment = c; bi.owner = own;
+      btx.inputs = { bi };
+      blind_output bo;
+      bo.owner = own;
+      auto N = T_secret( "t3-pf-nout" );
+      bo.commitment = fc::ecc::blind( B, 990 );
+      bo.range_proof = fc::ecc::range_proof_sign( 0, bo.commitment, B, N, 0, 0, 990 );
+      btx.outputs = { bo };
+      BOOST_CHECK_NO_THROW( btx.validate() );
+      set_expiration( db, trx );
+      trx.operations = { btx };
+      sign( trx, k );
+      try {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "post-fork op40 spend must be routed to stealth_explicit_spend" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "stealth_explicit_spend" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear_signatures(); trx.operations.clear();
+   }
+   // (b) op41 refuses with the new message.
+   {
+      transfer_from_blind_operation x;
+      x.to = dan.id;
+      x.amount = core.amount( 990 );
+      x.fee = core.amount( 10 );
+      blind_input bi; bi.commitment = c; bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = B;
+      BOOST_CHECK_NO_THROW( x.validate() );
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, k );
+      try {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "post-fork op41 spend must be routed to stealth_explicit_spend" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "stealth_explicit_spend" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear_signatures(); trx.operations.clear();
    }
 } FC_CAPTURE_AND_RETHROW() }
 

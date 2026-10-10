@@ -8021,4 +8021,245 @@ BOOST_AUTO_TEST_CASE( op108_validate_rejects_bad_shapes )
    BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );   // >= 1 input
 }
 
+// ---- op108 evaluator (Task 2, nullifier migration) --------------------
+// Helper: well-formed transparent-exit op108 over pool output s with the
+// TRUE images and a real consensus-domain proof. amount + fee must equal
+// the input value (p.each) for conservation to hold; excess is the input
+// blind (single input, no outputs).
+static stealth_explicit_spend_operation T_op108_exit_true( const asset_object& core,
+      const t5_pool& p, size_t s, account_id_type to, int64_t amount, int64_t fee )
+{
+   stealth_explicit_spend_operation o;
+   o.fee = core.amount( fee );
+   o.asset_id = core.get_id();
+   o.to = to;
+   o.amount = core.amount( amount );
+   o.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   o.excess = p.blinds[s];
+   stealth_spend_input in;
+   in.commitment = p.commits[s];
+   in.owner = p.owners[s];
+   BIGNUM* bb = T_bn( p.blinds[s] );
+   std::vector<unsigned char> Cvec( p.commits[s].begin(), p.commits[s].end() );
+   std::vector<char> proof;
+   T_prove_recovery( Cvec, bb, (uint64_t)p.each, core.get_id(),
+                     in.key_image_v1, in.key_image_v2, proof );
+   BN_free( bb );
+   in.recovery_proof = stealth_recovery_proof( proof );
+   o.inputs.push_back( in );
+   return o;
+}
+
+// ---- op108 fabricated-image double spend (Task 2, spec §3.2a) ------
+BOOST_AUTO_TEST_CASE( op108_rejects_fabricated_images_on_ring_spent_output )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "op108-dbl", 16, true );
+   const size_t s = 3;
+
+   // Genuine nullification of C's REAL images (both version legs) via the
+   // real ring-spend path — not simulated.
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V2, "op108-dbl-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+
+   // Victim submits op108 on the ring-spent C with NEVER-nullified images:
+   // the proof bytes are REAL (over the real I1/I2) but the carried images
+   // are fabricated (C itself) — a spender who knows (b,v) supplying images
+   // the proof does not bind to.
+   stealth_explicit_spend_operation o = T_op108_exit_true( core, p, s, dan.get_id(), 990, 10 );
+   o.inputs[0].key_image_v1 = p.commits[s]; // fabricated: never nullified
+   o.inputs[0].key_image_v2 = p.commits[s]; // fabricated
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[s] );
+   // Pin the refusal LAYER by message (proof gate 3a, not nullifier gate
+   // 3b): a bare CHECK_THROW would pass on any-layer refusal.
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "fabricated-image explicit spend on a ring-spent output must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "Explicit spend recovery proof does not verify" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+   // Refusal happened in do_evaluate before do_apply: no nullifier was
+   // recorded for the fabricated images.
+   {
+      const auto& nul = db.get_index_type<stealth_nullifier_index>()
+                           .indices().get<by_nullifier_image>();
+      const std::vector<char> fake( p.commits[s].begin(), p.commits[s].end() );
+      BOOST_CHECK( nul.find( fc::sha256::hash( fake.data(), fake.size() ) ) == nul.end() );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- transparent exit (spec §6 5a): honest exit succeeds --------------
+BOOST_AUTO_TEST_CASE( op108_transparent_exit_succeeds_and_debits_pool )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "op108-xa", 4, false );
+   const size_t s = 1;
+   const int64_t live = t5_supply( db, core );
+   const asset before = db.get_balance( dan.get_id(), core.get_id() );
+
+   stealth_explicit_spend_operation o = T_op108_exit_true( core, p, s, dan.get_id(), 990, 10 );
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   generate_block();
+
+   // `to` credited exactly amount; blind pool debited amount + fee.
+   BOOST_CHECK_EQUAL( db.get_balance( dan.get_id(), core.get_id() ).amount.value,
+                      before.amount.value + 990 );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live - 990 - 10 );
+   const auto& bbi = db.get_index_type<blinded_balance_index>()
+                        .indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( p.commits[s] ) == bbi.end() ); // input consumed
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- transparent exit (spec §6 5b): inflation refused before apply ----
+BOOST_AUTO_TEST_CASE( op108_transparent_exit_inflation_refused )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "op108-xb", 4, false );
+   const size_t s = 2;
+   const int64_t live = t5_supply( db, core );
+   const asset before = db.get_balance( dan.get_id(), core.get_id() );
+
+   // A 1000-value input cannot cover 1500 + 10: the verify_sum kernel in
+   // do_evaluate must refuse. Proof/images are TRUE, so only the kernel
+   // stands between this op and inflation.
+   stealth_explicit_spend_operation o = T_op108_exit_true( core, p, s, dan.get_id(), 1500, 10 );
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "inflated exit amount must be refused by the conservation kernel" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "Explicit spend conservation mismatch (exit leg)" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+   // The kernel ran before do_apply: no balance moved, supply untouched,
+   // input still live.
+   BOOST_CHECK_EQUAL( db.get_balance( dan.get_id(), core.get_id() ).amount.value,
+                      before.amount.value );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
+   const auto& bbi = db.get_index_type<blinded_balance_index>()
+                        .indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( p.commits[s] ) != bbi.end() );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- transparent exit (spec §6 5c): wrong-kernel tripwire -------------
+// A WELL-FORMED exit must succeed here. If a future refactor unifies both
+// legs onto stealth_verify_excess, the empty-outs trap at
+// stealth_proof.cpp:759-760 ("io count out of bounds") fires and this test
+// goes RED — telling the refactorer the exit leg needs verify_sum, not
+// verify_excess. Same success path as 5a by design; the value is the name
+// and this comment, so the failure reads as a kernel-routing regression
+// rather than a conservation mystery.
+BOOST_AUTO_TEST_CASE( op108_exit_never_uses_stealth_verify_excess )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "op108-xc", 4, false );
+   const size_t s = 0;
+   const asset before = db.get_balance( dan.get_id(), core.get_id() );
+
+   stealth_explicit_spend_operation o = T_op108_exit_true( core, p, s, dan.get_id(), 990, 10 );
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   BOOST_CHECK_EQUAL( db.get_balance( dan.get_id(), core.get_id() ).amount.value,
+                      before.amount.value + 990 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- op108 proposal gating (spec §6 5d): pre-hardfork refusal ---------
+BOOST_AUTO_TEST_CASE( op108_proposal_gated_before_hardfork )
+{ try {
+   // Fresh fixture is pre-STEALTH (no advance to the fork).
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   // (i) op108 embedded in a proposal is refused at the visitor. The op is
+   // well-formed (passes proposal-time operation_validate) so the throw can
+   // only come from the hardfork visitor, pinned by message.
+   {
+      proposal_create_operation cop = proposal_create_operation::committee_proposal(
+            db.get_global_properties().parameters, db.head_block_time() );
+      cop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      stealth_explicit_spend_operation o;
+      o.fee = core.amount( 10 );
+      o.asset_id = core.get_id();
+      o.to = dan.get_id();
+      o.amount = core.amount( 990 );
+      stealth_spend_input in;
+      in.commitment = T_commitment( T_commit( T_bn( T_blind_secret( "op108-p" ) ), 1000 ) );
+      in.owner = authority( 1, dan.get_id(), 1 );
+      in.key_image_v1 = in.commitment;
+      in.key_image_v2 = in.commitment;
+      in.recovery_proof = stealth_recovery_proof( std::vector<char>( 163, 0 ) );
+      o.inputs.push_back( in );
+      BOOST_REQUIRE_NO_THROW( o.validate() );
+      cop.proposed_ops.emplace_back( o );
+      trx.operations.push_back( cop );
+      try {
+         PUSH_TX( db, trx, ~0 );
+         BOOST_FAIL( "pre-hardfork proposal embedding op108 must be refused" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+            "Not allowed until the stealth hardfork" ) != std::string::npos,
+            e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // (ii) a current_fees entry naming op108 is refused pre-hardfork. The
+   // schedule names ONLY op108, so the throw pins this op's gate rather
+   // than an earlier overload's.
+   {
+      proposal_create_operation cop = proposal_create_operation::committee_proposal(
+            db.get_global_properties().parameters, db.head_block_time() );
+      cop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      committee_member_update_global_parameters_operation cmuop;
+      cmuop.new_parameters = db.get_global_properties().parameters;
+      fee_schedule fs;
+      fs.parameters.insert( stealth_explicit_spend_operation::fee_params_t() );
+      cmuop.new_parameters.current_fees = std::make_shared<fee_schedule>( fs );
+      cop.proposed_ops.emplace_back( cmuop );
+      trx.operations.push_back( cop );
+      try {
+         PUSH_TX( db, trx, ~0 );
+         BOOST_FAIL( "pre-hardfork fee schedule naming op108 must be refused" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+            "stealth explicit spend" ) != std::string::npos,
+            e.to_detail_string() );
+      }
+      trx.clear();
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

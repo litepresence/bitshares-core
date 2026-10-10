@@ -100,6 +100,27 @@ class parity_review_evaluator : public evaluator<parity_review_evaluator>
       void_result do_apply( const parity_review_operation& o );
 };
 
+/**
+ * Explicit spend of blind balances (op 108, proof-first double-spend guard).
+ * One operation, two legs: outputs non-empty => blind->blind (ring spend's
+ * kernel); outputs empty => blind->transparent exit (op41's kernel). The
+ * per-input gate ORDER is the security property: recovery-proof verification
+ * (3a) BEFORE nullifier absence (3b) — the proof binds (b,v) to the
+ * commitment AND both images, so fabricated images refuse at the proof, not
+ * at the nullifier set. Both kernels run in do_evaluate, never validate()
+ * (proposal-embedded ops bypass validate).
+ */
+class stealth_explicit_spend_evaluator : public evaluator<stealth_explicit_spend_evaluator>
+{
+   public:
+      typedef stealth_explicit_spend_operation operation_type;
+
+      void_result do_evaluate( const stealth_explicit_spend_operation& o );
+      void_result do_apply( const stealth_explicit_spend_operation& o );
+
+      virtual void pay_fee() override;
+};
+
 // ---------------------------------------------------------------------------
 // Introspection + maintenance hooks (used by evaluators AND the test suite)
 // ---------------------------------------------------------------------------
@@ -330,6 +351,10 @@ uint32_t stealth_work_for_stealth_transfer( const protocol::stealth_transfer_ope
 /// Work-model units for n range-proven blind outputs (R9B): deposits,
 /// blind transfers, turnstile outputs. Pure, saturated.
 uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );
+/// Work-model units consumed by one op108 explicit spend (R9B): conservation
+/// kernel + per-input recovery proofs + per-output range proofs. Pure,
+/// saturated. Called from do_evaluate (gate) and do_apply (accounting).
+uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o );
 /// Verification-work units counted against the budget in the
 /// currently-pending block (0 pre-fork or on rollover).
 uint32_t stealth_blind_work_this_block( const database& db );

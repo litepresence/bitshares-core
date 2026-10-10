@@ -351,6 +351,19 @@ uint32_t stealth_work_for_range_proofs( uint32_t n_outputs )
    return (uint32_t)w;
 }
 
+uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o )
+{
+   // 64-bit accumulation with saturation, mirroring
+   // stealth_work_for_stealth_transfer (:331-344): this gate runs BEFORE the
+   // input/output-count asserts and a proposal-embedded op bypasses validate(),
+   // so counts are unbounded at gate time — saturate, never wrap.
+   uint64_t w = GRAPHENE_STEALTH_WORK_US_PER_KERNEL;            // conservation kernel
+   w += (uint64_t)o.inputs.size() * GRAPHENE_STEALTH_WORK_US_PER_KERNEL;  // per-input recovery proof
+   w += (uint64_t)o.outputs.size() * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;
+   if( w > 0xFFFFFFFFu ) return 0xFFFFFFFFu;
+   return (uint32_t)w;
+}
+
 uint32_t stealth_blind_work_this_block( const database& db )
 {
    const auto* s = find_stealth_status( db );
@@ -1589,5 +1602,251 @@ void_result parity_review_evaluator::do_apply( const parity_review_operation& o 
    stealth_record_parity_review( db(), o.kind, o.voter );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
+
+// ---------------------------------------------------------------------------
+// stealth_explicit_spend (op108: proof-first double-spend guard, two legs)
+// ---------------------------------------------------------------------------
+
+void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explicit_spend_operation& o )
+{ try {
+   const database& d = db();
+   FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
+              "Explicit stealth spends are not allowed until the stealth hardfork" );
+   stealth_check_blind_gate( d );
+   // One kernel-class verification per input's recovery proof (163B, two
+   // multiexps). Turnstile charges GRAPHENE_STEALTH_WORK_US_PER_KERNEL
+   // per recovery proof at :870; op108 has up to 8 inputs, so charge per input.
+   // Plus ONE base kernel unit for the conservation check itself (verify_sum
+   // or stealth_verify_excess) — the ring's calculator includes this base
+   // (stealth_evaluator.cpp:331-344 starts at GRAPHENE_STEALTH_WORK_US_PER_KERNEL) and
+   // omitting it undercharges the blind->blind leg's excess verification.
+   // Use the shared calculator so the gate and the accounting cannot drift;
+   // it saturates like stealth_work_for_stealth_transfer (see Task 2 Step 3a).
+   stealth_check_blind_work_gate( d, stealth_work_for_explicit_spend( o ) );
+   stealth_check_asset_gate( d, o.fee.asset_id );
+
+   // validate() is relay-side only and proposal-embedded ops bypass it, so the
+   // evaluator re-asserts everything it depends on. Ring does the same at
+   // stealth_evaluator.cpp:479-497.
+   FC_ASSERT( o.fee.asset_id == o.asset_id, "Explicit spend fee must be paid in the spent asset" );
+   FC_ASSERT( o.fee.amount >= 0, "Explicit spend fee cannot be negative" );
+   FC_ASSERT( !o.inputs.empty(), "Explicit spend needs at least one input" );
+   FC_ASSERT( o.inputs.size() <= 8, "Explicit spend input count out of bounds" );
+   // Proposal-bypass re-assert of the output bound (ring :491-492).
+   // No !empty — the exit leg is zero outputs by construction.
+   FC_ASSERT( o.outputs.size() <= 8, "Explicit spend output count out of bounds" );
+   FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
+              o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              "Unknown proof version" );
+   // G1c parity float rule — every other blind op calls this in do_evaluate
+   // (ring :488, turnstile :879, op41 :145, op40 :225, op39 :63). Without it
+   // op108 bypasses the fee-parity floor while still calling
+   // stealth_consume_parity_subsidy in do_apply — a half-wired parity rule.
+   stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                              o.fee.asset_id, (uint32_t)o.outputs.size(),
+                              calculate_fee_for_operation( operation( o ) ) );
+
+   // V1 sunset, mirroring the ring at :495-497. Without this a V1 op108 past
+   // sunset would mint fresh V1-range-proven outputs, defeating the sunset.
+   if( d.head_block_time() >= stealth_v1_sunset_time( d ) )
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+                 "V1 explicit spends are frozen past sunset (use turnstile re-proof)" );
+
+   const auto& bbi = d.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
+
+   // Outputs must be fresh and range-proven under the op version.
+   // Shared error string mirrors the ring path (stealth_evaluator.cpp:525):
+   // the V1 branch must NOT reference an `e` that only exists in the else-arm.
+   {
+      std::string err;
+      for( const auto& out : o.outputs )
+      {
+         FC_ASSERT( bbi.find( out.commitment ) == bbi.end(), "Stealth output commitment already exists" );
+         for( const auto& a : out.owner.account_auths ) a.first( d );
+         if( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
+         {
+            uint64_t min_v = 0, max_v = 0;
+            std::vector<char> proof( out.range_proof.begin(), out.range_proof.end() );
+            FC_ASSERT( stealth_verify_range_v1( out.commitment, proof, min_v, max_v ),
+                       "V1 range proof does not verify", ("min_v", min_v) );
+            FC_ASSERT( min_v == 0, "V1 range proof must claim min_value 0" );
+         }
+         else
+         {
+            std::vector<char> proof( out.range_proof.begin(), out.range_proof.end() );
+            std::vector<fc::ecc::commitment_type> cs = { out.commitment };
+            FC_ASSERT( stealth_verify_bp_plus( 1, proof, cs, err ),
+                       "V2 range proof does not verify: ${e}", ("e", err) );
+         }
+      }
+   }
+
+   // ---- PER-INPUT GATES. ORDER IS THE SECURITY PROPERTY. ----
+   for( const auto& in : o.inputs )
+   {
+      auto itr = bbi.find( in.commitment );
+      FC_ASSERT( itr != bbi.end(), "Explicit spend: commitment not a live blind balance" );
+      FC_ASSERT( itr->asset_id == o.asset_id, "Explicit spend: input asset mismatch" );
+      FC_ASSERT( itr->owner == in.owner, "Explicit spend: input owner mismatch" );
+
+      // (3a) PROOF FIRST. Establishes the supplied images ARE this
+      // commitment's opening. Skipping or reordering this step is a double
+      // spend — see design spec §3.2a.
+      std::string rerr;
+      FC_ASSERT( stealth_verify_recovery_proof( in.commitment, in.key_image_v1,
+                 in.key_image_v2, in.recovery_proof.proof_bytes,
+                 o.asset_id.instance.value, rerr ),
+                 "Explicit spend recovery proof does not verify: ${e}", ("e", rerr) );
+
+      // (3b) THEN nullifier absence, both version legs. nullifier_key takes
+      // const std::vector<char>& (:100-106); commitment_type is
+      // zero_initialized_array<unsigned char,33> and does NOT implicitly
+      // convert. Convert explicitly, mirroring the turnstile at :929-930.
+      {
+         const std::vector<char> i1( in.key_image_v1.begin(), in.key_image_v1.end() );
+         const std::vector<char> i2( in.key_image_v2.begin(), in.key_image_v2.end() );
+         FC_ASSERT( nul.find( nullifier_key( i1 ) ) == nul.end(),
+                    "Explicit spend refused: V1 image nullified (really spent)" );
+         FC_ASSERT( nul.find( nullifier_key( i2 ) ) == nul.end(),
+                    "Explicit spend refused: V2 image nullified (really spent)" );
+      }
+   }
+
+   // Duplicate commitment within one op would double-remove an index entry.
+   for( size_t a = 0; a < o.inputs.size(); ++a )
+      for( size_t b = a + 1; b < o.inputs.size(); ++b )
+         FC_ASSERT( o.inputs[a].commitment != o.inputs[b].commitment,
+                    "Duplicate commitment within explicit spend" );
+
+   // Conservation — TWO KERNELS, one per leg. The transparent exit CANNOT use
+   // stealth_verify_excess (it rejects an empty outs vector at
+   // stealth_proof.cpp:760 and the exit has no output commitment by
+   // construction), so it uses op41's verify_sum against
+   // blind(excess, fee + amount) — confidential.cpp:80-89.
+   {
+      std::vector<fc::ecc::commitment_type> in_cs;
+      in_cs.reserve( o.inputs.size() );
+      for( const auto& in : o.inputs )
+         in_cs.push_back( in.commitment );
+
+      if( o.outputs.empty() )
+      {
+         // Transparent exit. op41's kernel: the public amount is committed on
+         // the output side together with the fee. verify_sum, NOT
+         // stealth_verify_excess — the latter rejects an empty outs vector
+         // (stealth_proof.cpp:760) and this leg has none by construction.
+         FC_ASSERT( o.to != account_id_type(), "transparent exit needs a destination" );
+         // validate() checks these too, but proposals bypass validate — re-assert.
+         FC_ASSERT( o.amount.asset_id == o.asset_id, "exit amount asset must match asset_id" );
+         FC_ASSERT( o.amount.amount > 0, "transparent exit requires a positive amount" );
+         std::vector<fc::ecc::commitment_type> out_cs;
+         out_cs.push_back( fc::ecc::blind( o.excess,
+                                           o.fee.amount.value + o.amount.amount.value ) );
+         FC_ASSERT( fc::ecc::verify_sum( in_cs, out_cs, 0 ),
+                    "Explicit spend conservation mismatch (exit leg)" );
+      }
+      else
+      {
+         // Blind->blind. The ring spend's kernel:
+         // sum(C_in) - sum(C_out) - fee*H == excess*G (stealth_evaluator.cpp:680).
+         std::string err;
+         std::vector<fc::ecc::commitment_type> out_cs;
+         out_cs.reserve( o.outputs.size() );
+         for( const auto& out : o.outputs )
+            out_cs.push_back( out.commitment );
+         FC_ASSERT( stealth_verify_excess( in_cs, out_cs, o.fee.amount.value, o.excess, err ),
+                    "Stealth conservation mismatch: ${e}", ("e", err) );
+      }
+   }
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (o) ) }
+
+void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_spend_operation& o )
+{ try {
+   db().adjust_balance( o.fee_payer(), o.fee );
+   const auto& bbi = db().get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   int32_t spent_counted = 0;
+   for( const auto& in : o.inputs )
+   {
+      auto itr = bbi.find( in.commitment );
+      GRAPHENE_ASSERT( itr != bbi.end(), blind_transfer_unknown_commitment, "", ("commitment", in.commitment) );
+      if( itr->created_block != 0 ) ++spent_counted;
+
+      // Record BOTH version images. The image fields are VERSION-NAMED:
+      // key_image_v1 is always the V1-domain image, key_image_v2 always the
+      // V2-domain image (the recovery proof binds I1/I2 to those exact
+      // domain bases). Tag each nullifier with its OWN version, NOT with
+      // o.proof_version — an op with proof_version==V2 still has a V1 image
+      // in key_image_v1. The ring path tags with o.proof_version because
+      // its key_image/alt_key_image fields are RELATIVE (primary/alternate);
+      // op108's fields are absolute. nullifier_key needs the explicit
+      // vector<char> conversion (commitment_type does not convert).
+      {
+         const std::vector<char> i1( in.key_image_v1.begin(), in.key_image_v1.end() );
+         const std::vector<char> i2( in.key_image_v2.begin(), in.key_image_v2.end() );
+         db().create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
+            n.key_image = nullifier_key( i1 );
+            n.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+            n.created = db().head_block_time();
+         } );
+         db().create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
+            n.key_image = nullifier_key( i2 );
+            n.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+            n.created = db().head_block_time();
+         } );
+      }
+      db().remove( *itr );
+   }
+
+   // New outputs are always post-fork: do_evaluate already refused pre-hardfork,
+   // so created_block/created_time are unconditional (same as the ring path).
+   for( const auto& out : o.outputs )
+      db().create<blinded_balance_object>( [&]( blinded_balance_object& obj ) {
+         obj.asset_id = o.fee.asset_id; obj.owner = out.owner;
+         obj.commitment = out.commitment;
+         obj.created_block = db().head_block_num() + 1;
+         obj.created_time  = db().head_block_time();
+      } );
+
+   // Transparent exit: credit the PUBLIC amount. The value is already proven to
+   // equal sum(in) - fee by the verify_sum kernel in do_evaluate, so there is
+   // no "amount from conservation" to recompute here — o.amount IS that value.
+   // Mirrors op41's confidential_evaluator.cpp:154-155.
+   share_type exited = 0;
+   if( o.outputs.empty() )
+   {
+      db().adjust_balance( o.to, o.amount );
+      exited = o.amount.amount;
+   }
+
+   const auto& add = o.fee.asset_id(db()).dynamic_asset_data_id(db());
+   db().modify( add, [&]( asset_dynamic_data_object& obj ) {
+      // Exit leg leaves the blind pool entirely: amount AND fee.
+      // op41: confidential_supply -= o.amount.amount + o.fee.amount (:169).
+      obj.confidential_supply -= ( exited + o.fee.amount );
+      FC_ASSERT( obj.confidential_supply >= 0 );
+   } );
+   stealth_shadow_add( db(), o.fee.asset_id, share_type( -( exited + o.fee.amount ).value ) );
+   // Pool counter: -metadata-bearing inputs removed, +outputs created.
+   // Mirrors confidential_evaluator.cpp:266-267.
+   stealth_pool_count_add( db(), o.fee.asset_id, -spent_counted );
+   stealth_pool_count_add( db(), o.fee.asset_id, (int32_t)o.outputs.size() );
+   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                   o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+   stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
+   stealth_count_blind_op( db() );
+   // SAME calculator as do_evaluate — one definition, so gate and accounting
+   // cannot drift (the ring's precedent; the turnstile duplicates it inline at
+   // :1077-1081, which is why this op does not).
+   stealth_count_blind_work( db(), stealth_work_for_explicit_spend( o ) );
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (o) ) }
+
+void stealth_explicit_spend_evaluator::pay_fee()
+{
+   generic_evaluator::pay_fee();
+}
 
 } } // graphene::chain

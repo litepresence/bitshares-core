@@ -321,6 +321,8 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for turnstile re-proof operations prior to the stealth hardfork");
          FC_ASSERT(!op.new_parameters.current_fees->exists<parity_review_operation>(),
                    "Unable to define fees for parity review operations prior to the stealth hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<stealth_explicit_spend_operation>(),
+                   "Unable to define fees for stealth explicit spend operations prior to the stealth hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {

@@ -8605,6 +8605,56 @@ BOOST_AUTO_TEST_CASE( op108_rejects_fabricated_images_on_ring_spent_output )
    }
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---- spec §6 item 14 (matched pair with 13): true images after ring spend ----
+// Same sequence as op108_rejects_fabricated_images_on_ring_spent_output, but
+// supplying C's TRUE images (unmodified T_op108_exit_true). Must pass the
+// proof gate 3a and refuse at the nullifier gate 3b. Pins that the two gates
+// are distinct (a fix rejecting every op108 on a ring participant would pass
+// 13 while breaking legitimate spends; 14 pins the layer).
+BOOST_AUTO_TEST_CASE( op108_true_images_after_ring_spend_refused_at_nullifier )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "op108-tn", 16, true );
+   const size_t s = 3;
+
+   // Genuine nullification via the real ring-spend path — not simulated.
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V2, "op108-tn-sp", 600, 390, 10 );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+
+   const int64_t live = t5_supply( db, core );
+   const asset before = db.get_balance( dan.get_id(), core.get_id() );
+
+   // TRUE images, real proof — proof gate 3a passes, nullifier gate 3b refuses.
+   stealth_explicit_spend_operation o = T_op108_exit_true( core, p, s, dan.get_id(), 990, 10 );
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "true-image explicit spend on a ring-spent output must be refused at the nullifier" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "Explicit spend refused: V1 image nullified" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
+   // No state moves: balances/supply untouched, input still live (retained
+   // for decoys, not removed by the ring spend; refusal precedes do_apply).
+   BOOST_CHECK_EQUAL( db.get_balance( dan.get_id(), core.get_id() ).amount.value,
+                      before.amount.value );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
+   const auto& bbi = db.get_index_type<blinded_balance_index>()
+                        .indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( p.commits[s] ) != bbi.end() );
+} FC_CAPTURE_AND_RETHROW() }
+
 // ---- transparent exit (spec §6 5a): honest exit succeeds --------------
 BOOST_AUTO_TEST_CASE( op108_transparent_exit_succeeds_and_debits_pool )
 { try {
@@ -8666,6 +8716,91 @@ BOOST_AUTO_TEST_CASE( op108_transparent_exit_inflation_refused )
    trx.clear_signatures(); trx.operations.clear();
    // The kernel ran before do_apply: no balance moved, supply untouched,
    // input still live.
+   BOOST_CHECK_EQUAL( db.get_balance( dan.get_id(), core.get_id() ).amount.value,
+                      before.amount.value );
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
+   const auto& bbi = db.get_index_type<blinded_balance_index>()
+                        .indices().get<by_commitment>();
+   BOOST_CHECK( bbi.find( p.commits[s] ) != bbi.end() );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- blind→blind inflation refused (M-03): outputs exceed inputs ---------
+// Single 1000-value input into two V2 outputs (800 + 390, fee 10): 1190 > 990
+// net available. Range proofs are REAL (for the inflated values),
+// images/proof are TRUE, so only the stealth_verify_excess kernel stands
+// between this op and inflation. Must refuse with "Stealth conservation
+// mismatch" (the blind→blind kernel, not the exit-leg verify_sum), with no
+// state move.
+BOOST_AUTO_TEST_CASE( op108_blind_inflation_refused )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "op108-xd", 4, false );
+   const size_t s = 2;
+   const int64_t live = t5_supply( db, core );
+   const asset before = db.get_balance( dan.get_id(), core.get_id() );
+
+   // Build inflated blind→blind: mirror T_op108_blind_true but with 800+390.
+   stealth_explicit_spend_operation o;
+   o.fee = core.amount( 10 );
+   o.asset_id = core.get_id();
+   o.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   stealth_spend_input in;
+   in.commitment = p.commits[s];
+   in.owner = p.owners[s];
+   BIGNUM* bb = T_bn( p.blinds[s] );
+   std::vector<unsigned char> Cvec( p.commits[s].begin(), p.commits[s].end() );
+   std::vector<char> proof;
+   T_prove_recovery( Cvec, bb, (uint64_t)p.each, core.get_id(),
+                     in.key_image_v1, in.key_image_v2, proof );
+   BN_free( bb );
+   in.recovery_proof = stealth_recovery_proof( proof );
+   o.inputs.push_back( in );
+   auto Bo1 = T_blind_secret( "op108-xd-o1" );
+   auto Bo2 = T_blind_secret( "op108-xd-o2" );
+   stealth_blind_output so1, so2;
+   {
+      BIGNUM* b1 = T_bn( Bo1 );
+      so1.commitment = T_commitment( T_commit( b1, (uint64_t)800 ) );
+      BN_free( b1 );
+   }
+   {
+      BIGNUM* b2 = T_bn( Bo2 );
+      so2.commitment = T_commitment( T_commit( b2, (uint64_t)390 ) );
+      BN_free( b2 );
+   }
+   so1.range_proof = T_bp_prove( so1.commitment, Bo1, (uint64_t)800 );
+   so2.range_proof = T_bp_prove( so2.commitment, Bo2, (uint64_t)390 );
+   so1.owner = p.owners[s];
+   so2.owner = p.owners[s];
+   o.outputs = { so1, so2 };
+   {
+      BIGNUM* e = BN_new();
+      BIGNUM* bi = T_bn( p.blinds[s] );
+      BIGNUM* b1 = T_bn( Bo1 );
+      BIGNUM* b2 = T_bn( Bo2 );
+      BN_copy( e, bi );
+      BN_mod_sub( e, e, b1, T_order(), T_ctx() );
+      BN_mod_sub( e, e, b2, T_order(), T_ctx() );
+      unsigned char eb[32]; BN_bn2binpad( e, eb, 32 );
+      std::copy( eb, eb + 32, (char*)o.excess.data() );
+      BN_free( e ); BN_free( bi ); BN_free( b1 ); BN_free( b2 );
+   }
+   set_expiration( db, trx );
+   trx.operations = { o };
+   sign( trx, p.keys[s] );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "inflated blind→blind amounts must be refused by stealth_verify_excess" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+         "Stealth conservation mismatch" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear_signatures(); trx.operations.clear();
    BOOST_CHECK_EQUAL( db.get_balance( dan.get_id(), core.get_id() ).amount.value,
                       before.amount.value );
    BOOST_CHECK_EQUAL( t5_supply( db, core ), live );

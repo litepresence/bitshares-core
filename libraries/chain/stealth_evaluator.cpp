@@ -1781,7 +1781,7 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
    // so created_block/created_time are unconditional (same as the ring path).
    for( const auto& out : o.outputs )
       db().create<blinded_balance_object>( [&]( blinded_balance_object& obj ) {
-         obj.asset_id = o.fee.asset_id; obj.owner = out.owner;
+         obj.asset_id = o.asset_id; obj.owner = out.owner;
          obj.commitment = out.commitment;
          obj.created_block = db().head_block_num() + 1;
          obj.created_time  = db().head_block_time();
@@ -1798,7 +1798,7 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
       exited = o.amount.amount;
    }
 
-   const auto& add = o.fee.asset_id(db()).dynamic_asset_data_id(db());
+   const auto& add = o.asset_id(db()).dynamic_asset_data_id(db());
    db().modify( add, [&]( asset_dynamic_data_object& obj ) {
       // Exit leg leaves the blind pool entirely: amount AND fee.
       // op41: confidential_supply -= o.amount.amount + o.fee.amount (:169).
@@ -1808,8 +1808,8 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
    stealth_shadow_add( db(), o.fee.asset_id, share_type( -( exited + o.fee.amount ).value ) );
    // Pool counter: -metadata-bearing inputs removed, +outputs created.
    // Mirrors confidential_evaluator.cpp:266-267.
-   stealth_pool_count_add( db(), o.fee.asset_id, -spent_counted );
-   stealth_pool_count_add( db(), o.fee.asset_id, (int32_t)o.outputs.size() );
+   stealth_pool_count_add( db(), o.asset_id, -spent_counted );
+   stealth_pool_count_add( db(), o.asset_id, (int32_t)o.outputs.size() );
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid );

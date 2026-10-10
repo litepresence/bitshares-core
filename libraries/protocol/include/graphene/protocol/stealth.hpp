@@ -315,9 +315,10 @@ struct stealth_ring_input
    /// [16, 32] (TARGET floor everywhere, thin or deep; the [11, 32] verifier
    /// bound below still accepts 11-rings as pure crypto, reserved for a
    /// future governance-opened thin-pool emergency). All distinct, all
-   /// currently UNSPENT (Task 6, R7 C-02: spent flags are chain-visible, so
-   /// a spent member could never be the real input — admitting one would
-   /// shrink the plausible set to the unspent remainder). Order is
+   /// currently LIVE (nullifier semantics, spec §8.2: nullified-but-indexed
+   /// members ARE decoy-eligible — no observer can distinguish them without
+   /// the opening, so admitting one does not shrink the plausible set).
+   /// Order is
    /// consensus-significant (it is the signature's member order).
    vector<commitment_type> ring;
    /// Key image: 33-byte compressed secp256k1 point, unique per spent

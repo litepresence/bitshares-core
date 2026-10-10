@@ -169,8 +169,9 @@ namespace graphene { namespace protocol {
              /* 105 */ freeze_blind_operation,       // G1 BSIP-2 (STEALTH hardfork-gated)
              /* 106 */ turnstile_reproof_operation,  // G1 BSIP-2 (STEALTH hardfork-gated)
              /* 107 */ parity_review_operation,      // G1c BSIP-2 §2 (STEALTH hardfork-gated)
-             /* 108 */ stealth_explicit_spend_operation
-           >;
+             /* 108 */ stealth_explicit_spend_operation,
+              /* 109 */ stealth_pool_exchange_operation   // G2 BSIP-2 pool swaps (STEALTH hardfork-gated)
+            >;
 
    /**
     *  Appends required authorites to the result vector.  The authorities appended are not the

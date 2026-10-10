@@ -164,6 +164,7 @@ void database::initialize_evaluators()
    register_evaluator<turnstile_reproof_evaluator>();
    register_evaluator<parity_review_evaluator>();
    register_evaluator<stealth_explicit_spend_evaluator>();
+   register_evaluator<stealth_pool_exchange_evaluator>();
 }
 
 void database::initialize_indexes()

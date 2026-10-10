@@ -573,6 +573,51 @@ struct stealth_explicit_spend_operation : public base_operation
    }
 };
 
+/**
+ * @brief Blind pool swap: consume one blinded output of asset A through a
+ * constant-product pool into one blinded output of asset B (G2, BSIP-2 pool
+ * swaps; design docs/superpowers/specs/2026-10-10-stealth-pool-swaps-design.md).
+ *
+ * 1-in/1-out is a SOUNDNESS requirement, not a simplification: with multiple
+ * inputs a prover could offset a lie about one input's value against another
+ * (the kernel constrains only the total). One input, one output, closed
+ * equation, no offsetting. G1's 1–8 generality is deliberately not inherited.
+ *
+ * Soundness chain (six links, design §3): Schnorr value-pin (value_pin binds
+ * the pseudo-output to amount_to_sell) → ring M-leg (real input worth
+ * amount_to_sell) → conservation kernel (v_out = amount_to_sell − F) →
+ * evaluator integer check (v_out == pool_pays − f_taker) → BP+ range
+ * (v_out ∈ [0,2^64)) → nullifiers (proof-before-nullifier order, op108
+ * :1697-1712 discipline). Amounts stay public (pool reserves reveal them);
+ * only the input/output linkage is blind.
+ *
+ * fee.asset_id MUST equal the input asset (G1 :495 discipline): a third-asset
+ * tx fee would need its own generator term. All fee terms are
+ * value-denominated under the single H (design C-04/C-05).
+ */
+struct stealth_pool_exchange_operation : public base_operation
+{
+   struct fee_params_t {
+      uint64_t fee              = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+      uint32_t price_per_output = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+   };
+
+   asset                     fee;              ///< tx fee (G1c parity-routed); fee.asset_id == input asset
+   liquidity_pool_id_type    pool;             ///< pool swapped through (instance feeds G2RM/G2VP transcripts)
+   asset                     amount_to_sell;   ///< claimed input value; PINNED by the Schnorr value_pin, NOT trusted
+   asset                     min_to_receive;   ///< slippage floor, enforced by the shared pool math
+   uint8_t                   proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   blind_factor_type         excess;           ///< b_P − b_out, mod n (composite-F kernel)
+   stealth_ring_input        input;            ///< exactly one (no vector — soundness requirement)
+   stealth_blind_output      output;           ///< exactly one (no vector — soundness requirement)
+   vector<char>              value_pin;        ///< Schnorr (T ‖ s), 65 bytes: 33B compressed T + 32B scalar s
+   extensions_type           extensions;       ///< appended-last; new fields go here
+
+   account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
+   void            validate()const;
+   share_type      calculate_fee( const fee_params_t& k )const;
+};
+
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::stealth_ring_input,
@@ -595,7 +640,12 @@ FC_REFLECT( graphene::protocol::stealth_spend_input,
             (commitment)(owner)(key_image_v1)(key_image_v2)(recovery_proof) )
 FC_REFLECT( graphene::protocol::stealth_explicit_spend_operation,
             (fee)(asset_id)(inputs)(outputs)(amount)(to)(proof_version)(excess)(extensions) )
+FC_REFLECT( graphene::protocol::stealth_pool_exchange_operation,
+            (fee)(pool)(amount_to_sell)(min_to_receive)(proof_version)(excess)
+            (input)(output)(value_pin)(extensions) )
 FC_REFLECT( graphene::protocol::stealth_explicit_spend_operation::fee_params_t,
+            (fee)(price_per_output) )
+FC_REFLECT( graphene::protocol::stealth_pool_exchange_operation::fee_params_t,
             (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation::fee_params_t, (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation::fee_params_t, (fee) )
@@ -603,6 +653,7 @@ FC_REFLECT( graphene::protocol::turnstile_reproof_operation::fee_params_t, (fee)
 FC_REFLECT( graphene::protocol::parity_review_operation::fee_params_t, (fee) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_pool_exchange_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
@@ -611,4 +662,5 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_op
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_pool_exchange_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation )

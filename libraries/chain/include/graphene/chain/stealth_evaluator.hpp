@@ -5,6 +5,7 @@
  */
 #pragma once
 #include <graphene/chain/evaluator.hpp>
+#include <graphene/chain/liquidity_pool_evaluator.hpp>
 #include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/types.hpp>
 
@@ -120,6 +121,37 @@ class stealth_explicit_spend_evaluator : public evaluator<stealth_explicit_spend
       void_result do_apply( const stealth_explicit_spend_operation& o );
 
       virtual void pay_fee() override;
+};
+
+/**
+ * Blind pool swap (op 109, G2; design 2026-10-10-stealth-pool-swaps-design).
+ * 1-in/1-out replica of liquidity_pool_exchange through the shared pool-math
+ * helper, with the six-link soundness chain (Schnorr value-pin → ring M-leg
+ * → kernel → integer check → BP+ → nullifiers). Verification order in
+ * do_evaluate is load-bearing EXCEPT for one documented data dependency:
+ * the shared pool math (and the composite-F bound asserts) run BEFORE the
+ * ring verification because G2RM binds the composite fee F — the ring
+ * message cannot be built before F is computed and bounded. All fail-closed
+ * asserts still precede acceptance, and proof-before-nullifier is preserved.
+ * Fee routing (design §5): issuer market-fee shares land in
+ * parity_pool[asset] (never accumulated_fees); the committee network_percent
+ * cut still vests to COMMITTEE; registrar/referrer rewards are forfeited
+ * (no identifiable taker). No real user balance is ever touched (TEMP leg).
+ */
+class stealth_pool_exchange_evaluator : public evaluator<stealth_pool_exchange_evaluator>
+{
+   public:
+      typedef stealth_pool_exchange_operation operation_type;
+
+      void_result do_evaluate( const stealth_pool_exchange_operation& o );
+      void_result do_apply( const stealth_pool_exchange_operation& o );
+
+      virtual void pay_fee() override;
+
+   private:
+      const liquidity_pool_object* _pool = nullptr;
+      pool_exchange_amounts _amounts;
+      int64_t _F = 0;
 };
 
 // ---------------------------------------------------------------------------

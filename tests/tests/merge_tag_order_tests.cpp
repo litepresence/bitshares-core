@@ -51,4 +51,15 @@ BOOST_AUTO_TEST_CASE(tags_g1_104_to_107)
    BOOST_CHECK_EQUAL( tag107, 107 );
 }
 
+// G2-2: op108 (explicit spend) + op109 (pool exchange) appended after the G1
+// block, extending the consecutive stealth range to 104–109. Appended-last:
+// every earlier tag is untouched by construction.
+BOOST_AUTO_TEST_CASE(tags_g1_108_to_109)
+{
+   const int tag108 = operation::tag<stealth_explicit_spend_operation>::value;
+   const int tag109 = operation::tag<stealth_pool_exchange_operation>::value;
+   BOOST_CHECK_EQUAL( tag108, 108 );
+   BOOST_CHECK_EQUAL( tag109, 109 );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

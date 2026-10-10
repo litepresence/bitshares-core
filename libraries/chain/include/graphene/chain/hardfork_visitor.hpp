@@ -99,7 +99,8 @@ struct hardfork_visitor {
                                            protocol::freeze_blind_operation,
                                            protocol::turnstile_reproof_operation,
                                            protocol::parity_review_operation,
-                                           protocol::stealth_explicit_spend_operation >;
+                                           protocol::stealth_explicit_spend_operation,
+                                           protocol::stealth_pool_exchange_operation >;
 
    fc::time_point_sec now;
 

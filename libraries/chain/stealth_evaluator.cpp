@@ -15,6 +15,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/exceptions.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/liquidity_pool_object.hpp>
 
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/protocol/stealth.hpp>
@@ -52,6 +53,7 @@ using protocol::GRAPHENE_STEALTH_REVIEW_PARITY;
 using protocol::GRAPHENE_STEALTH_REVIEW_SET_REPORT;
 using protocol::GRAPHENE_STEALTH_RING_MAX;
 using protocol::GRAPHENE_STEALTH_RING_MIN;
+using protocol::GRAPHENE_STEALTH_RING_TARGET;
 using protocol::GRAPHENE_STEALTH_SKEW_WINDOW_BLOCKS;
 using protocol::GRAPHENE_STEALTH_SKEW_WINDOWS_KEPT;
 using protocol::GRAPHENE_STEALTH_V1_LIFETIME_SEC;
@@ -1817,6 +1819,361 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 
 void stealth_explicit_spend_evaluator::pay_fee()
+{
+   generic_evaluator::pay_fee();
+}
+
+// ---------------------------------------------------------------------------
+// stealth_pool_exchange (op109, G2: blind pool swap, 1-in/1-out)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// G2 market-fee routing (design §5): the issuer market-fee share of one
+/// pool-swap leg lands in parity_pool[recv_asset] (transparent singleton
+/// map, never an account balance — fundable with zero linkage); the
+/// committee network_percent cut still vests to COMMITTEE when nonzero;
+/// registrar/referrer rewards are forfeited (no identifiable taker, so no
+/// referral to reward). Unlike stealth_parity_route_fee this is NOT a 5%
+/// share behind an opt-in gate: the G2 fee path is defined as 100% parity
+/// routing (MG-04: it does not count toward the parity+h2 joint cap).
+/// Totals preserved exactly: parity increment + network cut == fee_amount.
+void g2_route_market_fee_to_parity( database& db, asset_id_type recv_asset,
+                                    share_type fee_amount )
+{
+   if( fee_amount.value <= 0 )
+      return;
+   share_type issuer_fee = fee_amount;
+   const uint16_t network_percent =
+      db.get_global_properties().parameters.get_market_fee_network_percent();
+   if( network_percent > 0 )
+   {
+      fc::uint128_t cut( (uint64_t)issuer_fee.value );
+      cut *= network_percent;
+      cut /= GRAPHENE_100_PERCENT;
+      FC_ASSERT( cut <= fc::uint128_t( (uint64_t)issuer_fee.value ),
+                 "Fee shared to the network shouldn't be greater than total market fee" );
+      const share_type net( static_cast<int64_t>( cut ) );
+      if( net.value > 0 )
+      {
+         db.deposit_market_fee_vesting_balance( GRAPHENE_COMMITTEE_ACCOUNT,
+                                                asset( net, recv_asset ) );
+         issuer_fee -= net;
+      }
+   }
+   if( issuer_fee.value <= 0 )
+      return;
+   const auto& st = get_or_create_stealth_status( db );
+   db.modify( st, [&]( stealth_status_object& o ) {
+      auto itr = o.parity_pool.find( recv_asset );
+      if( itr == o.parity_pool.end() )
+         o.parity_pool[ recv_asset ] = issuer_fee;
+      else
+         itr->second += issuer_fee;
+   } );
+}
+
+} // namespace
+
+void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exchange_operation& o )
+{ try {
+   const database& d = db();
+   // (1) Fork gate.
+   FC_ASSERT( HARDFORK_STEALTH_PASSED( d.head_block_time() ),
+              "Stealth pool swaps are not allowed until the stealth hardfork" );
+   // (2) Blind gate (count).
+   stealth_check_blind_gate( d );
+   // (3) Work gate: a swap costs ring + 2xBP + kernel + pool math, strictly
+   // more than :331. Runs before the ring-size asserts, so the calculator
+   // takes a wire-shaped op and saturates (fail-closed, never wraps).
+   stealth_check_blind_work_gate( d,
+      stealth_work_for_pool_exchange( (uint32_t)o.input.ring.size() ) );
+   // (4) Asset gates (A AND B): per-asset supply-divergence halts bind both
+   // legs (a diverged asset's books are untrusted in either direction).
+   stealth_check_asset_gate( d, o.amount_to_sell.asset_id );
+   stealth_check_asset_gate( d, o.min_to_receive.asset_id );
+
+   // (5) Pool/shape/field bounds. validate() is relay-side only and
+   // proposal-embedded ops bypass it, so the evaluator re-asserts everything
+   // it depends on (op108 :1600-1612 discipline).
+   FC_ASSERT( o.fee.asset_id == o.amount_to_sell.asset_id,
+              "Stealth pool swap fee must be paid in the sold asset" );
+   FC_ASSERT( o.fee.amount >= 0, "Stealth pool swap fee cannot be negative" );
+   FC_ASSERT( o.amount_to_sell.amount > 0, "Stealth pool swap sell amount must be positive" );
+   FC_ASSERT( o.min_to_receive.amount > 0, "Stealth pool swap slippage floor must be positive" );
+   FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
+              o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              "Unknown proof version" );
+   FC_ASSERT( o.value_pin.size() == 65, "Stealth pool swap value_pin must be 65 bytes" );
+   FC_ASSERT( o.output.range_proof.size() == 592,
+              "Stealth pool swap output proof must be 592 bytes (BP+ m=1)" );
+   // V1 sunset, mirroring the ring at :529-532. Without this a V1 op109 past
+   // sunset would mint fresh V1-domain-nullified outputs, defeating the sunset.
+   if( d.head_block_time() >= stealth_v1_sunset_time( d ) )
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+                 "V1 stealth pool swaps are frozen past sunset (use turnstile re-proof)" );
+
+   _pool = &o.pool(d);
+   FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
+   FC_ASSERT(    ( o.amount_to_sell.asset_id == _pool->asset_a
+                && o.min_to_receive.asset_id == _pool->asset_b )
+              || ( o.amount_to_sell.asset_id == _pool->asset_b
+                && o.min_to_receive.asset_id == _pool->asset_a ),
+              "Asset type mismatch" );
+
+   // Pool floor on the INPUT asset: ring spends need decoys; thin-pool rings
+   // mark the spender (availability yields to privacy, explicitly).
+   FC_ASSERT( stealth_pool_depth( d, o.amount_to_sell.asset_id ) >= GRAPHENE_STEALTH_BLIND_POOL_FLOOR,
+              "Blind pool below floor: stealth spends halted (availability yields to privacy)" );
+
+   // (6) Ring shape + decoy policy. G2 floors at TARGET (16): no thin-pool
+   // emergency allowance (validate() already pins 16–32 at relay).
+   const auto& in = o.input;
+   FC_ASSERT( in.ring.size() >= GRAPHENE_STEALTH_RING_TARGET &&
+              in.ring.size() <= GRAPHENE_STEALTH_RING_MAX,
+              "Ring size out of bounds" );
+   FC_ASSERT( in.ring_scheme == protocol::GRAPHENE_STEALTH_RING_SCHEME_V1,
+              "Unknown ring scheme" );
+   FC_ASSERT( in.key_image.size() == 33, "Key image must be 33 bytes" );
+   FC_ASSERT( in.ring_sig.size() == 32 + 96 * in.ring.size(), "Ring signature size mismatch" );
+   FC_ASSERT( in.alt_key_image.size() == 33, "Alt key image must be 33 bytes" );
+   FC_ASSERT( in.alt_ring_sig.size() == 32 + 96 * in.ring.size(),
+              "Alt ring signature size mismatch" );
+   FC_ASSERT( in.key_image != in.alt_key_image, "Duplicate key image within operation" );
+   for( size_t i = 0; i < in.ring.size(); ++i )
+      for( size_t j = i + 1; j < in.ring.size(); ++j )
+         FC_ASSERT( in.ring[i] != in.ring[j], "Duplicate ring member" );
+
+   const auto& bbi = d.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
+
+   // Output commitment must be fresh; owner must resolve (checked now so a
+   // garbage owner fails before any crypto verifies).
+   FC_ASSERT( bbi.find( o.output.commitment ) == bbi.end(),
+              "Stealth output commitment already exists" );
+   for( const auto& a : o.output.owner.account_auths ) a.first( d );
+
+   // Every member must be a live blinded balance of the INPUT asset carrying
+   // post-fork creation metadata (grandfathered outputs are never decoys).
+   // Nullified members stay eligible (nullifier set alone blocks re-spend).
+   std::vector<uint32_t> heights;
+   std::vector<fc::time_point_sec> times;
+   heights.reserve( in.ring.size() );
+   times.reserve( in.ring.size() );
+   for( const auto& c : in.ring )
+   {
+      auto itr = bbi.find( c );
+      FC_ASSERT( itr != bbi.end(), "Ring member is not a live blinded balance" );
+      FC_ASSERT( itr->asset_id == o.amount_to_sell.asset_id, "Ring member asset mismatch" );
+      FC_ASSERT( itr->created_block != 0, "Grandfathered outputs are not decoy-eligible" );
+      heights.push_back( itr->created_block );
+      times.push_back( itr->created_time );
+   }
+   {
+      std::string err;
+      FC_ASSERT( stealth_check_decoy_policy( heights, times, d.head_block_time(),
+                                             d.head_block_num(), err,
+                                             stealth_pool_depth( d, o.amount_to_sell.asset_id ) ),
+                 "Decoy policy violation: ${e}", ("e", err) );
+   }
+
+   // (7) Schnorr value-pin (design §3 link 1; proof Lemma 1): binds the
+   // pseudo-output to amount_to_sell. value_pin is T(33) ‖ s(32).
+   {
+      const std::vector<char> T_bytes( o.value_pin.begin(), o.value_pin.begin() + 33 );
+      const std::string s_bytes( o.value_pin.begin() + 33, o.value_pin.end() );
+      std::string err;
+      FC_ASSERT( stealth_verify_value_pin( in.pseudo_output, o.amount_to_sell.amount.value,
+                                           o.pool.instance.value, T_bytes, s_bytes, err ),
+                 "Stealth pool swap value-pin does not verify: ${e}", ("e", err) );
+   }
+
+   // (8) Shared pool math + min_to_receive. ORDER NOTE (deviation from the
+   // brief's listed order, forced by a data dependency): G2RM binds the
+   // composite fee F, so F must be computed — and bounded — BEFORE the ring
+   // message below can be built. Pool math is a pure public function with no
+   // state effects; every fail-closed assert still precedes acceptance and
+   // proof-before-nullifier is preserved.
+   _amounts = calculate_pool_exchange_amounts( d, *_pool, o.amount_to_sell, o.min_to_receive );
+
+   // (9) Composite-F asserts (proof §6: 128-bit sum, 0 ≤ F ≤ MAX, F ≤ a;
+   // each term independently bound so fee mass cannot shift components).
+   // F fits int64_t by construction: each term is ≥ 0 and the sum is capped
+   // before the kernel's unsigned BN_set_word path (design §3, :768 note).
+   FC_ASSERT( _amounts.maker_market_fee.amount >= 0, "Maker market fee cannot be negative" );
+   FC_ASSERT( _amounts.taker_market_fee.amount >= 0, "Taker market fee cannot be negative" );
+   {
+      fc::uint128_t F128( 0 );
+      // share_type is signed; the ≥0 asserts above make each cast exact.
+      F128 += fc::uint128_t( (uint64_t)_amounts.maker_market_fee.amount.value );
+      F128 += fc::uint128_t( (uint64_t)_amounts.taker_market_fee.amount.value );
+      F128 += fc::uint128_t( (uint64_t)o.fee.amount.value );
+      FC_ASSERT( F128 <= fc::uint128_t( (uint64_t)GRAPHENE_MAX_SHARE_SUPPLY ),
+                 "Stealth pool swap composite fee exceeds max supply" );
+      FC_ASSERT( F128 <= fc::uint128_t( (uint64_t)o.amount_to_sell.amount.value ),
+                 "Stealth pool swap composite fee exceeds sell amount" );
+      _F = (int64_t)F128;
+   }
+
+   // (10) Ring signature + alt leg over G2RM (binds version, input asset,
+   // pool, claimed value, slippage floor, image, ring, pseudo, outputs, F).
+   const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
+                               ? GRAPHENE_STEALTH_PROOF_V2
+                               : GRAPHENE_STEALTH_PROOF_V1;
+   std::vector<fc::ecc::commitment_type> ring_cs( in.ring.begin(), in.ring.end() );
+   std::vector<fc::ecc::commitment_type> out_cs = { o.output.commitment };
+   {
+      fc::sha256 m = stealth_pool_message( o.proof_version, o.amount_to_sell.asset_id,
+         o.pool.instance.value, o.amount_to_sell.amount.value, o.min_to_receive.amount.value,
+         in.key_image, ring_cs, in.pseudo_output, out_cs, _F );
+      std::string msg( (const char*)m.data(), 32 );
+      std::string err;
+      FC_ASSERT( stealth_verify_ring( o.proof_version, in, msg, err ),
+                 "Ring signature does not verify: ${e}", ("e", err) );
+   }
+   {
+      protocol::stealth_ring_input alt_in;
+      alt_in.ring = in.ring;
+      alt_in.key_image = in.alt_key_image;
+      alt_in.ring_sig = in.alt_ring_sig;
+      alt_in.pseudo_output = in.pseudo_output;
+      fc::sha256 ma = stealth_pool_message( alt_version, o.amount_to_sell.asset_id,
+         o.pool.instance.value, o.amount_to_sell.amount.value, o.min_to_receive.amount.value,
+         in.alt_key_image, ring_cs, in.pseudo_output, out_cs, _F );
+      std::string msg_alt( (const char*)ma.data(), 32 );
+      std::string err;
+      FC_ASSERT( stealth_verify_ring( alt_version, alt_in, msg_alt, err ),
+                 "Ring signature does not verify: ${e}", ("e", err) );
+   }
+
+   // (11) Nullifier absence, both legs (proof-before-nullifier, op108
+   // :1697-1712 discipline: the pin + ring proofs above established the
+   // images ARE this opening before the set is consulted).
+   FC_ASSERT( nul.find( nullifier_key( in.key_image ) ) == nul.end(),
+              "Key image already spent" );
+   FC_ASSERT( nul.find( nullifier_key( in.alt_key_image ) ) == nul.end(),
+              "Alternate key image already spent" );
+
+   // (12) BP+ range (m=1 enforced): v_out ∈ [0,2^64); transitively enforces
+   // F ≤ amount_to_sell alongside (9).
+   {
+      std::string err;
+      std::vector<char> proof( o.output.range_proof.begin(), o.output.range_proof.end() );
+      FC_ASSERT( stealth_verify_bp_plus( 1, proof, out_cs, err ),
+                 "Stealth pool swap output range proof does not verify: ${e}", ("e", err) );
+   }
+
+   // (13) Conservation kernel (proof Lemma 3): v_out = amount_to_sell − F.
+   // With (9) this pins the output to pool_pays − f_taker (Lemma 4).
+   {
+      std::string err;
+      FC_ASSERT( stealth_verify_excess( { in.pseudo_output }, out_cs, _F, o.excess, err ),
+                 "Stealth conservation mismatch: ${e}", ("e", err) );
+   }
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (o) ) }
+
+void_result stealth_pool_exchange_evaluator::do_apply( const stealth_pool_exchange_operation& o )
+{ try {
+   // Fee rides the FBA-style path: credit TEMP first (the blind surplus covers
+   // it by conservation), the evaluator framework debits it after do_apply.
+   db().adjust_balance( o.fee_payer(), o.fee );
+
+   // Pool reserve mutation — byte-identical to
+   // liquidity_pool_exchange_evaluator::do_apply (:461-473), including the
+   // virtual_value ≥ old and positivity asserts.
+   const auto old_virtual_value = _pool->virtual_value;
+   if( o.amount_to_sell.asset_id == _pool->asset_a )
+   {
+      db().modify( *_pool, [this]( liquidity_pool_object& lpo ){
+         lpo.balance_a += _amounts.pool_receives.amount;
+         lpo.balance_b -= _amounts.pool_pays.amount;
+         lpo.update_virtual_value();
+      });
+   }
+   else
+   {
+      db().modify( *_pool, [this]( liquidity_pool_object& lpo ){
+         lpo.balance_b += _amounts.pool_receives.amount;
+         lpo.balance_a -= _amounts.pool_pays.amount;
+         lpo.update_virtual_value();
+      });
+   }
+
+   FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "Internal error" );
+   FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
+
+   // Market-fee routing (design §5): issuer shares → parity_pool (never
+   // accumulated_fees); committee network_percent cut vests to COMMITTEE iff
+   // nonzero; registrar/referrer rewards forfeited (no identifiable taker).
+   g2_route_market_fee_to_parity( db(), o.amount_to_sell.asset_id, _amounts.maker_market_fee.amount );
+   g2_route_market_fee_to_parity( db(), o.min_to_receive.asset_id, _amounts.taker_market_fee.amount );
+
+   // Nullifiers, both version legs (relative tags, ring-path discipline:
+   // key_image rides o.proof_version, alt rides the other version).
+   const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
+                               ? GRAPHENE_STEALTH_PROOF_V2
+                               : GRAPHENE_STEALTH_PROOF_V1;
+   db().create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
+      n.key_image = nullifier_key( o.input.key_image );
+      n.proof_version = o.proof_version;
+      n.created = db().head_block_time();
+   } );
+   db().create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
+      n.key_image = nullifier_key( o.input.alt_key_image );
+      n.proof_version = alt_version;
+      n.created = db().head_block_time();
+   } );
+
+   // New blinded balance is the COUNTER-asset (B): input was asset A.
+   // Post-fork creation metadata (decoy-eligible from tomorrow, never today).
+   db().create<blinded_balance_object>( [&]( blinded_balance_object& b ) {
+      b.asset_id = o.min_to_receive.asset_id;
+      b.owner = o.output.owner;
+      b.commitment = o.output.commitment;
+      b.created_block = db().head_block_num() + 1;
+      b.created_time = db().head_block_time();
+   } );
+
+   // Blind supply: asset A releases the input principal PLUS the tx-fee
+   // value, asset B absorbs the kernel-pinned output value. The fee leg
+   // needs the extra term: the kernel subtracts F (including f_tx) from the
+   // counter-asset output while the framework credits f_tx to TEMP (then
+   // debits it) and to accumulated_fees/pending via convert/pay — that +f_tx
+   // in A-books pairs with an extra −f_tx here, exactly like G1's
+   // confidential_supply −= fee (which pairs its own TEMP/pending legs).
+   // Without it every swap mints f_tx of supply (caught by
+   // verify_asset_supplies in tests). account_receives == pool_pays − f_taker
+   // == v_out (proof Lemma 4), so both counters move exactly with the kernel.
+   const asset_id_type asset_a = o.amount_to_sell.asset_id;
+   const asset_id_type asset_b = o.min_to_receive.asset_id;
+   const share_type burn_a = o.amount_to_sell.amount + o.fee.amount;
+   FC_ASSERT( burn_a >= o.amount_to_sell.amount, "Stealth pool swap supply burn overflow" );
+   const auto& add_a = asset_a(db()).dynamic_asset_data_id(db());
+   db().modify( add_a, [&]( asset_dynamic_data_object& obj ) {
+      obj.confidential_supply -= burn_a;
+      FC_ASSERT( obj.confidential_supply >= 0 );
+   } );
+   stealth_shadow_add( db(), asset_a, share_type( -burn_a.value ) );
+   const auto& add_b = asset_b(db()).dynamic_asset_data_id(db());
+   db().modify( add_b, [&]( asset_dynamic_data_object& obj ) {
+      obj.confidential_supply += _amounts.account_receives.amount;
+      FC_ASSERT( obj.confidential_supply >= 0 );
+   } );
+   stealth_shadow_add( db(), asset_b, share_type( _amounts.account_receives.amount.value ) );
+
+   // Pool counter (live-set semantics, Task 3): the ring removes nothing, so
+   // only the new counter-asset output joins the decoy set.
+   stealth_pool_count_add( db(), asset_b, 1 );
+   stealth_window_count_add( db(), 1 );
+   stealth_count_blind_op( db() );
+   stealth_count_blind_work( db(),
+      stealth_work_for_pool_exchange( (uint32_t)o.input.ring.size() ) );
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (o) ) }
+
+void stealth_pool_exchange_evaluator::pay_fee()
 {
    generic_evaluator::pay_fee();
 }

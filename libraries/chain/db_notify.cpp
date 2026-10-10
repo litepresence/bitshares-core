@@ -520,6 +520,11 @@ struct get_impacted_account_visitor
       for( const auto& out : op.outputs )
          add_authority_accounts( _impacted, out.owner );
    }
+   void operator()( const stealth_pool_exchange_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // GRAPHENE_TEMP_ACCOUNT
+      add_authority_accounts( _impacted, op.output.owner );
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

@@ -323,6 +323,8 @@ struct proposal_operation_hardfork_visitor
                    "Unable to define fees for parity review operations prior to the stealth hardfork");
          FC_ASSERT(!op.new_parameters.current_fees->exists<stealth_explicit_spend_operation>(),
                    "Unable to define fees for stealth explicit spend operations prior to the stealth hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<stealth_pool_exchange_operation>(),
+                   "Unable to define fees for stealth pool exchange operations prior to the stealth hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
@@ -508,6 +510,9 @@ struct proposal_operation_hardfork_visitor
       FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
    }
    void operator()(const graphene::chain::stealth_explicit_spend_operation&) const {
+      FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
+   }
+   void operator()(const graphene::chain::stealth_pool_exchange_operation&) const {
       FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
    }
 

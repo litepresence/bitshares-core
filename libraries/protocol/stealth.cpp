@@ -213,9 +213,53 @@ share_type stealth_explicit_spend_operation::calculate_fee( const fee_params_t& 
    return k.fee + k.price_per_output * (uint64_t)outputs.size();
 }
 
+void stealth_pool_exchange_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0 );
+   FC_ASSERT( fee.asset_id == amount_to_sell.asset_id, "pool swap fee must be paid in the sold asset" );
+   FC_ASSERT( amount_to_sell.amount > 0, "pool swap sell amount must be positive" );
+   FC_ASSERT( min_to_receive.amount > 0, "pool swap slippage floor must be positive" );
+   FC_ASSERT( proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
+              proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              "unknown proof version" );
+   // 1-in/1-out is structural (single input/output fields, no vectors), so
+   // no count bounds are needed here — unlike op104's 1..8 vectors.
+   // Ring shape mirrors the op104 relay gate, but floored at TARGET (16):
+   // G2 has no thin-pool emergency allowance (design §7: ring 16–32).
+   FC_ASSERT( input.ring.size() >= GRAPHENE_STEALTH_RING_TARGET &&
+              input.ring.size() <= GRAPHENE_STEALTH_RING_MAX,
+              "ring size out of bounds" );
+   FC_ASSERT( input.key_image.size() == 33, "key image must be 33 bytes" );
+   FC_ASSERT( input.ring_sig.size() == 32 + 96 * input.ring.size(),
+              "ring signature size mismatch" );
+   FC_ASSERT( input.alt_key_image.size() == 33, "alt key image must be 33 bytes" );
+   FC_ASSERT( input.alt_ring_sig.size() == 32 + 96 * input.ring.size(),
+              "alt ring signature size mismatch" );
+   FC_ASSERT( input.ring_scheme == GRAPHENE_STEALTH_RING_SCHEME_V1,
+              "unknown ring scheme" );
+   for( size_t i = 0; i < input.ring.size(); ++i )
+      for( size_t j = i + 1; j < input.ring.size(); ++j )
+         FC_ASSERT( input.ring[i] != input.ring[j], "duplicate ring member" );
+   // Single V2 BP+ output (m=1): the exact 592-byte blob. G2 wires no V1
+   // Borromean leg — the swap output is always a fresh BP+ commitment, so
+   // the relay bound is exact, not the 756-byte loose cap.
+   FC_ASSERT( output.range_proof.size() == 592, "pool swap output proof must be 592 bytes (BP+ m=1)" );
+   FC_ASSERT( !output.owner.is_impossible(), "pool swap output owner is impossible" );
+   // Schnorr value-pin (T ‖ s): 33B compressed point + 32B scalar = 65 bytes
+   // (design §2/§3; the 64B text was corrected per the G2-2 brief).
+   FC_ASSERT( value_pin.size() == 65, "pool swap value_pin must be 65 bytes" );
+}
+
+share_type stealth_pool_exchange_operation::calculate_fee( const fee_params_t& k )const
+{
+   // Mirror op104 (single blind output ⇒ ×1).
+   return k.fee + k.price_per_output;
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_pool_exchange_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
@@ -224,4 +268,5 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_pool_exchange_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation )

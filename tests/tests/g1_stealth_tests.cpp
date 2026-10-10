@@ -11417,4 +11417,1265 @@ BOOST_AUTO_TEST_CASE( subsidy_rule_table )
    }
 } FC_CAPTURE_AND_RETHROW() }
 
+// ============================================================================
+// EE-2: adversarial + regression suite for Rule R.
+//
+// The production behaviour under test (EE-1 bed7c6ef, EE-1b 529968a1) is
+// ALREADY BUILT, so this suite is a regression/attack suite, not a TDD-red
+// feature build: the RED evidence demanded by the brief is GUARD DELETION —
+// mutate the load-bearing production line, watch the named case go RED, revert.
+// Every case below names the line it pins in its guard-deletion note.
+//
+// Two invariants carry the whole mechanism and are what EE-2 exists to pin:
+//
+//   (FLOOR)  Both floor legs — stealth_require_blind_fee (stealth_evaluator.cpp
+//            :1410) and stealth_consume_parity_subsidy (:1433) — compute the
+//            cost anchor from the op's REAL n_blind_outputs. subsidy_n caps
+//            the DISCOUNT only. If a caller ever passed the capped value as
+//            n_blind_outputs, a user's required fee would silently drop.
+//
+//   (DISC)   The gap is anchor(min(n_blind_outputs, subsidy_n)) - parity, so
+//            the classifier can only SHRINK it, never grow it.
+//
+// TEST-GENESIS FEE ARITHMETIC (everything below depends on it). The chain_test
+// genesis sets fees.scale == 0, which maps EVERY schedule entry to 0, so:
+//   parity_core  = 0 for every stealth op,
+//   anchor(n)    = max(current leg 0, pinned 5 CORE + n * 5 CORE) = (n+1)*500000.
+// Hence gap(n, subsidy_n) = (min(n, subsidy_n) + 1) * 500000 exactly, and
+// every gap in this file is asserted as an exact integer, never a range.
+// ============================================================================
+
+// EE-2 test-only helper: one op39 deposit of `values` CORE total, split into
+// one range-proven blind balance per value, all owned by `owner`.
+//
+// The shape is the wire shape transfer_to_blind_operation::validate() demands:
+// outputs SORTED by commitment id, and ONE summed blinding factor (the sum of
+// the output blinds) because the op commits the public amount, not the fee.
+//
+// The fee is TRANSPARENT and paid by `from` — that is what makes the float
+// rule reachable for a deposit at all (a ring/explicit spend pays its fee out
+// of the blind surplus, which is dust in these fixtures). Post-hardfork with an
+// EMPTY parity pool the deposit must therefore pay the anchor for its own
+// output count, and takes the cost path (no subsidy debit).
+struct ee_bal
+{
+   fc::ecc::commitment_type commit;
+   fc::sha256               blind;
+   int64_t                  value = 0;
+   authority                owner = authority();
+};
+
+static std::vector<ee_bal> T_ee_deposit( database_fixture& f, account_id_type from,
+      const fc::ecc::private_key& from_key, const authority& owner,
+      const std::string& tag, const std::vector<int64_t>& values, int64_t fee )
+{
+   database& db = f.db;
+   signed_transaction& trx = f.trx;
+   const asset_object& core = asset_id_type()( db );
+   int64_t total = 0;
+   for( int64_t v : values )
+   {
+      BOOST_REQUIRE( v > 0 );
+      total += v;
+   }
+   transfer_to_blind_operation ttb;
+   ttb.amount = core.amount( total );
+   ttb.from = from;
+   ttb.fee = core.amount( fee );
+   std::vector<ee_bal> r;
+   BIGNUM* acc = BN_new();
+   BN_zero( acc );
+   for( size_t i = 0; i < values.size(); ++i )
+   {
+      fc::sha256 B = T_blind_secret( tag + "-b|" + std::to_string( i ) );
+      BIGNUM* b = T_bn( B );
+      BN_mod_add( acc, acc, b, T_order(), T_ctx() );
+      BN_free( b );
+      blind_output o;
+      o.owner = owner;
+      o.commitment = fc::ecc::blind( B, values[i] );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B,
+                          T_secret( tag + "-n|" + std::to_string( i ) ), 0, 0, values[i] );
+      ttb.outputs.push_back( o );
+      r.push_back( ee_bal{ o.commitment, B, values[i], owner } );
+   }
+   std::sort( ttb.outputs.begin(), ttb.outputs.end(),
+              []( const blind_output& a, const blind_output& b ) {
+                 return a.commitment < b.commitment;
+              } );
+   std::vector<char> b32( 32 );
+   BN_bn2binpad( acc, (unsigned char*)b32.data(), 32 );
+   ttb.blinding_factor = fc::sha256( b32.data(), 32 );
+   BN_free( acc );
+   set_expiration( db, trx );
+   // Clear FIRST: a caller that catches a refusal leaves this trx dirty (the
+   // push threw before the cleanup below), and a stale signature would make the
+   // NEXT push fail with tx_irrelevant_sig instead of the guard under test.
+   trx.clear_signatures();
+   trx.operations.clear();
+   trx.operations = { ttb };
+   f.sign( trx, from_key );
+   // PUSH_TX rethrows, so a caller that expects a refusal wraps this helper in
+   // BOOST_CHECK_THROW; no assertion here (swallowing would hide which guard).
+   PUSH_TX( db, trx );
+   trx.clear_signatures();
+   trx.operations.clear();
+   return r;
+}
+
+// EE-2 test-only helper: generalized op104 (stealth_transfer) ring spend.
+// Spends pool outputs `ins` (p.each each) into `outs` new V2 BP+ outputs plus
+// `fee`. Mirrors t5_build_spend (1-in/2-out) with the SHAPE parameterised, so
+// Rule R can be exercised at 1-in/8-out (growth) and m-in/m-out (the shape the
+// pre-EE-1b reading would have called "consolidation"). Per input: a real dual-
+// version ring signature over the full ring, bound to the SAME output set and
+// fee (stealth_ring_message), excess = sum(in blinds) - sum(out blinds) so the
+// conservation kernel closes.
+static stealth_transfer_operation T_ee_build_spend( const asset_object& core,
+      const t5_pool& p, const std::vector<size_t>& ins,
+      const std::vector<int64_t>& outs, int64_t fee, uint8_t version,
+      const std::string& tag )
+{
+   BOOST_REQUIRE( !ins.empty() && ins.size() <= 8 );
+   BOOST_REQUIRE( !outs.empty() && outs.size() <= 8 );
+   int64_t in_total = 0, out_total = 0;
+   for( size_t s : ins )
+      in_total += p.each;
+   for( int64_t v : outs )
+   {
+      BOOST_REQUIRE( v > 0 );
+      out_total += v;
+   }
+   BOOST_REQUIRE_EQUAL( in_total, out_total + fee );
+
+   const uint8_t alt_v = ( version == GRAPHENE_STEALTH_PROOF_V1 )
+                         ? GRAPHENE_STEALTH_PROOF_V2
+                         : GRAPHENE_STEALTH_PROOF_V1;
+   std::vector<fc::sha256> Bk( outs.size() );
+   std::vector<stealth_blind_output> sout( outs.size() );
+   std::vector<fc::ecc::commitment_type> out_cs;
+   for( size_t i = 0; i < outs.size(); ++i )
+   {
+      Bk[i] = T_blind_secret( tag + "-o|" + std::to_string( i ) );
+      sout[i].commitment = fc::ecc::blind( Bk[i], outs[i] );
+      if( version == GRAPHENE_STEALTH_PROOF_V1 )
+         sout[i].range_proof = fc::ecc::range_proof_sign( 0, sout[i].commitment, Bk[i],
+                              T_secret( tag + "-n|" + std::to_string( i ) ), 0, 0, outs[i] );
+      else
+         sout[i].range_proof = T_bp_prove( sout[i].commitment, Bk[i], (uint64_t)outs[i] );
+      auto rk = fc::ecc::private_key::generate();
+      sout[i].owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+      out_cs.push_back( sout[i].commitment );
+   }
+   stealth_transfer_operation stop;
+   stop.asset_id = core.get_id();
+   stop.proof_version = version;
+   stop.fee = core.amount( fee );
+   stop.outputs = sout;
+   // Fresh pseudo-output blinds, one per input. The ring kernel runs over the
+   // PSEUDO-OUTPUTS (stealth_evaluator.cpp:730 passes in.pseudo_output), so the
+   // excess is sum(pseudo blinds) - sum(output blinds) — NOT the input blinds
+   // (op108's kernel is the other kernel and does use them).
+   std::vector<fc::sha256> Bps( ins.size() );
+   for( size_t k = 0; k < ins.size(); ++k )
+      Bps[k] = T_blind_secret( tag + "-ps|" + std::to_string( k ) );
+   {
+      BIGNUM* acc = BN_new();
+      BN_zero( acc );
+      for( const auto& P : Bps )
+      {
+         BIGNUM* bp = T_bn( P );
+         BN_mod_add( acc, acc, bp, T_order(), T_ctx() );
+         BN_free( bp );
+      }
+      for( const auto& B : Bk )
+      {
+         BIGNUM* b = T_bn( B );
+         BN_mod_sub( acc, acc, b, T_order(), T_ctx() );
+         BN_free( b );
+      }
+      unsigned char eb[32];
+      BN_bn2binpad( acc, eb, 32 );
+      std::copy( eb, eb + 32, (char*)stop.excess.data() );
+      BN_free( acc );
+   }
+   std::vector<std::vector<unsigned char>> Q;
+   for( const auto& c : p.commits )
+      Q.push_back( std::vector<unsigned char>( c.begin(), c.end() ) );
+   for( size_t k = 0; k < ins.size(); ++k )
+   {
+      const size_t s = ins[k];
+      BIGNUM* bs = T_bn( p.blinds[s] );
+      BIGNUM* bprime = T_bn( Bps[k] );
+      auto dry = T_dual_dry_run( version, alt_v, Q, s, bs, (uint64_t)p.each, bprime );
+      auto Pv = T_commit( bprime, (uint64_t)p.each );
+      BOOST_REQUIRE( dry.pseudo == Pv );
+      fc::ecc::commitment_type pseudo_c = T_commitment( Pv );
+      std::vector<char> img_c( dry.img_main.begin(), dry.img_main.end() );
+      std::vector<char> img_a( dry.img_alt.begin(), dry.img_alt.end() );
+      fc::sha256 m = stealth_ring_message( version, stop.asset_id, img_c, p.commits,
+                                           pseudo_c, out_cs, stop.fee.amount );
+      fc::sha256 ma = stealth_ring_message( alt_v, stop.asset_id, img_a, p.commits,
+                                            pseudo_c, out_cs, stop.fee.amount );
+      std::string ms( (const char*)m.data(), 32 );
+      std::string msa( (const char*)ma.data(), 32 );
+      stop.inputs.push_back( T_make_dual_ring_input( version, alt_v, Q, s, bs,
+                            (uint64_t)p.each, bprime, ms, msa ) );
+      BN_free( bs );
+      BN_free( bprime );
+   }
+   return stop;
+}
+
+// EE-2 test-only helper: generalized op108 blind->blind explicit spend over
+// arbitrary live blind balances (not just a t5_pool), TRUE recovery images
+// per input, V2 BP+ outputs, excess = sum(in blinds) - sum(out blinds).
+// Mirrors T_op108_blind_true (1-in/2-out) with the shape parameterised.
+static stealth_explicit_spend_operation T_ee_op108_blind( const asset_object& core,
+      const std::vector<ee_bal>& ins, const std::vector<int64_t>& outs,
+      int64_t fee, const std::string& tag, const authority& out_owner )
+{
+   BOOST_REQUIRE( !ins.empty() && ins.size() <= 8 );
+   BOOST_REQUIRE( !outs.empty() && outs.size() <= 8 );
+   int64_t in_total = 0, out_total = 0;
+   for( const auto& in : ins )
+      in_total += in.value;
+   for( int64_t v : outs )
+   {
+      BOOST_REQUIRE( v > 0 );
+      out_total += v;
+   }
+   BOOST_REQUIRE_EQUAL( in_total, out_total + fee );
+
+   stealth_explicit_spend_operation o;
+   o.fee = core.amount( fee );
+   o.asset_id = core.get_id();
+   o.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   for( const auto& in : ins )
+   {
+      stealth_spend_input si;
+      si.commitment = in.commit;
+      si.owner = in.owner; // op108 asserts input owner == the live balance's
+      BIGNUM* bb = T_bn( in.blind );
+      std::vector<unsigned char> Cvec( in.commit.begin(), in.commit.end() );
+      std::vector<char> proof;
+      T_prove_recovery( Cvec, bb, (uint64_t)in.value, core.get_id(),
+                        si.key_image_v1, si.key_image_v2, proof );
+      BN_free( bb );
+      si.recovery_proof = stealth_recovery_proof( proof );
+      o.inputs.push_back( si );
+   }
+   std::vector<fc::sha256> Bk( outs.size() );
+   for( size_t i = 0; i < outs.size(); ++i )
+   {
+      Bk[i] = T_blind_secret( tag + "-o|" + std::to_string( i ) );
+      stealth_blind_output so;
+      {
+         BIGNUM* b = T_bn( Bk[i] );
+         so.commitment = T_commitment( T_commit( b, (uint64_t)outs[i] ) );
+         BN_free( b );
+      }
+      so.range_proof = T_bp_prove( so.commitment, Bk[i], (uint64_t)outs[i] );
+      so.owner = out_owner;
+      o.outputs.push_back( so );
+   }
+   {
+      BIGNUM* acc = BN_new();
+      BN_zero( acc );
+      for( const auto& in : ins )
+      {
+         BIGNUM* b = T_bn( in.blind );
+         BN_mod_add( acc, acc, b, T_order(), T_ctx() );
+         BN_free( b );
+      }
+      for( const auto& B : Bk )
+      {
+         BIGNUM* b = T_bn( B );
+         BN_mod_sub( acc, acc, b, T_order(), T_ctx() );
+         BN_free( b );
+      }
+      unsigned char eb[32];
+      BN_bn2binpad( acc, eb, 32 );
+      std::copy( eb, eb + 32, (char*)o.excess.data() );
+      BN_free( acc );
+   }
+   return o;
+}
+
+// EE-2 test-only helper: op108 TRANSPARENT EXIT leg (no outputs) over one
+// live blind balance, TRUE recovery images, conservation against op41's
+// verify_sum kernel (in value == amount + fee), excess == the input blind.
+static stealth_explicit_spend_operation T_ee_op108_exit( const asset_object& core,
+      const ee_bal& in, account_id_type to, int64_t amount, int64_t fee )
+{
+   BOOST_REQUIRE_EQUAL( in.value, amount + fee );
+   stealth_explicit_spend_operation o;
+   o.fee = core.amount( fee );
+   o.asset_id = core.get_id();
+   o.to = to;
+   o.amount = core.amount( amount );
+   o.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   o.excess = in.blind;
+   stealth_spend_input si;
+   si.commitment = in.commit;
+   si.owner = in.owner;
+   BIGNUM* bb = T_bn( in.blind );
+   std::vector<unsigned char> Cvec( in.commit.begin(), in.commit.end() );
+   std::vector<char> proof;
+   T_prove_recovery( Cvec, bb, (uint64_t)in.value, core.get_id(),
+                     si.key_image_v1, si.key_image_v2, proof );
+   BN_free( bb );
+   si.recovery_proof = stealth_recovery_proof( proof );
+   o.inputs = { si };
+   return o;
+}
+
+// EE-2 helper: run `f`, REQUIRE that it throws, and REQUIRE that the message
+// names the guard under test. One place, so deleting a guard reports WHICH
+// guard stopped firing instead of cascading BOOST_FAILs out of a catch block.
+template<typename F>
+static void T_ee_expect_refusal( F&& f, const std::string& needle,
+                                 const std::string& what )
+{
+   std::string msg;
+   bool threw = false;
+   try
+   {
+      f();
+   }
+   catch( const fc::exception& e )
+   {
+      threw = true;
+      msg = e.to_detail_string();
+   }
+   BOOST_REQUIRE_MESSAGE( threw, what );
+   BOOST_CHECK_MESSAGE( msg.find( needle ) != std::string::npos, what + ": " + msg );
+}
+
+// EE-2 shared read: the parity pool balance for `aid` (0 when absent).
+static int64_t T_ee_pool( database& db, asset_id_type aid )
+{
+   const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+   auto itr = st.parity_pool.find( aid );
+   return ( itr == st.parity_pool.end() ) ? 0 : itr->second.value;
+}
+
+// ---------------------------------------------------------------------------
+// Test 9 — subsidy_prefork_inert.
+//
+// Rule R and the whole G1c mechanism live INSIDE the two subsidy functions,
+// which are stealth_passed()-gated (stealth_evaluator.cpp:1401 / :1423).
+// Pre-fork both must be exact no-ops: no subsidy consumed, no pool movement,
+// NO FLOOR — a blind op paying zero must still clear, even though the
+// post-hardfork anchor for that same shape is 5 CORE per output. The contrast
+// leg (identical op, post-fork, empty pool) is what makes the pin meaningful:
+// without the gate the pre-fork leg would refuse.
+//
+// Legacy ops only: op39/op41 exist pre-fork (op40+ are refused outright by the
+// V-03 pre-fork gate, already pinned by stealth_ops_are_refused_before_the_hardfork).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_prefork_inert )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()( db ), dan, core.amount( 100000000 ) );
+   set_expiration( db, trx );
+   const account_id_type payer = dan_id;
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+
+   // A pre-fork fee of ZERO clears, even though the post-hardfork anchor for
+   // the same shape is 10 CORE. That gap IS the float rule; pre-fork it must
+   // not exist.
+   const int64_t anchor1 = stealth_cost_anchor_core( db, 1 ).value;
+   BOOST_REQUIRE_EQUAL( anchor1, (int64_t)( 10 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+
+   // op41 conservation is exact at validate time (the input must commit
+   // amount + fee), so the blind balance is worth exactly what the exit pays.
+   std::vector<ee_bal> pre = T_ee_deposit( *this, payer, dan_private_key, own,
+                                           "ee9-pre", { 900 }, 0 );
+   BOOST_REQUIRE_EQUAL( pre.size(), 1u );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.parity_pool.find( core_id ) == st.parity_pool.end() );
+      BOOST_CHECK( st.interval_granted.find( core_id ) == st.interval_granted.end() );
+   }
+   // Pre-fork withdrawal at fee 0 clears too (n = 0 -> anchor(0) = 5 CORE).
+   {
+      transfer_from_blind_operation x;
+      x.to = payer;
+      x.amount = core.amount( 900 );
+      x.fee = core.amount( 0 );
+      blind_input bi;
+      bi.commitment = pre[0].commit;
+      bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = pre[0].blind;
+      set_expiration( db, trx );
+      trx.operations = { x };
+      sign( trx, ok );
+      PUSH_TX( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+   }
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+
+   // --- the subsidy surface itself is inert pre-fork, called directly ---
+   BOOST_CHECK( !stealth_parity_available( db, core_id, share_type( anchor1 ) ) );
+   BOOST_CHECK_NO_THROW( stealth_require_blind_fee( db, share_type( 0 ), true, core_id,
+                                                   8, share_type( 0 ), 0 ) );
+   BOOST_CHECK_NO_THROW( stealth_require_blind_fee( db, share_type( 0 ), true, core_id,
+                                                   8, share_type( 0 ), 8 ) );
+   {
+      const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+      BOOST_CHECK_NO_THROW( stealth_consume_parity_subsidy( db, true, core_id, 8,
+                                                           share_type( 0 ),
+                                                           share_type( 0 ), 0 ) );
+      BOOST_CHECK_NO_THROW( stealth_consume_parity_subsidy( db, true, core_id, 8,
+                                                           share_type( 0 ),
+                                                           share_type( 0 ), 8 ) );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value, acc0 );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   }
+   // Pre-fork, even an opted-in CORE routes nothing (the routing leg is gated
+   // separately at stealth_parity_route_fee) — no pool is created pre-fork.
+   {
+      g1c_opt_in_parity( db, core_id );
+      share_type inc = 1000000;
+      BOOST_CHECK_EQUAL( stealth_parity_route_fee( db, core_id, inc ).value, 0 );
+      BOOST_CHECK_EQUAL( inc.value, 1000000 );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   }
+
+   // --- contrast: the IDENTICAL deposit POST-fork with an empty pool floats
+   // --- to cost. This is what makes the pre-fork acceptance above load-bearing.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_CHECK_THROW(
+      T_ee_deposit( *this, payer, dan_private_key, own, "ee9-post", { 1000 }, 0 ),
+      fc::exception );
+   BOOST_REQUIRE_EQUAL(
+      T_ee_deposit( *this, payer, dan_private_key, own, "ee9-post2", { 1000 }, anchor1 ).size(),
+      1u );
+   // One unit short of the anchor refuses: post-fork the floor exists and is
+   // anchor(REAL n) — never lower, and never the classifier's capped value.
+   BOOST_CHECK_THROW(
+      T_ee_deposit( *this, payer, dan_private_key, own, "ee9-post3", { 1000 }, anchor1 - 1 ),
+      fc::exception );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 ); // still no pool: cost path
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 10 — subsidy_never_raises_fee.
+//
+// The behavioural complement of tooling/verify_stealth_cost_anchor_unchanged.py
+// (which pins the anchor FUNCTION byte-for-byte). That tool cannot see the call
+// sites, so this pins the consequence: for every op shape the required fee with
+// an EMPTY pool is anchor(REAL n_blind_outputs) and nothing else.
+//
+// Two levels:
+//   (a) function level — the floor leg ignores subsidy_n completely: paying
+//       anchor(n)-1 throws and anchor(n) clears for EVERY subsidy_n in [0, n],
+//       so no caller can lower a floor by choosing a smaller cap.
+//   (b) op level — real op39 deposits at n = 1, 2 and 8 (transparent fee, so the
+//       cost path is reachable at all) refuse one unit under the anchor and clear
+//       exactly at it, with the pool still empty afterwards.
+// Plus the monotonicity identity: Rule R's capped gap never exceeds the pre-EE-1
+// (uncapped) gap, for every op shape the classifier knows.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_never_raises_fee )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()( db ), dan, core.amount( 100000000 ) );
+   generate_block(); // seal: direct writes below must survive block replay
+   // An 8-output V1 deposit carries 8 legacy range proofs; the genesis tx size
+   // limit would reject it before the float rule ever runs.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   const authority own( 1, dan_id, 1 );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 ); // EMPTY pool fixture
+
+   // --- (a) the floor leg is independent of subsidy_n ----------------------
+   for( uint32_t n : { 0u, 1u, 2u, 3u, 8u } )
+   {
+      const share_type anchor = stealth_cost_anchor_core( db, n );
+      BOOST_REQUIRE_EQUAL( anchor.value,
+                          (int64_t)( 5 * GRAPHENE_BLOCKCHAIN_PRECISION ) * (int64_t)( n + 1 ) );
+      // subsidy_n <= n by construction (every call site passes min(n, classifier)),
+      // so 1 is not a shape an exit (n == 0) can ever produce.
+      const std::vector<uint32_t> subs =
+         ( n == 0 ) ? std::vector<uint32_t>{ 0u } : std::vector<uint32_t>{ 0u, 1u, n };
+      for( uint32_t sub : subs )
+      {
+         BOOST_CHECK_THROW(
+            stealth_require_blind_fee( db, anchor - 1, true, core_id, n,
+                                       share_type( 0 ), sub ),
+            fc::exception );
+         BOOST_CHECK_NO_THROW(
+            stealth_require_blind_fee( db, anchor, true, core_id, n,
+                                       share_type( 0 ), sub ) );
+      }
+   }
+   // --- monotonicity: Rule R's capped gap <= the pre-EE-1 (uncapped) gap ---
+   {
+      const share_type parity = share_type( 200000 );
+      auto check = [&]( const operation& op, uint32_t n ) {
+         const uint32_t sub = stealth_subsidy_output_count( op );
+         BOOST_REQUIRE_MESSAGE( sub <= n, "classifier above the op's own n" );
+         const share_type capped = stealth_parity_gap_core( db, n, parity, sub );
+         const share_type uncapped = stealth_parity_gap_core( db, n, parity, n );
+         BOOST_CHECK_MESSAGE( capped.value <= uncapped.value,
+            "Rule R raised the gap above the pre-EE-1 (uncapped) gap" );
+      };
+      transfer_to_blind_operation dep; dep.outputs.resize( 8 );
+      check( operation( dep ), 8u );
+      stealth_transfer_operation ring; ring.inputs.resize( 8 ); ring.outputs.resize( 8 );
+      check( operation( ring ), 8u );
+      blind_transfer_operation bt; bt.inputs.resize( 3 ); bt.outputs.resize( 3 );
+      check( operation( bt ), 3u );
+      stealth_explicit_spend_operation net0; net0.inputs.resize( 8 ); net0.outputs.resize( 3 );
+      check( operation( net0 ), 3u );
+      stealth_pool_exchange_operation swap;
+      check( operation( swap ), 1u );
+      turnstile_reproof_operation turn;
+      check( operation( turn ), 1u );
+      transfer_from_blind_operation exitop; exitop.inputs.resize( 2 );
+      check( operation( exitop ), 0u );
+   }
+   // --- (b) op level: the floor is anchor(REAL n) --------------------------
+   for( uint32_t n : { 1u, 2u, 8u } )
+   {
+      const share_type anchor = stealth_cost_anchor_core( db, n );
+      const std::vector<int64_t> vals( n, 100 );
+      // One unit under the anchor: refused, pool still empty.
+      BOOST_CHECK_THROW(
+         T_ee_deposit( *this, dan_id, dan_private_key, own,
+                       "ee10-lo|" + std::to_string( n ), vals, anchor.value - 1 ),
+         fc::exception );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+      // Exactly at the anchor: clears, still debits nothing (cost path).
+      BOOST_REQUIRE_EQUAL(
+         T_ee_deposit( *this, dan_id, dan_private_key, own,
+                       "ee10-ok|" + std::to_string( n ), vals, anchor.value ).size(),
+         (size_t)n );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 1 — subsidy_floor_leg_receives_real_n.  THE LOAD-BEARING REGRESSION.
+//
+// op108 is the only call site where the cap can bite (its classifier falls back
+// to 1 when n_out <= n_in), so it is the only place the floor and the cap can
+// disagree. Two ops differing ONLY in n_blind_outputs — 2-in/2-out (n = 2,
+// subsidy_n = 1) and 2-in/1-out (n = 1, subsidy_n = 1) — therefore share the
+// SAME capped subsidy (anchor(1) - parity) and must still carry DIFFERENT
+// required fees (anchor(2) vs anchor(1)).
+//
+// Both floor legs are pinned:
+//   REQUIRE (:1410)  empty pool -> the 2-output op paying the CAPPED anchor
+//                    (1 CORE) refuses; its 1-output twin at the same fee clears.
+//   CONSUME (:1433)  funded pool -> the same 2-output op paying anchor(1) is
+//                    DEBITED the gap (parity path), while the same op paying
+//                    anchor(2) is not (cost path). If the floor leg ever read
+//                    subsidy_n, both would be cost paths and neither would be
+//                    debited.
+//
+// GUARD DELETION (observed RED): change either floor leg from
+//   stealth_cost_anchor_core( db, n_blind_outputs )
+// to stealth_cost_anchor_core( db, subsidy_n ) -> the empty-pool refusal
+// disappears (require) and both funded-pool ops become cost paths (consume).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_floor_leg_receives_real_n )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()( db ), dan, core.amount( 100000000 ) );
+   generate_block(); // seal before the direct writes below
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+
+   const int64_t anchor1 = stealth_cost_anchor_core( db, 1 ).value;
+   const int64_t anchor2 = stealth_cost_anchor_core( db, 2 ).value;
+   BOOST_REQUIRE_EQUAL( anchor1, 1000000 );
+   BOOST_REQUIRE_EQUAL( anchor2, 1500000 );
+
+   // Ten 1-CORE blind balances. The parity pool is NEVER seeded in the first
+   // phase, so every deposit takes the cost path (pays anchor(1) of its own
+   // transparent fee) and nothing is ever funded.
+   std::vector<ee_bal> b;
+   for( int i = 0; i < 10; ++i )
+   {
+      auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
+                             "ee1-d|" + std::to_string( i ), { anchor1 }, anchor1 );
+      BOOST_REQUIRE_EQUAL( r.size(), 1u );
+      b.push_back( r[0] );
+   }
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), 0 );
+
+   auto push_op108 = [&]( const std::vector<ee_bal>& ins,
+                          const std::vector<int64_t>& outs, int64_t fee,
+                          const std::string& tag ) {
+      stealth_explicit_spend_operation o = T_ee_op108_blind( core, ins, outs, fee, tag, own );
+      set_expiration( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      trx.operations = { o };
+      sign( trx, ok );
+      PUSH_TX( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+   };
+
+   // --- PHASE 1: EMPTY pool. Only the floor decides. ----------------------
+   // 2-in/2-out paying anchor(1) — the anchor its CAPPED subsidy leg would
+   // suggest — must refuse: its real floor is anchor(2).
+   T_ee_expect_refusal(
+      [&]() { push_op108( { b[0], b[1] }, { 500000, 500000 }, anchor1, "ee1-a" ); },
+      "Blind fee below cost level",
+      "2-output op paying the CAPPED anchor(1) must refuse (its floor is anchor(2))" );
+   // Nothing moved: the refusal happened before apply.
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   {
+      const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      BOOST_CHECK( bbi.find( b[0].commit ) != bbi.end() );
+      BOOST_CHECK( bbi.find( b[1].commit ) != bbi.end() );
+   }
+   // Same op at its REAL floor (anchor(2)) clears.
+   push_op108( { b[0], b[1] }, { 250000, 250000 }, anchor2, "ee1-b" );
+   // ... and the 1-output twin at the SAME 1 CORE fee clears: the two ops
+   // differ only in n_blind_outputs and their required fees differ with it.
+   push_op108( { b[2], b[3] }, { anchor1 }, anchor1, "ee1-c" );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 ); // cost path: pool untouched
+   {
+      const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      BOOST_CHECK( bbi.find( b[0].commit ) == bbi.end() );
+      BOOST_CHECK( bbi.find( b[2].commit ) == bbi.end() );
+   }
+
+   // --- PHASE 2: FUNDED pool. The consume floor leg decides. --------------
+   // Seed exactly the one subsidy the next op draws (anchor(1) = 1 CORE).
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, anchor1 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), anchor1 );
+   const int64_t acc_before = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+   // n = 2, subsidy_n = 1, paid = anchor(1) < anchor(2): PARITY path -> the
+   // pool is debited the capped gap exactly.
+   push_op108( { b[4], b[5] }, { 500000, 500000 }, anchor1, "ee1-d" );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                      acc_before + anchor1 );
+   // Same shape at its REAL floor (anchor(2)): COST path -> no debit, no credit.
+   g1c_seed_pool( db, dan_id, core, anchor1 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), anchor1 );
+   const int64_t acc1 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+   push_op108( { b[6], b[7] }, { 250000, 250000 }, anchor2, "ee1-e" );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), anchor1 );
+   BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value, acc1 );
+   // The shape arithmetic this case rests on, pinned explicitly: the CAPPED gap
+   // is the same for a 1-output and a 2-output op (both capped to 1), while the
+   // UNCAPPED gap — i.e. the floor — differs by exactly one output's component.
+   BOOST_CHECK_EQUAL(
+      stealth_parity_gap_core( db, 2, share_type( 0 ), 1 ).value, anchor1 );
+   BOOST_CHECK_EQUAL(
+      stealth_parity_gap_core( db, 1, share_type( 0 ), 1 ).value, anchor1 );
+   BOOST_CHECK_EQUAL(
+      stealth_parity_gap_core( db, 2, share_type( 0 ), 2 ).value, anchor2 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 2 — subsidy_exit_cap_enforced.
+//
+// S-1 (owner ruling, encoded not re-litigated): exit ops draw a BASE-FEE-SIZED
+// gap, never a per-output one. For op41 and for op108's exit leg that means
+// n_blind_outputs = 0, so the exact gap is anchor(0) - parity_core and the
+// exact floor is anchor(0) — 5 CORE, half of what a single output would cost.
+//
+// Pins both halves on real ops:
+//   floor   (empty pool)   fee anchor(0)-1 refuses, anchor(0) clears, for op41
+//                         and for the op108 exit leg;
+//   subsidy (funded pool)  fee 0 (parity) is debited exactly anchor(0).
+//
+// GUARD DELETION (observed RED): the exit cap is enforced by the LITERAL 0 the
+// call site passes as n_blind_outputs (confidential_evaluator.cpp require/consume
+// for op41) — the classifier's own 0 is redundant behind it. Changing that
+// literal to 1 turns every anchor(0) assertion here RED (floor doubles, and the
+// exit leg's own op41-conservation/fee split follows it).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_exit_cap_enforced )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()( db ), dan, core.amount( 100000000 ) );
+   generate_block();
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   const int64_t anchor0 = stealth_cost_anchor_core( db, 0 ).value;
+   const int64_t anchor1 = stealth_cost_anchor_core( db, 1 ).value;
+   BOOST_REQUIRE_EQUAL( anchor0, 500000 );
+   BOOST_REQUIRE_EQUAL( anchor1, 1000000 );
+
+   // op41 inputs must commit amount + fee EXACTLY (validate-time verify_sum),
+   // so every (amount, fee) shape needs its own balance.
+   auto deposit_exit_fuel = [&]( const std::string& tag, int64_t amount, int64_t fee ) {
+      auto r = T_ee_deposit( *this, dan_id, dan_private_key, own, tag,
+                             { amount + fee }, anchor1 );
+      BOOST_REQUIRE_EQUAL( r.size(), 1u );
+      generate_block(); // seal BEFORE grandfathering (T_grandfather note)
+      // Post-fork balances refuse the legacy legs by design; the exit-cap leg
+      // needs a pre-fork-shaped balance so the FEE rule decides, not the
+      // created_block gate (same discipline as parity_pool_routing_and_float).
+      T_grandfather( db, core_id, r[0].commit );
+      return r[0];
+   };
+   auto op41_exit = [&]( const ee_bal& in, int64_t amount, int64_t fee ) {
+      transfer_from_blind_operation x;
+      x.to = dan_id;
+      x.amount = core.amount( amount );
+      x.fee = core.amount( fee );
+      blind_input bi;
+      bi.commitment = in.commit;
+      bi.owner = own;
+      x.inputs = { bi };
+      x.blinding_factor = in.blind;
+      set_expiration( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      trx.operations = { x };
+      sign( trx, ok );
+      PUSH_TX( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+   };
+
+   // --- PHASE 1: EMPTY pool. The exit FLOOR is anchor(0), not anchor(1). ---
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), 0 );
+   {
+      const ee_bal lo = deposit_exit_fuel( "ee2-lo", 900, anchor0 - 1 );
+      T_ee_expect_refusal(
+         [&]() { op41_exit( lo, 900, anchor0 - 1 ); },
+         "Blind fee below cost level",
+         "op41 one unit under the base-fee anchor must refuse" );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+      op41_exit( deposit_exit_fuel( "ee2-at", 900, anchor0 ), 900, anchor0 );
+   }
+   // Same for the op108 exit leg (0 outputs by construction).
+   {
+      const ee_bal lo = deposit_exit_fuel( "ee2-108lo", 900, anchor0 - 1 );
+      auto push_exit = [&]( int64_t fee ) {
+         stealth_explicit_spend_operation o = T_ee_op108_exit( core, lo, dan_id, 900, fee );
+         set_expiration( db, trx );
+         trx.clear_signatures();
+         trx.operations.clear();
+         trx.operations = { o };
+         sign( trx, ok );
+         PUSH_TX( db, trx );
+         trx.clear_signatures();
+         trx.operations.clear();
+      };
+      T_ee_expect_refusal( [&]() { push_exit( anchor0 - 1 ); },
+                           "Blind fee below cost level",
+                           "op108 exit one unit under the base-fee anchor must refuse" );
+      stealth_explicit_spend_operation o2 = T_ee_op108_exit( core,
+         deposit_exit_fuel( "ee2-108at", 900, anchor0 ), dan_id, 900, anchor0 );
+      set_expiration( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      trx.operations = { o2 };
+      sign( trx, ok );
+      PUSH_TX( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
+   }
+
+   // --- PHASE 2: FUNDED pool. The exit SUBSIDY is base-fee sized. ---------
+   // parity_core is 0 in this genesis, so the exact gap is anchor(0) itself.
+   generate_block();
+   g1c_seed_pool( db, dan_id, core, 3 * anchor1 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), 3 * anchor1 );
+   {
+      const ee_bal sub = deposit_exit_fuel( "ee2-sub", 900, 0 );
+      // The funding deposit pays ITS OWN anchor(1), so it is a cost-path op:
+      // the pool is not debited (a grant is only drawn when the user pays
+      // BELOW the floor). The pool starts this leg at exactly the 3 CORE seed.
+      const int64_t pool0 = T_ee_pool( db, core_id );
+      BOOST_REQUIRE_EQUAL( pool0, 3 * anchor1 );
+      const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+      op41_exit( sub, 900, 0 ); // parity level: pool covers the gap
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 - anchor0 );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                         acc0 + anchor0 );
+      // Strictly a base-fee-sized gap: never the per-output one.
+      BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 0 ), 0 ).value, anchor0 );
+      BOOST_CHECK( stealth_parity_gap_core( db, 0, share_type( 0 ), 0 ).value
+                   < stealth_parity_gap_core( db, 1, share_type( 0 ), 1 ).value );
+   }
+   // The op108 exit leg draws the same base-fee-sized gap.
+   {
+      const ee_bal sub = deposit_exit_fuel( "ee2-108sub", 900, 0 );
+      const int64_t pool0 = T_ee_pool( db, core_id );
+      BOOST_REQUIRE_EQUAL( pool0, 3 * anchor1 - anchor0 );
+      const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+      stealth_explicit_spend_operation o = T_ee_op108_exit( core, sub, dan_id, 900, 0 );
+      set_expiration( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      trx.operations = { o };
+      sign( trx, ok );
+      PUSH_TX( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 - anchor0 );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                         acc0 + anchor0 );
+   }
+   // And an exit that pays the full anchor takes the COST path: no debit.
+   {
+      const ee_bal cost = deposit_exit_fuel( "ee2-cost", 900, anchor0 );
+      const int64_t pool0 = T_ee_pool( db, core_id );
+      const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+      op41_exit( cost, 900, anchor0 );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value, acc0 );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 3 — subsidy_growth_preserved.
+//
+// Rule R must not over-correct: a 1-in/8-out ring spend GROWS the live set by
+// eight (ring spends consume nothing, stealth_evaluator.cpp:791), so it must
+// still draw the FULL eight-output gap — anchor(8) - parity = 4.5 CORE here —
+// not the circulation-sized base-fee component.
+//
+// GUARD DELETION (observed RED): cap the op104 classifier arm at 1 (the
+// pre-EE-1b reading) -> the debit drops to anchor(1) and the exact-pool
+// assertion goes RED.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_growth_preserved )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "ee3", 16, true );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 16u );
+   // t5_fund_pool seeded n_out*1 CORE + 5 CORE and each of its 16 zero-fee
+   // deposits drew its own anchor(1), leaving exactly 5 CORE — enough for the
+   // 4.5 CORE eight-output grant without seeding anything else.
+   const int64_t pool0 = T_ee_pool( db, core_id );
+   BOOST_REQUIRE_EQUAL( pool0, 5 * 1000000 );
+   const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+   const int64_t anchor8 = stealth_cost_anchor_core( db, 8 ).value;
+   BOOST_REQUIRE_EQUAL( anchor8, 4500000 );
+   // The capped-and-uncapped gaps for this shape, pinned before the push.
+   BOOST_REQUIRE_EQUAL( stealth_parity_gap_core( db, 8, share_type( 0 ), 8 ).value, anchor8 );
+
+   // 1000 -> 8 x 124 outputs + 8 fee (conservation closes exactly).
+   stealth_transfer_operation stop = T_ee_build_spend( core, p, { 5 },
+      { 124, 124, 124, 124, 124, 124, 124, 124 }, 8, GRAPHENE_STEALTH_PROOF_V2, "ee3-sp" );
+   BOOST_REQUIRE_EQUAL( stop.outputs.size(), 8u );
+   BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( stop ) ), 8u );
+   set_expiration( db, trx );
+   trx.operations = { stop };
+   PUSH_TX( db, trx );
+   trx.clear();
+   generate_block();
+
+   // FULL eight-output gap: the pool paid exactly anchor(8) and the issuer was
+   // credited the same amount (supply-neutral).
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 - anchor8 );
+   BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                      acc0 + anchor8 );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE_EQUAL( st.interval_granted.find( core_id )->second.value, anchor8 );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 4 — subsidy_ring_consolidation_not_capped.
+//
+// Reviewer C-2: no existing test exercises a MULTI-OUTPUT ring op against a
+// seeded pool. A 2-in/2-out ring spend is "consolidation" under the pre-Task-3
+// reading of spec §1 (every op consumes its inputs, so ΔD_a = 0) but is real
+// live-set GROWTH under the chain's own counter: the whole-ring spent write and
+// its coupled pool_count_add(...,-1) were retired together
+// (stealth_evaluator.cpp:769-771), so the spend ADDS two outputs and removes
+// nothing. It must therefore draw the m=2 subsidy, not the base fee.
+//
+// GUARD DELETION (observed RED): same op104 classifier mutation as test 3 ->
+// anchor(2) collapses to anchor(1) and the exact debit assertion goes RED.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_ring_consolidation_not_capped )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "ee4", 16, true );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 16u );
+   const int64_t pool0 = T_ee_pool( db, core_id );
+   BOOST_REQUIRE( pool0 >= 1500000 );
+   const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+   const int64_t anchor2 = stealth_cost_anchor_core( db, 2 ).value;
+   BOOST_REQUIRE_EQUAL( anchor2, 1500000 );
+
+   // 2 x 1000 -> 2 x 990 outputs + 20 fee.
+   stealth_transfer_operation stop = T_ee_build_spend( core, p, { 5, 6 },
+      { 990, 990 }, 20, GRAPHENE_STEALTH_PROOF_V2, "ee4-sp" );
+   BOOST_REQUIRE_EQUAL( stop.inputs.size(), 2u );
+   BOOST_REQUIRE_EQUAL( stop.outputs.size(), 2u );
+   BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( stop ) ), 2u );
+   const int64_t depth0 = (int64_t)stealth_pool_depth( db, core_id );
+   set_expiration( db, trx );
+   trx.operations = { stop };
+   PUSH_TX( db, trx );
+   trx.clear();
+   generate_block();
+
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 - anchor2 );
+   BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                      acc0 + anchor2 );
+   // The live set GREW by m: the ring spend removed nothing and added m outputs
+   // (this is the counter EE-1b's classifier reads).
+   BOOST_CHECK_EQUAL( (int64_t)stealth_pool_depth( db, core_id ), depth0 + 2 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 5 — subsidy_explicit_spend_net_split.
+//
+// op108 is the one op whose ΔD_a is n_out - n_in (it really does consume its
+// metadata-bearing inputs, -spent_counted at stealth_evaluator.cpp:1924), so it
+// is the only shape where the classifier's two branches disagree. Pins BOTH:
+//   net >  0  1-in/4-out  -> full per-output component, gap = anchor(4)
+//   net <= 0  4-in/1-out  -> circulation,           gap = anchor(1)
+//
+// GUARD DELETION (observed RED): drop the `n_out > n_in` growth branch in
+// net_rule (always base fee) -> the 4-output gap collapses to anchor(1).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_explicit_spend_net_split )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "ee5", 5, false );
+   g1c_seed_pool( db, dan_id, core, 10 * 1000000 );
+   const int64_t anchor1 = stealth_cost_anchor_core( db, 1 ).value;
+   const int64_t anchor4 = stealth_cost_anchor_core( db, 4 ).value;
+   BOOST_REQUIRE_EQUAL( anchor1, 1000000 );
+   BOOST_REQUIRE_EQUAL( anchor4, 2500000 );
+
+   auto push = [&]( const std::vector<size_t>& ins, const std::vector<int64_t>& outs,
+                    const std::string& tag ) {
+      std::vector<ee_bal> bals;
+      for( size_t s : ins )
+         bals.push_back( ee_bal{ p.commits[s], p.blinds[s], p.each, p.owners[s] } );
+      stealth_explicit_spend_operation o = T_ee_op108_blind( core, bals, outs, 0, tag,
+                                                             p.owners[ins[0]] );
+      set_expiration( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+      trx.operations = { o };
+      // Every input carries its OWN owner authority, so every owner signs.
+      for( size_t s : ins )
+         sign( trx, p.keys[s] );
+      PUSH_TX( db, trx );
+      trx.clear_signatures();
+      trx.operations.clear();
+   };
+   {
+      stealth_explicit_spend_operation grow;
+      grow.inputs.resize( 1 ); grow.outputs.resize( 4 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( grow ) ), 4u );
+      stealth_explicit_spend_operation shrink;
+      shrink.inputs.resize( 4 ); shrink.outputs.resize( 1 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( shrink ) ), 1u );
+   }
+
+   // net > 0: one 1000 input into four 250 outputs (fee 0, parity level).
+   {
+      const int64_t pool0 = T_ee_pool( db, core_id );
+      push( { 0 }, { 250, 250, 250, 250 }, "ee5-a" );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 - anchor4 );
+   }
+   // net <= 0: four 1000 inputs into one 4000 output.
+   {
+      const int64_t pool0 = T_ee_pool( db, core_id );
+      push( { 1, 2, 3, 4 }, { 4000 }, "ee5-b" );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 - anchor1 );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 6 — subsidy_op109_admitted_funded.
+//
+// op109 is ADMITTED to the mechanism on the circulation rule (Rule R, F-02):
+// with a funded pool its user fee may sit at the parity level, the pool is
+// debited the grant, and the issuer's accumulated_fees takes the same amount
+// (supply neutrality). Zero market fee on this pool, so the parity_pool delta
+// is PURELY the subsidy — no routing noise to subtract.
+//
+// GUARD DELETION (observed RED): remove the op109 consume call
+// (stealth_evaluator.cpp:2303) -> the pool delta assertion goes RED.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_op109_admitted_funded )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "EE6", 0 );
+   generate_block(); // seal before the direct writes below (db_block.cpp:423)
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   const asset_id_type aid_a = p.asset_a;
+   const int64_t anchor1_core = stealth_cost_anchor_core( db, 1 ).value;
+   int64_t gap_sub = 0;
+   {
+      const share_type parity_core = db.current_fee_schedule().calculate_fee(
+         operation( stealth_pool_exchange_operation() ) ).amount;
+      BOOST_REQUIRE_EQUAL( parity_core.value, 0 ); // test genesis scale == 0
+      share_type gap = stealth_parity_gap_core( db, 1, parity_core, 1 );
+      BOOST_REQUIRE_EQUAL( gap.value, anchor1_core );
+      const share_type need = stealth_gap_to_asset( db, aid_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, aid_a( db ), need.value );
+      gap_sub = stealth_gap_to_asset( db, aid_a, gap ).value;
+   }
+   set_expiration( db, trx );
+   const int64_t pool0 = T_ee_pool( db, aid_a );
+   const int64_t acc0 = aid_a( db ).dynamic_asset_data_id( db ).accumulated_fees.value;
+   BOOST_REQUIRE_EQUAL( pool0, gap_sub + 1000 );
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "ee6-sp", 50 );
+   BOOST_REQUIRE_EQUAL( sw.expect.maker_market_fee.amount.value, 0 );
+   BOOST_REQUIRE_EQUAL( sw.expect.taker_market_fee.amount.value, 0 );
+   // The user sat at the PARITY level: f_tx is dust, far below anchor(1).
+   BOOST_REQUIRE( sw.f_tx < gap_sub );
+   trx.operations = { sw.op };
+   PUSH_TX( db, trx );
+   trx.clear();
+   generate_block();
+
+   // Exact debit and exact issuer credit, plus the counter-asset untouched.
+   BOOST_CHECK_EQUAL( T_ee_pool( db, aid_a ), pool0 - gap_sub );
+   BOOST_CHECK_EQUAL( aid_a( db ).dynamic_asset_data_id( db ).accumulated_fees.value,
+                      acc0 + sw.f_tx + gap_sub );
+   BOOST_CHECK_EQUAL( T_ee_pool( db, p.asset_b ), 0 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 7 — subsidy_op109_empty_pool_refuses.  The path no test exercised
+// (reviewer Q-12).
+//
+// op109's tx fee is KERNEL-PINNED (f_tx = a - f_maker - pool_pays, Lemmas 3+4),
+// so it can never be raised to the anchor. With an empty parity pool the float
+// rule therefore has exactly one legal answer: refuse. The pool must not move,
+// the reserves must not move, and no nullifier may be recorded.
+//
+// Also pins the bootstrap property this refusal creates: on a ZERO-market-fee
+// pool the swap's own routing contribution is 0 while its anchor gap is
+// strictly positive, so such a pair can never fund its own subsidy and MUST be
+// funded from elsewhere (a routed-fee pool or an external contribution).
+//
+// GUARD DELETION (observed RED): delete the FC_ASSERT at
+// stealth_evaluator.cpp:1411 -> the under-funded swap is ACCEPTED and the
+// refusal assertions go RED (free subsidy, pool pays nothing).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_op109_empty_pool_refuses )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "EE7", 0 );
+   generate_block();
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   const asset_id_type aid_a = p.asset_a;
+   // EMPTY pool: never seeded, and this pool charges 0% market fee so nothing
+   // routes on its own either.
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, aid_a ), 0 );
+
+   const int64_t anchor1_core = stealth_cost_anchor_core( db, 1 ).value;
+   const share_type parity_core = db.current_fee_schedule().calculate_fee(
+      operation( stealth_pool_exchange_operation() ) ).amount;
+   const share_type gap = stealth_parity_gap_core( db, 1, parity_core, 1 );
+   BOOST_REQUIRE_EQUAL( gap.value, anchor1_core );
+   const int64_t gap_asset = stealth_gap_to_asset( db, aid_a, gap ).value;
+   BOOST_REQUIRE( gap_asset > 0 );
+
+   const liquidity_pool_object& pool0 = p.pool( db );
+   const int64_t bal_a0 = pool0.balance_a.value, bal_b0 = pool0.balance_b.value;
+   const int64_t conf_a0 = aid_a( db ).dynamic_asset_data_id( db ).confidential_supply.value;
+   const size_t nul0 = db.get_index_type<stealth_nullifier_index>().indices().size();
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "ee7-sp", 50 );
+   // Bootstrap property: the pair's own market fee is ZERO while the anchor gap
+   // it must be subsidized against is strictly positive — it cannot self-fund.
+   BOOST_REQUIRE_EQUAL( sw.expect.maker_market_fee.amount.value, 0 );
+   BOOST_REQUIRE_EQUAL( sw.expect.taker_market_fee.amount.value, 0 );
+   BOOST_REQUIRE( gap_asset > sw.f_tx );
+   BOOST_REQUIRE( sw.f_tx < anchor1_core );
+
+   set_expiration( db, trx );
+   trx.operations = { sw.op };
+   T_ee_expect_refusal(
+      [&]() { PUSH_TX( db, trx ); },
+      "Blind fee below cost level",
+      "empty-pool swap under the anchor must refuse at the require gate" );
+   trx.clear();
+
+   // Nothing moved: no pool debit, no reserve trade, no blind-supply change,
+   // no nullifier (the require gate fires in do_evaluate, before apply).
+   BOOST_CHECK_EQUAL( T_ee_pool( db, aid_a ), 0 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, bal_a0 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, bal_b0 );
+   BOOST_CHECK_EQUAL( aid_a( db ).dynamic_asset_data_id( db ).confidential_supply.value,
+                      conf_a0 );
+   BOOST_CHECK_EQUAL( db.get_index_type<stealth_nullifier_index>().indices().size(), nul0 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 8 — subsidy_op109_drain_between_consume_fails_closed.
+//
+// require() and consume() are separate calls in do_evaluate / do_apply, and the
+// consume leg re-derives availability instead of trusting require: the
+// FC_ASSERT( stealth_parity_available(...) ) mirror at stealth_evaluator.cpp
+// :1439. There is no block-level way to interleave a drain between them, so the
+// test drives the two functions directly against real sealed state — the same
+// entry points the evaluators call, with the same (n, subsidy_n) pair.
+//
+// Two distinct drains, because they fail for different reasons and only the
+// second is caught by a downstream assert as well:
+//   (a) POOL DRAINED (balance 0 < gap): the availability mirror must fire.
+//   (b) PER-BLOCK CAP EXHAUSTED (50 units used, pool still funded): nothing
+//       downstream would notice — the underflow assert at :1450 passes because
+//       the money IS there — so the mirror is the ONLY guard.
+//
+// GUARD DELETION (observed RED): remove the :1439 assert. Leg (a) then fails
+// late with "Parity pool underflow at apply time"; leg (b) is ACCEPTED
+// outright — a grant paid out with no cap unit consumed.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_op109_drain_between_consume_fails_closed )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()( db ), dan, core.amount( 200000000 ) );
+   generate_block(); // seal before the direct writes below
+   const int64_t anchor1 = stealth_cost_anchor_core( db, 1 ).value;
+   BOOST_REQUIRE_EQUAL( anchor1, 1000000 );
+
+   // An op109-shaped pair: n_blind_outputs = 1, subsidy_n = 1, parity 0, user
+   // at the parity level (core_fee_paid = 0). gap == anchor(1).
+   const uint32_t n = 1, subsidy_n = 1;
+   const share_type parity = share_type( 0 );
+   const share_type paid = share_type( 0 );
+   BOOST_REQUIRE_EQUAL( stealth_parity_gap_core( db, n, parity, subsidy_n ).value, anchor1 );
+
+   auto status = [&]() -> stealth_status_object& {
+      return const_cast<stealth_status_object&>(
+         *db.get_index_type<stealth_status_index>().indices().begin() );
+   };
+
+   // --- leg (a): pool drained between require and consume ------------------
+   // The drain is done with a REAL successful grant of a larger shape (n = 8),
+   // which is how a pool actually empties in production (a debit paired with
+   // the issuer credit, so supply stays balanced) — a direct deletion of pool
+   // state would silently break verify_asset_supplies.
+   g1c_seed_pool( db, dan_id, core, 5 * anchor1 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), 5 * anchor1 );
+   const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+   // require() admits this op: the pool still covers its 1-CORE gap.
+   BOOST_CHECK_NO_THROW( stealth_require_blind_fee( db, paid, true, core_id,
+                                                   n, parity, subsidy_n ) );
+   // Another op drains it below this op's gap (anchor(8) = 4.5 CORE).
+   const int64_t drain_gap = stealth_parity_gap_core( db, 8, parity, 8 ).value;
+   BOOST_REQUIRE_EQUAL( drain_gap, 4500000 );
+   stealth_consume_parity_subsidy( db, true, core_id, 8, parity, paid, 8 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), 5 * anchor1 - drain_gap );
+   BOOST_REQUIRE( T_ee_pool( db, core_id ) < anchor1 ); // no longer covered
+   BOOST_CHECK( !stealth_parity_available( db, core_id, share_type( anchor1 ) ) );
+   BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                      acc0 + drain_gap );
+   T_ee_expect_refusal(
+      [&]() { stealth_consume_parity_subsidy( db, true, core_id, n, parity, paid, subsidy_n ); },
+      "Parity subsidy no longer available at apply time",
+      "consume must fail closed against a drained pool" );
+   // Fail-closed means nothing moved: no second debit, no second credit.
+   BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 5 * anchor1 - drain_gap );
+   BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value,
+                      acc0 + drain_gap );
+
+   // --- leg (b): per-block cap exhausted, pool STILL funded ---------------
+   // Nothing downstream would notice this one: the underflow assert at :1450
+   // passes because the money IS there, so the availability mirror is the ONLY
+   // guard between a grant and a cap overrun.
+   g1c_seed_pool( db, dan_id, core, 5 * anchor1 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), 5 * anchor1 );
+   BOOST_CHECK_NO_THROW( stealth_require_blind_fee( db, paid, true, core_id,
+                                                   n, parity, subsidy_n ) );
+   BOOST_REQUIRE_EQUAL( stealth_subsidy_output_count(
+                         operation( stealth_pool_exchange_operation() ) ), 1u );
+   // Exactly what 50 grants into the pending block would have written.
+   db.modify( status(), [&]( stealth_status_object& o ) {
+      o.parity_block_num = db.head_block_num() + 1;
+      o.parity_subsidized_count = GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK;
+   } );
+   BOOST_REQUIRE( T_ee_pool( db, core_id ) >= anchor1 ); // the pool is NOT the blocker
+   {
+      const int64_t pool0 = T_ee_pool( db, core_id );
+      const int64_t acc1 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
+      T_ee_expect_refusal(
+         [&]() { stealth_consume_parity_subsidy( db, true, core_id, n, parity, paid, subsidy_n ); },
+         "Parity subsidy no longer available at apply time",
+         "consume must fail closed when the per-block cap is exhausted" );
+      BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 );
+      BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value, acc1 );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

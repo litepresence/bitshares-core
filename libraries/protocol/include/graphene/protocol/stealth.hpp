@@ -117,14 +117,19 @@ constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS = 100;
 /// Max share of one ring's decoys that may fall in a single skew window
 /// (percent). Proposal: no 100-block window contributes more than 40%.
 constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_MAX_PCT = 40;
-/// Blind-pool floor: per-asset count of unspent decoy-candidate blind outputs
-/// (post-fork creation metadata present; spent-but-retained outputs do NOT
-/// count) below which blind SPENDS of that asset halt. Deposits are never
+/// Blind-pool floor: per-asset count of LIVE decoy-candidate blind outputs
+/// (post-fork creation metadata present; nullified-but-retained outputs DO
+/// count — they are decoy-eligible again under nullifier semantics, so the
+/// live set grows with usage instead of draining). Below this depth blind
+/// SPENDS of that asset halt. Deposits are never
 /// gated (they create decoys — gating them would deadlock bootstrapping).
 /// Availability yields to privacy, explicitly (thin-pool rings are worse
 /// than no rings: they mark the spender as one of few).
+/// The value equals GRAPHENE_STEALTH_RING_MIN: a spend needs at least one
+/// full minimum ring of live candidates, so below that no honest ring
+/// exists and halting is the only private option.
 constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
-/// Thin-pool decoy tightening (R-04, proposal): while the per-asset unspent
+/// Thin-pool decoy tightening (R-04, proposal): while the per-asset live
 /// pool is below this depth, rings must meet the TARGET size (16, not the
 /// 11 floor) and no 100-block window may contribute more than 25% (not
 /// 40%). Rationale: a $1 Sybil floods a thin pool cheaply (BSIP-2 admits
@@ -135,10 +140,20 @@ constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
 /// Auditors may raise any of these; the pre-G1 audit owns the final values.
 constexpr uint32_t GRAPHENE_STEALTH_THIN_POOL_DEPTH = 64;
 constexpr uint32_t GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT = 25;
-/// Pool-depth warning level (Task 6): per-asset unspent depth below this
-/// raises the thin_pool_warn alarm. ALARM ONLY — never a consensus gate
+/// Pool-depth warning level: per-asset LIVE depth below this raises the
+/// thin_pool_warn alarm. ALARM ONLY — never a consensus gate
 /// (no FC_ASSERT on any market, fee, or blind path reads it): availability
 /// degrades visibly before the floor halts it.
+/// Re-derived for live-set semantics (nullifier migration, Task 5): the old
+/// threshold was tuned against a monotonically SHRINKING pool, where every
+/// ring spend decremented the counter and the alarm fired on ordinary usage.
+/// Under live-set semantics a ring spend removes nothing and creates
+/// outputs, so the counter grows with adoption and falls only on genuine
+/// exits — the same number now measures genuine thinness, not usage. Value:
+/// 2 x BLIND_POOL_FLOOR — one full minimum ring of headroom, so the alarm
+/// fires while the pool can still serve roughly one more minimum ring's
+/// worth of exits before the floor halt binds. Derived from the 11/22
+/// thin-pool regime, not inherited from the old tuning.
 constexpr uint32_t GRAPHENE_STEALTH_POOL_WARN_DEPTH = 22;
 
 /// Proof versions. V1 = Borromean range proofs via the fc backend (legacy

@@ -5349,7 +5349,212 @@ BOOST_AUTO_TEST_CASE( thin_pool_warn_flag_and_effective_set_api )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
-// Task 6: ring-sampler rule conformance (BLIND_DEFAULTS_CONTRACT.md §5).
+// Task 5 (nullifier migration): pool-floor regression under live-set semantics.
+// Under the retired flag the counter shrank on every ring spend, so heavy ring
+// activity alone could drive the pool to the floor and halt spends. Under
+// live-set semantics a ring spend removes nothing and creates outputs, so the
+// counter only falls on genuine exits: the floor still halts a genuinely thin
+// pool (a) but never a pool "drained" by ring activity (b) — the behaviour
+// change users will notice.
+BOOST_AUTO_TEST_CASE( pool_floor_halts_thin_pool_not_ring_activity )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   // Re-derived Task 5 tripwire pins: halt below one minimum ring (11),
+   // alarm below two (22, one ring of headroom). See stealth.hpp.
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_BLIND_POOL_FLOOR, 11u );
+   BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_POOL_WARN_DEPTH, 22u );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), dan, core.amount( 500000000 ) );
+   generate_block();
+   // Ring ops exceed the 2048B default transaction ceiling by design
+   // (11-member dual rings alone are ~2.2kB). Production enables them via
+   // committee-set maximum_transaction_size; the test mirrors that
+   // governance action directly (precedent: db.modify on global properties
+   // in authority_tests/block_tests). Needed up front: the size gate runs
+   // before evaluation, so without it the dummy spends below would reject
+   // at the size gate instead of the gate under test.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   // Seed the parity pool so fee-0 dummy spends below reach the pool FLOOR
+   // (not the float rule): the floor — never the subsidy — must decide them
+   // (same seeding trick as decoy_rules_enforced).
+   g1c_seed_pool( db, dan_id, core, 24000000 );
+   // Wire-valid dummy ring (shape passes validate(); members are fake, so a
+   // pool that clears the floor rejects it downstream — the floor message
+   // pin below distinguishes the two rejections).
+   auto make_dummy_ring = [&]( const authority& owner ) {
+      stealth_transfer_operation thin;
+      thin.asset_id = core.get_id();
+      thin.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+      thin.fee = core.amount( 0 );
+      stealth_ring_input frin;
+      for( int i = 0; i < 11; ++i )
+      {
+         fc::ecc::commitment_type fc_;
+         fc_.data()[0] = (char)( 0x02 + ( i & 1 ) );
+         fc_.data()[1] = (char)i; fc_.data()[2] = (char)0x77;
+         frin.ring.push_back( fc_ );
+      }
+      frin.key_image = std::vector<char>( 33, 0x03 );
+      frin.pseudo_output = frin.ring[0];
+      frin.ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
+      frin.alt_key_image = std::vector<char>( 33, 0x04 );
+      frin.alt_ring_sig = std::vector<char>( 32 + 96 * 11, 0x01 );
+      thin.inputs = { frin };
+      stealth_blind_output fout;
+      fout.commitment = frin.ring[1];
+      fout.range_proof = std::vector<char>( 1, 0x02 );
+      fout.owner = owner;
+      thin.outputs = { fout };
+      return thin;
+   };
+   auto dan_owner = authority( 1, dan_id, 1 );
+   // (a) Genuinely thin pool (depth 0 < 11): the floor gate halts HERE —
+   // pin the message so a future gate reorder is caught, not papered over.
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 0u );
+   {
+      stealth_transfer_operation thin = make_dummy_ring( dan_owner );
+      BOOST_CHECK_NO_THROW( thin.validate() ); // wire shape is fine...
+      trx.operations = { thin };
+      try { PUSH_TX( db, trx ); BOOST_FAIL( "thin pool must halt at the floor" ); }
+      catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "below floor" ) != std::string::npos,
+                              e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // (b) Fund 16 post-fork outputs (4/4/4/4) spread over four 100-block
+   // windows so the thin-pool 25%-skew rule (R-04: depth 16 < 64) is
+   // satisfiable at the target ring size 16; then age them 25h in one jump.
+   // Mirrors stealth_transfer_happy_path (same subsidy math: 16 x 1M gap +
+   // one 1.5M spend against the 24M seed).
+   std::vector<fc::sha256> blinds;
+   std::vector<fc::ecc::commitment_type> commits;
+   auto fund_one = [&]( int i, uint64_t v ) {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( v );
+      ttb.from = dan.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_blind_secret( "t5-floor-b|" + std::to_string( i ) );
+      auto N = T_secret( "t5-floor-n|" + std::to_string( i ) );
+      o.commitment = fc::ecc::blind( B, v );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, v );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      set_expiration( db, trx );
+      trx.operations = { ttb };
+      sign( trx, dan_private_key );
+      PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
+      blinds.push_back( B );
+      commits.push_back( o.commitment );
+   };
+   for( int i = 0; i < 4; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   generate_blocks( 110 );
+   for( int i = 4; i < 8; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   generate_blocks( 110 );
+   for( int i = 8; i < 12; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   generate_blocks( 110 );
+   for( int i = 12; i < 16; ++i ) { fund_one( i, 1000 ); generate_block(); }
+   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+   // One genuine ring spend: output #5 (value 1000) into two V1 outputs
+   // (600 + 390, fee 10). Same kernel construction as the happy path.
+   size_t s = 5;
+   BIGNUM* bs = T_bn( blinds[s] );
+   BIGNUM* bprime = T_bn( T_blind_secret( "t5-floor-pseudo" ) );
+   auto Bk1 = T_blind_secret( "t5-floor-out1" );
+   auto Bk2 = T_blind_secret( "t5-floor-out2" );
+   auto Nk1 = T_secret( "t5-floor-nout1" );
+   auto Nk2 = T_secret( "t5-floor-nout2" );
+   auto rk1 = fc::ecc::private_key::generate();
+   auto rk2 = fc::ecc::private_key::generate();
+   stealth_blind_output so1, so2;
+   so1.commitment = fc::ecc::blind( Bk1, 600 );
+   so1.range_proof = fc::ecc::range_proof_sign( 0, so1.commitment, Bk1, Nk1, 0, 0, 600 );
+   so1.owner = authority( 1, public_key_type( rk1.get_public_key() ), 1 );
+   so2.commitment = fc::ecc::blind( Bk2, 390 );
+   so2.range_proof = fc::ecc::range_proof_sign( 0, so2.commitment, Bk2, Nk2, 0, 0, 390 );
+   so2.owner = authority( 1, public_key_type( rk2.get_public_key() ), 1 );
+   stealth_transfer_operation stop;
+   stop.asset_id = core.get_id();
+   stop.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   stop.fee = core.amount( 10 );
+   stop.outputs = { so1, so2 };
+   {
+      BIGNUM* e = BN_new();
+      BIGNUM* t = BN_new();
+      BIGNUM* b1 = T_bn( Bk1 );
+      BIGNUM* b2 = T_bn( Bk2 );
+      BN_copy( e, bprime );
+      BN_mod_sub( e, e, b1, T_order(), T_ctx() );
+      BN_mod_sub( e, e, b2, T_order(), T_ctx() );
+      unsigned char eb[32]; BN_bn2binpad( e, eb, 32 );
+      std::copy( eb, eb + 32, (char*)stop.excess.data() );
+      BN_free( e ); BN_free( t ); BN_free( b1 ); BN_free( b2 );
+   }
+   std::vector<std::vector<unsigned char>> Q;
+   for( const auto& c : commits )
+      Q.push_back( std::vector<unsigned char>( c.begin(), c.end() ) );
+   std::vector<fc::ecc::commitment_type> out_cs = { so1.commitment, so2.commitment };
+   auto Pv = T_commit( bprime, 1000 );
+   fc::ecc::commitment_type pseudo_c = T_commitment( Pv );
+   std::vector<unsigned char> img0, pseudo0; std::vector<char> sig0;
+   {
+      std::string m0( 32, '\0' );
+      T_prove_ring( GRAPHENE_STEALTH_PROOF_V1, Q, s, bs, 1000, bprime,
+                    m0, img0, pseudo0, sig0 );
+   }
+   BOOST_REQUIRE( pseudo0 == Pv );
+   std::vector<unsigned char> img2, pseudo2; std::vector<char> sig2;
+   {
+      std::string m0( 32, '\0' );
+      T_prove_ring( GRAPHENE_STEALTH_PROOF_V2, Q, s, bs, 1000, bprime,
+                    m0, img2, pseudo2, sig2 );
+   }
+   BOOST_REQUIRE( pseudo2 == Pv );
+   std::vector<char> img0c( img0.begin(), img0.end() );
+   std::vector<char> img2c( img2.begin(), img2.end() );
+   fc::sha256 m = stealth_ring_message( stop.proof_version, stop.asset_id,
+      img0c, commits, pseudo_c, out_cs, stop.fee.amount );
+   fc::sha256 m_alt = stealth_ring_message( GRAPHENE_STEALTH_PROOF_V2, stop.asset_id,
+      img2c, commits, pseudo_c, out_cs, stop.fee.amount );
+   std::string ms( (const char*)m.data(), 32 );
+   std::string ms_alt( (const char*)m_alt.data(), 32 );
+   stealth_ring_input rin = T_make_dual_ring_input( GRAPHENE_STEALTH_PROOF_V1,
+      GRAPHENE_STEALTH_PROOF_V2, Q, s, bs, 1000, bprime, ms, ms_alt );
+   stop.inputs = { rin };
+   BOOST_CHECK_NO_THROW( stop.validate() );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   // Live-set counter: 16 funded, the ring removes nothing, 2 outputs
+   // created -> 18. Ring activity GREW the pool; under the retired flag
+   // this same spend would have left it at 15, draining toward the floor.
+   BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
+   // ...and a follow-up spend is NOT floor-halted: the dummy clears the
+   // floor (18 >= 11) and rejects downstream instead. If a future refactor
+   // re-shrinks the counter on ring spends, this goes RED at the floor.
+   {
+      stealth_transfer_operation thin2 = make_dummy_ring( dan_owner );
+      trx.operations = { thin2 };
+      try { PUSH_TX( db, trx ); BOOST_FAIL( "dummy ring must reject downstream, not halt" ); }
+      catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "below floor" ) == std::string::npos,
+                              e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   BN_free( bs ); BN_free( bprime );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
 // The test-side sampler implements the documented normative rule verbatim:
 // uniform-without-replacement over eligible (aged) candidates, TARGET-16
 // size, the depth-appropriate skew cap, bounded retries. Compliant samples

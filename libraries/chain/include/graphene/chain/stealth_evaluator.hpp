@@ -360,6 +360,15 @@ uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );
 /// kernel + per-input recovery proofs + per-output range proofs. Pure,
 /// saturated. Called from do_evaluate (gate) and do_apply (accounting).
 uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o );
+/// Work-model units consumed by one G2 stealth pool swap (1-in/1-out):
+/// Schnorr-pin kernel allowance + dual-verified ring legs (both versions) +
+/// 2x range allowance (output BP+ m=1 + conceptual pin cost) + pool-math
+/// leg. Pure, saturated at 0xFFFFFFFF (a proposal-embedded op bypasses
+/// validate(), so ring_size is unbounded at gate time — the gate still
+/// fails closed, never wraps). Strictly exceeds stealth_work_for_stealth_
+/// transfer for equal ring sizes (design §7). Called from do_evaluate
+/// (gate) and do_apply (accounting) by the G2 evaluator (G2-2).
+uint32_t stealth_work_for_pool_exchange( uint32_t ring_size );
 /// Nullifier identity: sha256 over the 33-byte key image (single definition
 /// in stealth_evaluator.cpp; moved out of the anonymous namespace in Task 3
 /// so the test suite links the exact production identity — never duplicated).

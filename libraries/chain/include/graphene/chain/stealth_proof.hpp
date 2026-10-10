@@ -134,6 +134,47 @@ fc::sha256 stealth_ring_message( uint8_t version,
                                  protocol::share_type fee );
 
 /**
+ * G2 pool-swap ring message: binds version, input asset, pool, claimed
+ * input value, slippage floor, image, ring, pseudo-output, outputs, and the
+ * composite fee F. Single-sourced: provers (wallets/tests) and the G2
+ * evaluator call this. Design 2026-10-10-stealth-pool-swaps-design §8;
+ * F-03 acceptance is the exhaustive re-partition search (0 collisions).
+ *
+ * Preimage: "G2RM" || version || LE64(n) || LE64(m) || asset_A || pool ||
+ * amount || min || image33 || ring[33n] || pseudo[33] || outputs[33m] || F,
+ * single sha256. "G2RM" domain — never "G1RM". G1's stealth_ring_message
+ * bytes are untouched.
+ *
+ * ENCODINGS (third-party provers build from this table alone):
+ *   version   1 byte
+ *   n, m      fixed-width 64-bit little-endian (fc::raw::pack of uint64_t),
+ *             canonical by construction (F-03 count binding, same as G1RM)
+ *   asset_A   fc::raw::pack(asset_id_type) = fc varint, VARIABLE length
+ *   pool      ULEB128 varint, canonical minimal length (same wire as
+ *             fc unsigned_int, extended to uint64; see the G2VP comment)
+ *   amount    fc::raw::pack(int64) = 8 bytes little-endian, FIXED width
+ *   min       fc::raw::pack(int64) = 8 bytes little-endian, FIXED width
+ *   image33   33 raw bytes as carried (sizes gated by the caller/verifier,
+ *             never by this hash — mirrors G1RM)
+ *   ring[]    n x 33 raw bytes
+ *   pseudo    33 raw bytes
+ *   outputs[] m x 33 raw bytes
+ *   F         fc::raw::pack(int64) = 8 bytes little-endian, FIXED width
+ *
+ * Every variable-length field is length-prefixed (n/m counts) or
+ * self-delimiting (varints); fixed-stride runs cannot be re-partitioned.
+ */
+fc::sha256 stealth_pool_message( uint8_t version,
+                                 const protocol::asset_id_type& asset_a,
+                                 uint64_t pool_id,
+                                 int64_t amount_to_sell, int64_t min_to_receive,
+                                 const std::vector<char>& key_image,
+                                 const std::vector<fc::ecc::commitment_type>& ring,
+                                 const fc::ecc::commitment_type& pseudo,
+                                 const std::vector<fc::ecc::commitment_type>& outputs,
+                                 int64_t F );
+
+/**
  * Verify one ring, WITH pseudo-output value binding (G1b-3 kernel).
  * The pseudo-output P is read from in.pseudo_output: it must commit to the
  * same value as the real spent member under a fresh blind. Per member i
@@ -195,6 +236,39 @@ bool stealth_verify_excess( const std::vector<fc::ecc::commitment_type>& ins,
                             int64_t fee,
                             const fc::sha256& excess,
                             std::string& err );
+
+/**
+ * G2 Schnorr value-pin verifier (design 2026-10-10-stealth-pool-swaps-design
+ * §3 link 1; proof Lemma 1): proves the pseudo-output P opens to
+ * amount_to_sell, i.e. knowledge of b_P with P - amount*H = b_P*G.
+ * Verifies s*G == T + e*Y with Y = P - amount*H and
+ * e = H(G2VP, P, amount, pool, T).
+ *
+ * G2VP preimage (third-party provers build from this table alone):
+ *   "G2VP" || P(33) || amount(8, fixed LE) || pool(varint) || T(33),
+ *   single sha256, scalar mod n (scalar_from_sha semantics).
+ *   P, T      33 raw bytes each (compressed-point encoding as carried)
+ *   amount    fc::raw::pack(int64) = 8 bytes little-endian, FIXED width.
+ *             Only positive bit patterns occur (non-positive rejected
+ *             before hashing).
+ *   pool      ULEB128 varint, canonical minimal length: 7 bits per byte,
+ *             little-endian groups, continuation bit 0x80, last byte plain.
+ *             Same wire as fc unsigned_int, extended to the full uint64
+ *             range. Minimal length by construction, so the encoding is
+ *             canonical: distinct pool ids give distinct bytes.
+ *
+ * Rejects fail-closed (never throws): non-positive amount, wrong-size T/s,
+ * non-canonical s (stealth_verify_ring strictness), bad/off-curve/identity
+ * P or T, challenge-zero (R15C-04 discipline: e == 0 would drop the (P,
+ * amount, pool) binding; unreachable by grinding, refused anyway).
+ * Verification only: no signing, no randomness (the prover lives in tests;
+ * wallets reimplement from this spec).
+ */
+bool stealth_verify_value_pin( const fc::ecc::commitment_type& P,
+                               int64_t amount_to_sell, uint64_t pool_id,
+                               const std::vector<char>& T_bytes /*33B*/,
+                               const std::string& s_bytes /*32B*/,
+                               std::string& err );
 
 // ---------------------------------------------------------------------------
 // Range proofs

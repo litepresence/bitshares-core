@@ -34,6 +34,7 @@ using protocol::GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS;
 using protocol::GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK;
 using protocol::GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK;
 using protocol::GRAPHENE_STEALTH_WORK_US_PER_KERNEL;
+using protocol::GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH;
 using protocol::GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;
 using protocol::GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER;
 using protocol::GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT;
@@ -363,6 +364,24 @@ uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend
    uint64_t w = GRAPHENE_STEALTH_WORK_US_PER_KERNEL;            // conservation kernel
    w += (uint64_t)o.inputs.size() * GRAPHENE_STEALTH_WORK_US_PER_KERNEL;  // per-input recovery proof
    w += (uint64_t)o.outputs.size() * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;
+   if( w > 0xFFFFFFFFu ) return 0xFFFFFFFFu;
+   return (uint32_t)w;
+}
+
+uint32_t stealth_work_for_pool_exchange( uint32_t ring_size )
+{
+   // 64-bit accumulation with saturation, mirroring
+   // stealth_work_for_stealth_transfer (:334-347): the gate runs before any
+   // ring-size assert and a proposal-embedded op bypasses validate(), so
+   // ring_size is unbounded at gate time — saturate, never wrap, and the
+   // gate fails closed on the saturated value. Single 1-in/1-out G2 swap
+   // leg: dual-verified ring (both version legs), Schnorr-pin kernel
+   // allowance, 2x range allowance (output BP+ m=1 + conceptual pin cost),
+   // pool-math leg.
+   uint64_t w = GRAPHENE_STEALTH_WORK_US_PER_KERNEL;                             // Schnorr value-pin
+   w += (uint64_t)2 * ring_size * GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER;      // dual-verify ring
+   w += (uint64_t)2 * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;                  // output BP+ + pin cost
+   w += GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH;                                  // constant-product math
    if( w > 0xFFFFFFFFu ) return 0xFFFFFFFFu;
    return (uint32_t)w;
 }

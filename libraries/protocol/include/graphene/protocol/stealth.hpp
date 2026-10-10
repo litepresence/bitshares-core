@@ -101,6 +101,12 @@ constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF = 6322;
 /// (same log); 2048us is ~4x headroom for the 8-in/8-out kernel (2 EC muls
 /// + 16 EC adds), integer, documented.
 constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_KERNEL = 2048;
+/// Verification-work allowance for the G2 pool-math leg (constant-product
+/// computation + integer asserts, design 2026-10-10-stealth-pool-swaps
+/// §4/§7): integer-only path, no EC ops. One kernel allowance is a
+/// conservative over-count (fail-closed direction for the budget).
+/// Proposal per the header rule: auditors may raise, never lower.
+constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH = 2048;
 
 /// Decoy eligibility: outputs younger than this are ineligible as decoys
 /// (Sybil-poisoning cost: an attacker must park outputs for a full day

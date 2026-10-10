@@ -177,6 +177,24 @@ fc::sha256 sha256_of( const std::string& bytes )
    return h;
 }
 
+/// Canonical-minimal ULEB128 encode of a uint64 (G2 pool field). Same wire
+/// as fc::raw::pack(unsigned_int) (7 bits per byte, continuation bit),
+/// extended to the full 64-bit range. Minimal length by construction, so
+/// the encoding is canonical: distinct values give distinct bytes and no
+/// value has two encodings. Hash-only transcript (never unpacked),
+/// deterministic on every node; integer math only.
+std::string pool_varint( uint64_t v )
+{
+   std::string out;
+   do {
+      unsigned char b = (unsigned char)( v & 0x7f );
+      v >>= 7;
+      if( v ) b |= 0x80;
+      out.push_back( (char)b );
+   } while( v );
+   return out;
+}
+
 BIGNUM* sqrt_exp() // (p+1)/4 for secp256k1 (p = 3 mod 4)
 {
    static BIGNUM* q = nullptr;
@@ -488,6 +506,44 @@ fc::sha256 stealth_ring_message( uint8_t version,
    return sha256_of( pre );
 }
 
+fc::sha256 stealth_pool_message( uint8_t version,
+                                 const protocol::asset_id_type& asset_a,
+                                 uint64_t pool_id,
+                                 int64_t amount_to_sell, int64_t min_to_receive,
+                                 const std::vector<char>& key_image,
+                                 const std::vector<fc::ecc::commitment_type>& ring,
+                                 const fc::ecc::commitment_type& pseudo,
+                                 const std::vector<fc::ecc::commitment_type>& outputs,
+                                 int64_t F )
+{
+   std::string pre = "G2RM";
+   pre.push_back( (char)version );
+   // F-03 count binding (same discipline as stealth_ring_message :467-479):
+   // fixed-width LE64 counts hashed BEFORE the commitment run so no
+   // (n,m) re-partitioning of ring[33n] || pseudo[33] || outputs[33m]
+   // can share a preimage.
+   {
+      auto nvec = fc::raw::pack( (uint64_t)ring.size() );
+      pre.append( nvec.data(), nvec.size() );
+      auto mvec = fc::raw::pack( (uint64_t)outputs.size() );
+      pre.append( mvec.data(), mvec.size() );
+   }
+   auto avec = fc::raw::pack( asset_a ); // varint, self-delimiting
+   pre.append( avec.data(), avec.size() );
+   pre.append( pool_varint( pool_id ) ); // ULEB128 varint, self-delimiting
+   auto amt = fc::raw::pack( amount_to_sell ); // int64: fixed 8B LE
+   pre.append( amt.data(), amt.size() );
+   auto mn = fc::raw::pack( min_to_receive ); // int64: fixed 8B LE
+   pre.append( mn.data(), mn.size() );
+   pre.append( key_image.data(), key_image.size() );
+   for( const auto& c : ring ) pre.append( (const char*)c.data(), 33 );
+   pre.append( (const char*)pseudo.data(), 33 );
+   for( const auto& c : outputs ) pre.append( (const char*)c.data(), 33 );
+   auto fvec = fc::raw::pack( F ); // int64: fixed 8B LE
+   pre.append( fvec.data(), fvec.size() );
+   return sha256_of( pre );
+}
+
 // ---------------------------------------------------------------------------
 // Ring verification
 // ---------------------------------------------------------------------------
@@ -791,6 +847,77 @@ bool stealth_verify_excess( const std::vector<fc::ecc::commitment_type>& ins,
    }
    if( EC_POINT_is_at_infinity( secp_group(), acc.p ) != 1 )
       { err = "conservation mismatch"; return false; }
+   return true;
+}
+
+// ---------------------------------------------------------------------------
+// G2 Schnorr value-pin (design §3 link 1; proof Lemma 1)
+// ---------------------------------------------------------------------------
+
+bool stealth_verify_value_pin( const fc::ecc::commitment_type& P,
+                               int64_t amount_to_sell, uint64_t pool_id,
+                               const std::vector<char>& T_bytes,
+                               const std::string& s_bytes, std::string& err )
+{
+   if( amount_to_sell <= 0 ) { err = "non-positive amount"; return false; }
+   if( T_bytes.size() != 33 ) { err = "pin T size"; return false; }
+   if( s_bytes.size() != 32 ) { err = "pin s size"; return false; }
+   bn_ctx ctx;
+   const EC_GROUP* g = secp_group();
+   // Strict canonical scalar (stealth_verify_ring :571-575 discipline).
+   bn s;
+   if( !scalar_parse_strict( s.b, (const unsigned char*)s_bytes.data(), 32 ) )
+      { err = "pin s not canonical"; return false; }
+   // Statement + nonce points (reject bad/off-curve/identity).
+   pt Pp( g ), Tp( g );
+   if( !point_from_commit( Pp.p, P ) ) { err = "bad pin P"; return false; }
+   std::vector<unsigned char> Tv( T_bytes.begin(), T_bytes.end() );
+   if( !point_from_bytes( Tp.p, Tv ) ) { err = "bad pin T"; return false; }
+   // Y = P - amount*H (amount > 0, so BN_set_word is exact, no sign path).
+   pt H( g ), AH( g ), Y( g );
+   auto Hb = stealth_H_point();
+   if( !point_from_bytes( H.p, Hb ) ) { err = "bad H"; return false; }
+   bn a;
+   BN_set_word( a.b, (BN_ULONG)amount_to_sell );
+   if( EC_POINT_mul( (EC_GROUP*)g, AH.p, nullptr, H.p, a.b, ctx.c ) != 1 )
+      { err = "ec fail"; return false; }
+   if( EC_POINT_copy( Y.p, Pp.p ) != 1 ) { err = "ec fail"; return false; }
+   if( EC_POINT_invert( (EC_GROUP*)g, AH.p, ctx.c ) != 1 )
+      { err = "ec fail"; return false; }
+   if( EC_POINT_add( (EC_GROUP*)g, Y.p, Y.p, AH.p, ctx.c ) != 1 )
+      { err = "ec fail"; return false; }
+   // e = H("G2VP" || P || amount LE64 || pool ULEB128 || T), mod n.
+   std::string pre = "G2VP";
+   pre.append( (const char*)P.data(), 33 );
+   auto avec = fc::raw::pack( amount_to_sell ); // int64: fixed 8B LE
+   pre.append( avec.data(), avec.size() );
+   pre.append( pool_varint( pool_id ) );
+   pre.append( T_bytes.data(), T_bytes.size() );
+   fc::sha256 h = sha256_of( pre );
+   bn e;
+   scalar_from_sha( e.b, h );
+   // R15C-04 discipline: e == 0 collapses the equation to s*G == T,
+   // dropping the (P, amount, pool) binding entirely. Unreachable by
+   // grinding (2^-256), and honest provers never hit it, so refuse
+   // fail-closed.
+   if( BN_is_zero( e.b ) ) { err = "pin challenge-zero"; return false; }
+   // s*G == T + e*Y: one scalar mul + one 2-term multiexp + compare
+   // (same pattern as stealth_verify_ring / recovery check_leg).
+   pt LHS( g ), RHS( g );
+   if( EC_POINT_mul( (EC_GROUP*)g, LHS.p, s.b, nullptr, nullptr, ctx.c ) != 1 )
+      { err = "ec fail"; return false; }
+   {
+      const EC_POINT* pts[2] = { Tp.p, Y.p };
+      const BIGNUM* scs[2] = { BN_value_one(), e.b };
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+      if( EC_POINTs_mul( (EC_GROUP*)g, RHS.p, nullptr, 2,
+                         pts, scs, ctx.c ) != 1 )
+#pragma GCC diagnostic pop
+         { err = "ec fail"; return false; }
+   }
+   if( EC_POINT_cmp( g, LHS.p, RHS.p, ctx.c ) != 0 )
+      { err = "pin equation mismatch"; return false; }
    return true;
 }
 

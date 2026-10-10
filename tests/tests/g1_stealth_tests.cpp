@@ -49,6 +49,7 @@
 #include <fc/reflect/variant.hpp>
 
 #include <algorithm>
+#include <map>
 #include <random>
 #include <sstream>
 #include <vector>
@@ -8713,6 +8714,323 @@ BOOST_AUTO_TEST_CASE( g1_postfork_balance_refuses_legacy_legs )
       }
       trx.clear_signatures(); trx.operations.clear();
    }
+} FC_CAPTURE_AND_RETHROW() }
+
+namespace {
+
+// ---- G2 (stealth pool swaps) test-side helpers (TEST-ONLY provers) ----
+// Style mirrors T_prove_ring: deterministic labels, explicit byte ops, no
+// randomness. Wallets reimplement proving from the verifier spec in
+// stealth_proof.hpp; consensus never proves.
+
+/// Canonical-minimal ULEB128 encode of a uint64 (the G2VP/G2RM pool field).
+/// Independent reimplementation of the header-documented encoding (the
+/// production encoder lives in stealth_proof.cpp and is never shared here,
+// so a shared bug cannot mask itself).
+std::string T_uleb128( uint64_t v )
+{
+   std::string out;
+   do {
+      unsigned char b = (unsigned char)( v & 0x7f );
+      v >>= 7;
+      if( v ) b |= 0x80;
+      out.push_back( (char)b );
+   } while( v );
+   return out;
+}
+
+/// Fixed-width little-endian 64-bit encode (amount/min/F/n/m fields).
+std::string T_le64( uint64_t v )
+{
+   std::string out;
+   for( int i = 0; i < 8; ++i ) out.push_back( (char)( v >> (8*i) ) );
+   return out;
+}
+
+/// Test-side G2VP challenge e = H("G2VP" || P || amount LE64 || pool ULEB128
+/// || T), parsed mod n (scalar_from_sha semantics). Built from the
+/// header-documented encoding with explicit byte ops only.
+BIGNUM* T_g2vp_challenge( const fc::ecc::commitment_type& P, int64_t amount,
+                          uint64_t pool, const std::vector<unsigned char>& T33 )
+{
+   BOOST_REQUIRE( T33.size() == 33 );
+   std::string pre = "G2VP";
+   pre.append( (const char*)P.data(), 33 );
+   pre.append( T_le64( (uint64_t)amount ) );
+   pre.append( T_uleb128( pool ) );
+   pre.append( (const char*)T33.data(), 33 );
+   fc::sha256 h = fc::sha256::hash( pre.data(), pre.size() );
+   return T_bn( h );
+}
+
+/// Test-side Schnorr value-pin prover: given P = amount*H + b_P*G, produce
+/// (T, s) with T = k*G, s = k + e*b_P mod n. Deterministic k from a label.
+void T_prove_value_pin( const fc::ecc::commitment_type& P, int64_t amount,
+                        uint64_t pool, const BIGNUM* b_P,
+                        std::vector<char>& T_out /*33B*/,
+                        std::string& s_out /*32B*/ )
+{
+   BIGNUM* k = T_scalar( "g2-pin-k|" + std::to_string( amount )
+                         + "|" + std::to_string( pool ) );
+   BOOST_REQUIRE( !BN_is_zero( k ) );
+   EC_POINT* Tp = EC_POINT_new( T_group() );
+   BOOST_REQUIRE( EC_POINT_mul( (EC_GROUP*)T_group(), Tp, k,
+                               nullptr, nullptr, T_ctx() ) == 1 );
+   std::vector<unsigned char> T33 = T_compress( Tp );
+   BIGNUM* e = T_g2vp_challenge( P, amount, pool, T33 );
+   BIGNUM* s = BN_new();
+   BN_mod_mul( s, e, b_P, T_order(), T_ctx() );
+   BN_mod_add( s, s, k, T_order(), T_ctx() );
+   T_out.assign( T33.begin(), T33.end() );
+   unsigned char buf[32];
+   BOOST_REQUIRE( BN_bn2binpad( s, buf, 32 ) == 32 );
+   s_out.assign( (char*)buf, 32 );
+   BN_free( k ); BN_free( e ); BN_free( s );
+   EC_POINT_free( Tp );
+}
+
+/// Deterministic synthetic commitment for G2RM partition searches (the ring
+/// message never validates points, so any distinct 33B values do; real
+/// on-curve commitments keep the vectors honest).
+fc::ecc::commitment_type T_g2mk( int seed )
+{
+   return T_commitment( T_commit( T_scalar( "g2rm-c|" + std::to_string( seed ) ),
+                                 (uint64_t)( 1000 + seed ) ) );
+}
+
+std::vector<char> T_g2img()
+{
+   auto v = T_commit( T_scalar( "g2rm-img" ), 7 );
+   return std::vector<char>( v.begin(), v.end() );
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE( value_pin_happy_path )
+{ try {
+   // P = a*H + b_P*G for known (a, b_P); test-side prover builds (T, s);
+   // the verifier must accept.
+   const int64_t amount = 5000;
+   const uint64_t pool = 7;
+   BIGNUM* b_P = T_bn( T_blind_secret( "g2-pin-b" ) );
+   fc::ecc::commitment_type P = T_commitment( T_commit( b_P, (uint64_t)amount ) );
+   std::vector<char> T33;
+   std::string s32;
+   T_prove_value_pin( P, amount, pool, b_P, T33, s32 );
+   BOOST_REQUIRE_EQUAL( T33.size(), 33u );
+   BOOST_REQUIRE_EQUAL( s32.size(), 32u );
+   std::string err;
+   BOOST_CHECK_MESSAGE( stealth_verify_value_pin( P, amount, pool, T33, s32, err ), err );
+   BN_free( b_P );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( value_pin_rejects_substituted_P )
+{ try {
+   // (T, s) proven for P must fail for a different P' committing to the
+   // SAME amount under a different blind (Lemma 1 binding note).
+   const int64_t amount = 5000;
+   const uint64_t pool = 7;
+   BIGNUM* b_P = T_bn( T_blind_secret( "g2-pin-b" ) );
+   fc::ecc::commitment_type P = T_commitment( T_commit( b_P, (uint64_t)amount ) );
+   std::vector<char> T33;
+   std::string s32;
+   T_prove_value_pin( P, amount, pool, b_P, T33, s32 );
+   BIGNUM* b2 = T_bn( T_blind_secret( "g2-pin-b-other" ) );
+   fc::ecc::commitment_type P2 = T_commitment( T_commit( b2, (uint64_t)amount ) );
+   BOOST_REQUIRE( P2 != P );
+   std::string err;
+   BOOST_CHECK_MESSAGE( !stealth_verify_value_pin( P2, amount, pool, T33, s32, err ),
+                        "substituted P accepted" );
+   BN_free( b_P ); BN_free( b2 );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( value_pin_rejects_substituted_amount )
+{ try {
+   // Same P and (T, s), claimed amount off by one in either direction.
+   const int64_t amount = 5000;
+   const uint64_t pool = 7;
+   BIGNUM* b_P = T_bn( T_blind_secret( "g2-pin-b" ) );
+   fc::ecc::commitment_type P = T_commitment( T_commit( b_P, (uint64_t)amount ) );
+   std::vector<char> T33;
+   std::string s32;
+   T_prove_value_pin( P, amount, pool, b_P, T33, s32 );
+   std::string err;
+   BOOST_CHECK_MESSAGE( !stealth_verify_value_pin( P, amount + 1, pool, T33, s32, err ),
+                        "overstated amount accepted" );
+   BOOST_CHECK_MESSAGE( !stealth_verify_value_pin( P, amount - 1, pool, T33, s32, err ),
+                        "understated amount accepted" );
+   BN_free( b_P );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( value_pin_rejects_substituted_pool )
+{ try {
+   // Same P, amount, and (T, s) replayed against a different pool id.
+   const int64_t amount = 5000;
+   const uint64_t pool = 7;
+   BIGNUM* b_P = T_bn( T_blind_secret( "g2-pin-b" ) );
+   fc::ecc::commitment_type P = T_commitment( T_commit( b_P, (uint64_t)amount ) );
+   std::vector<char> T33;
+   std::string s32;
+   T_prove_value_pin( P, amount, pool, b_P, T33, s32 );
+   std::string err;
+   BOOST_CHECK_MESSAGE( !stealth_verify_value_pin( P, amount, pool + 1, T33, s32, err ),
+                        "cross-pool replay accepted" );
+   BOOST_CHECK_MESSAGE( !stealth_verify_value_pin( P, amount, pool + 300, T33, s32, err ),
+                        "cross-pool replay (varint-width change) accepted" );
+   BN_free( b_P );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( value_pin_rejects_malformed )
+{ try {
+   // Interface-1 fail-closed gates: non-positive amount, wrong-size T/s,
+   // non-canonical s. A canonical-but-wrong s must still fail the equation.
+   const int64_t amount = 5000;
+   const uint64_t pool = 7;
+   BIGNUM* b_P = T_bn( T_blind_secret( "g2-pin-b" ) );
+   fc::ecc::commitment_type P = T_commitment( T_commit( b_P, (uint64_t)amount ) );
+   std::vector<char> T33;
+   std::string s32;
+   T_prove_value_pin( P, amount, pool, b_P, T33, s32 );
+   std::string err;
+   BOOST_CHECK( !stealth_verify_value_pin( P, 0, pool, T33, s32, err ) );
+   BOOST_CHECK( !stealth_verify_value_pin( P, -5, pool, T33, s32, err ) );
+   BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool,
+                                           std::vector<char>( T33.begin(), T33.begin() + 32 ),
+                                           s32, err ) );
+   BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool,
+                                           std::vector<char>(), s32, err ) );
+   BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool, T33,
+                                           s32.substr( 0, 31 ), err ) );
+   // Non-canonical s (all 0xFF > curve order): strict-parse refusal.
+   BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool, T33,
+                                           std::string( 32, (char)0xff ), err ) );
+   // Canonical-but-wrong s (all zeros): parse passes, equation must fail.
+   BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool, T33,
+                                           std::string( 32, '\0' ), err ) );
+   BN_free( b_P );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( g2rm_repartition_search )
+{ try {
+   // F-03 closure method (overlay §4b; tooling/g1rm_preimage_probe.cpp §E):
+   // exhaustive re-partition search over every full-consumption split of a
+   // shared K-commitment byte run (ring[0..n), pseudo=run[n],
+   // outputs=run[n+1..]) for K=2..8, crossed with pool-varint widths
+   // (1..10 bytes) and single-field (amount, min, F) flips. Distinct
+   // (pool, amount, min, ring, pseudo, outputs, F) tuples must never share
+   // a G2RM hash: 0 collisions.
+   const uint8_t ver = GRAPHENE_STEALTH_PROOF_V2;
+   const asset_id_type asset;
+   const std::vector<char> img = T_g2img();
+   // Pool probes span every ULEB128 width 1..10 bytes (boundary values).
+   const uint64_t pools[] = { 0, 1, 7, 127, 128, 300, 16383, 16384,
+      2097151, 268435455, 4294967295ULL, 4294967296ULL, 1099511627776ULL,
+      0xFFFFFFFFFFFFFFFFULL };
+   const int64_t amounts[] = { 1000, 1001 };
+   const int64_t mins[] = { 900, 901 };
+   const int64_t Fs[] = { 100, 101 };
+   size_t total = 0;
+   for( int K = 2; K <= 8; ++K )
+   {
+      std::vector<fc::ecc::commitment_type> run;
+      for( int i = 0; i < K; ++i ) run.push_back( T_g2mk( i ) );
+      std::map<std::string, std::string> seen;
+      for( auto pool : pools )
+         for( auto amount : amounts )
+            for( auto min : mins )
+               for( auto F : Fs )
+                  for( int n = 0; n <= K - 1; ++n )
+                  {
+                     const int m = K - 1 - n;
+                     const std::vector<fc::ecc::commitment_type> ring( run.begin(), run.begin() + n );
+                     const fc::ecc::commitment_type pseudo = run[n];
+                     const std::vector<fc::ecc::commitment_type> outs( run.begin() + n + 1, run.end() );
+                     BOOST_REQUIRE_EQUAL( (int)outs.size(), m );
+                     const fc::sha256 h = stealth_pool_message( ver, asset, pool, amount,
+                                                                min, img, ring, pseudo, outs, F );
+                     const std::string key( h.data(), 32 );
+                     std::ostringstream tag;
+                     tag << "(K=" << K << ",pool=" << pool << ",amt=" << amount
+                         << ",min=" << min << ",F=" << F << ",n=" << n << ",m=" << m << ")";
+                     auto ins = seen.emplace( key, tag.str() );
+                     BOOST_REQUIRE_MESSAGE( ins.second,
+                        "G2RM collision: " << ins.first->second << " vs " << tag.str() );
+                     ++total;
+                  }
+   }
+   // Pins exhaustiveness: sum_{K=2..8}(K) partitions x 14 pools x 2^3 flips.
+   BOOST_REQUIRE_EQUAL( total, (size_t)( 35 * 14 * 8 ) );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( g2rm_field_binding )
+{ try {
+   // Every bound field is load-bearing: flipping exactly one of version,
+   // asset, pool, amount, min, image, ring, pseudo, outputs, F changes the
+   // message. The same tuple twice agrees (determinism). G2RM never equals
+   // G1RM for the same content (domain separation; G1 bytes untouched).
+   const uint8_t ver = GRAPHENE_STEALTH_PROOF_V2;
+   const asset_id_type asset;
+   const uint64_t pool = 7;
+   const int64_t amount = 1000, min = 900, F = 100;
+   const std::vector<char> img = T_g2img();
+   const std::vector<fc::ecc::commitment_type> ring = { T_g2mk( 0 ), T_g2mk( 1 ) };
+   const fc::ecc::commitment_type pseudo = T_g2mk( 2 );
+   const std::vector<fc::ecc::commitment_type> outs = { T_g2mk( 3 ) };
+   const fc::sha256 base = stealth_pool_message( ver, asset, pool, amount, min,
+                                                 img, ring, pseudo, outs, F );
+   BOOST_REQUIRE_EQUAL( stealth_pool_message( ver, asset, pool, amount, min,
+                                              img, ring, pseudo, outs, F ), base );
+   BOOST_CHECK( stealth_pool_message( GRAPHENE_STEALTH_PROOF_V1, asset, pool, amount,
+                                      min, img, ring, pseudo, outs, F ) != base );
+   BOOST_CHECK( stealth_pool_message( ver, asset_id_type( 1 ), pool, amount,
+                                      min, img, ring, pseudo, outs, F ) != base );
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool + 1, amount,
+                                      min, img, ring, pseudo, outs, F ) != base );
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount + 1,
+                                      min, img, ring, pseudo, outs, F ) != base );
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount, min + 1,
+                                      img, ring, pseudo, outs, F ) != base );
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount,
+                                      min, img, ring, pseudo, outs, F + 1 ) != base );
+   std::vector<char> img2 = img; img2[0] ^= 0x01;
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount,
+                                      min, img2, ring, pseudo, outs, F ) != base );
+   const std::vector<fc::ecc::commitment_type> ring2 = { T_g2mk( 0 ), T_g2mk( 4 ) };
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount,
+                                      min, img, ring2, pseudo, outs, F ) != base );
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount,
+                                      min, img, ring, T_g2mk( 4 ), outs, F ) != base );
+   const std::vector<fc::ecc::commitment_type> outs2 = { T_g2mk( 4 ) };
+   BOOST_CHECK( stealth_pool_message( ver, asset, pool, amount,
+                                      min, img, ring, pseudo, outs2, F ) != base );
+   // G1RM over the same content (fee carries F) differs by domain alone.
+   const share_type g1fee( F );
+   BOOST_CHECK_MESSAGE(
+      stealth_ring_message( ver, asset, img, ring, pseudo, outs, g1fee ) != base,
+      "G2RM must never equal G1RM" );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( g2rm_work_exceeds_transfer )
+{ try {
+   // A G2 swap costs strictly more than a same-ring G1 transfer (design §7:
+   // ring + 2xBP + kernel + pool math): dual-verified ring legs, the
+   // Schnorr-pin kernel allowance, 2x range allowance (output BP+ m=1 +
+   // conceptual pin cost), plus the pool-math leg.
+   const uint32_t n = 16;
+   stealth_transfer_operation small;
+   small.inputs.resize( 1 ); small.inputs[0].ring.resize( n );
+   small.outputs.resize( 1 );
+   const uint32_t tx = stealth_work_for_stealth_transfer( small );
+   const uint32_t g2 = stealth_work_for_pool_exchange( n );
+   BOOST_CHECK_MESSAGE( g2 > tx, "G2 work " << g2 << " must exceed G1 work " << tx );
+   // Exact model-arithmetic pin (single input leg, single output).
+   BOOST_REQUIRE_EQUAL( g2, (uint32_t)( GRAPHENE_STEALTH_WORK_US_PER_KERNEL
+      + 2u * n * GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER
+      + 2u * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF
+      + GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH ) );
+   // Saturation discipline (proposal-embedded unbounded ring_size —
+   // saturate, never wrap, mirroring :334-347).
+   BOOST_REQUIRE_EQUAL( stealth_work_for_pool_exchange( 0xFFFFFFFFu ), 0xFFFFFFFFu );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

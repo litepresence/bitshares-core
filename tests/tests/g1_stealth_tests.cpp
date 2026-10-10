@@ -9608,9 +9608,15 @@ struct g2_pool
    int64_t                               each = 1000;
 };
 
+// each = per-blind-output value (default 1000, the historical fixture size).
+// A caller that has to compare a routed MARKET FEE against the ~1e6-unit cost
+// anchor (the burn-rate ratio) needs a bigger output; the issuance below is
+// sized off it so the funder always covers 16 outputs + the pool deposit +
+// the fee pool (24,984,000 of slack at the default, which is exactly the 25M
+// this helper used to issue).
 static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
       const fc::ecc::private_key& funder_key, const std::string& tag,
-      uint16_t market_fee_percent )
+      uint16_t market_fee_percent, int64_t each = 1000 )
 {
    database& db = f.db;
    signed_transaction& trx = f.trx;
@@ -9627,13 +9633,15 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
    // Pool + deposit pre-date the blinds (no aging needed for reserves).
    const liquidity_pool_id_type pool_id = f.create_liquidity_pool( funder.get_id(),
       aid_a, aid_b, sid, 0, 0 ).get_id();
-   // 25M of A (not 3M): EE-1's Rule R puts op109's 1-output subsidy gap at
-   // anchor(1) = 10 BTS = 1,000,000 units of A, and T_seed_pool_uia funds
-   // parity_pool[A] through the REAL 5%-share market-fee routing, so the payer
-   // must spend 20x the gap (20,020,000) plus 1M to the pool and 1M to the fee
-   // pool — 3M leaves nothing. The extra is inert: it sits on the funder's
-   // balance and never enters the pool reserves the cases assert.
-   f.issue_uia( funder, asset( 25000000, aid_a ) );
+   // 25M of A (not 3M) at the default `each`: EE-1's Rule R puts op109's
+   // 1-output subsidy gap at anchor(1) = 10 BTS = 1,000,000 units of A, and
+   // T_seed_pool_uia funds parity_pool[A] through the REAL 5%-share market-fee
+   // routing, so the payer must spend 20x the gap (20,020,000) plus 1M to the
+   // pool and 1M to the fee pool — 3M leaves nothing. The extra is inert: it
+   // sits on the funder's balance and never enters the pool reserves the cases
+   // assert. Scaled by `each` so a caller with bigger outputs still funds all
+   // 16 of them.
+   f.issue_uia( funder, asset( 16 * each + 24984000, aid_a ) );
    f.issue_uia( funder, asset( 3000000, aid_b ) );
    f.deposit_to_liquidity_pool( funder.get_id(), pool_id,
       asset( 1000000, aid_a ), asset( 1000000, aid_b ) );
@@ -9652,6 +9660,7 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
    p.asset_a = aid_a;
    p.asset_b = aid_b;
    p.pool = pool_id;
+   p.each = each;
    auto fund_one = [&]( int i ) {
       transfer_to_blind_operation ttb;
       ttb.amount = asset( p.each, p.asset_a );
@@ -12676,6 +12685,323 @@ BOOST_AUTO_TEST_CASE( subsidy_op109_drain_between_consume_fails_closed )
       BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), pool0 );
       BOOST_CHECK_EQUAL( core.dynamic_asset_data_id( db ).accumulated_fees.value, acc1 );
    }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// EE-3fix helpers — G2's market-fee leg vs. the burn-rate denominator.
+// ---------------------------------------------------------------------------
+
+/// External parity-pool contribution: the bootstrap shape a routed-fee pair
+/// cannot bootstrap ITSELF out of (see subsidy_op109_empty_pool_refuses — a
+/// zero-market-fee pool can never pay its own anchor gap). Money moves payer ->
+/// accumulated_fees -> parity_pool, the same split the legacy router makes at
+/// db_market.cpp:2696, but paid through a NON-opted-in asset so NO
+/// interval_routed entry is written: an external gift is not routed fee
+/// inflow, and the EE-3fix fix must not invent one.
+///
+/// SEALED-STATE ONLY (db_block.cpp:423), same discipline as T_seed_pool_uia:
+/// call with no push in flight.
+static void T_seed_pool_external( database_fixture& f, const account_object& payer,
+                                  const asset_object& uia, int64_t need )
+{
+   database& db = f.db;
+   const auto& opt = uia.options.extensions.value.parity_fee_share_enabled;
+   BOOST_REQUIRE_MESSAGE( !opt.valid() || !*opt,
+      "T_seed_pool_external: asset is opted in, so the LEGACY router would "
+      "register interval inflow and this helper would no longer measure what "
+      "it claims to measure" );
+   const int64_t have = T_ee_pool( db, uia.get_id() );
+   if( have >= need )
+      return;
+   const int64_t fee = need - have;
+   BOOST_REQUIRE_MESSAGE(
+      db.get_balance( payer.get_id(), uia.get_id() ).amount.value >= fee,
+      "T_seed_pool_external: payer lacks the UIA balance to seed the parity pool" );
+   db.adjust_balance( payer.get_id(), uia.amount( -fee ) );
+   db.pay_market_fees( nullptr, uia, uia.amount( fee ), true, uia.amount( fee ) );
+   db.modify( uia.dynamic_asset_data_id( db ), [&]( asset_dynamic_data_object& o ) {
+      BOOST_REQUIRE( o.accumulated_fees.value >= fee );
+      o.accumulated_fees -= share_type( fee );
+   } );
+   db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+              [&]( stealth_status_object& o ) {
+      auto itr = o.parity_pool.find( uia.get_id() );
+      if( itr == o.parity_pool.end() )
+         o.parity_pool[ uia.get_id() ] = share_type( fee );
+      else
+         itr->second += share_type( fee );
+   } );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, uia.get_id() ), need );
+}
+
+/// Push the scheduled consensus maintenance tick past the end of this test.
+/// database::_maintenance calls stealth_parity_maintenance (db_maint.cpp),
+/// which ROLLS the interval counters over and recomputes the alarms — correct
+/// behaviour, but it would clear interval_routed out from under the assertions
+/// below and make them depend on where the fixture's block clock happens to
+/// sit. Both EE-3fix cases drive stealth_parity_maintenance explicitly, so the
+/// interval under test stays exactly the one the swap wrote. SEALED STATE ONLY.
+static void T_defer_maintenance( database& db )
+{
+   const fc::time_point_sec far =
+      db.head_block_time() + fc::seconds( 5 * 365 * 24 * 3600 );
+   db.modify( db.get_dynamic_global_properties(),
+              [&]( dynamic_global_property_object& p ) { p.next_maintenance_time = far; } );
+}
+
+// ---------------------------------------------------------------------------
+// Test 10 — subsidy_op109_funding_registers_burn_denominator.  EE-3fix, the
+// F-01 (Important) brick.
+//
+// The burn alarm in stealth_parity_maintenance is a per-asset RATIO of this
+// interval's grants to this interval's ROUTED inflow: routed == 0 while any
+// grant exists reads as pct = 100, trips burn_critical, and
+// stealth_parity_available then refuses every later subsidy. The legacy router
+// (stealth_parity_route_fee) maintains BOTH counters; the G2 router
+// (g2_route_market_fee_to_parity, design §5) credited parity_pool and forgot
+// interval_routed, so a G2-only-funded asset tripped the alarm on its FIRST
+// grant and every subsidy after it halted until some later interval happened
+// to carry legacy routing.
+//
+// The pool here is funded EXTERNALLY (no legacy opt-in, so no interval inflow
+// from the seed) and the swap routes 4x its grant, which is the ratio a
+// healthy G2 pair runs at. Before the fix the denominator reads 0 -> pct 100.
+//
+// GUARD DELETION (observed RED): delete the interval_routed upsert from
+// g2_route_market_fee_to_parity (stealth_evaluator.cpp, the db.modify block
+// just above stealth_pool_exchange_evaluator::do_evaluate) -> the
+// interval_routed lookup below goes RED and burn_critical reads true on a
+// 4:1 routed:granted interval.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_op109_funding_registers_burn_denominator )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+
+   // (0) The legacy router, UNCHANGED: it registers BOTH counters. Pinned
+   // first so the G2 leg below is read against a known-good shape, and on the
+   // fixture's own CORE funding so it costs no extra setup.
+   {
+      const asset_object& core = asset_id_type()( db );
+      g1c_opt_in_parity( db, core.get_id() );
+      db.adjust_balance( dan_id, core.amount( -1000000 ) );
+      db.pay_market_fees( nullptr, core, core.amount( 1000000 ), true, core.amount( 1000000 ) );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto pitr = st.parity_pool.find( core.get_id() );
+      auto ritr = st.interval_routed.find( core.get_id() );
+      BOOST_REQUIRE( pitr != st.parity_pool.end() );
+      BOOST_REQUIRE( ritr != st.interval_routed.end() );
+      BOOST_CHECK_EQUAL( pitr->second.value, 50000 ); // 5% of the routed fee
+      BOOST_CHECK_EQUAL( ritr->second.value, 50000 ); // ...and it registers it
+   }
+
+   // 80% market fee on 5e6-unit outputs: the ratio under test is grant:routed
+   // and the grant is the ~1e6-unit cost anchor, so the routed leg has to be
+   // the same order of magnitude for the number to mean anything.
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "EE3F", 8000, 5000000 );
+   generate_block();
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters.get_market_fee_network_percent(), 0 );
+   const asset_id_type aid_a = p.asset_a;
+
+   // op109's grant on this pair: the anchor gap (parity is 0 at test genesis).
+   const int64_t anchor1_core = stealth_cost_anchor_core( db, 1 ).value;
+   const share_type parity_core = db.current_fee_schedule().calculate_fee(
+      operation( stealth_pool_exchange_operation() ) ).amount;
+   const share_type gap = stealth_parity_gap_core( db, 1, parity_core, 1 );
+   BOOST_REQUIRE_EQUAL( gap.value, anchor1_core );
+   const int64_t gap_asset = stealth_gap_to_asset( db, aid_a, gap ).value;
+   BOOST_REQUIRE_EQUAL( gap_asset, anchor1_core ); // the fixture's CER is 1:1
+   T_seed_pool_external( *this, dan, aid_a( db ), gap_asset + 1000 );
+   BOOST_REQUIRE_EQUAL( T_ee_pool( db, aid_a ), gap_asset + 1000 );
+
+   // Flush the fixture's own interval (its blind deposits take CORE grants)
+   // so the ratio measured below is THIS swap's alone. The second call
+   // recomputes over the now-empty interval.
+   T_defer_maintenance( db );
+   stealth_parity_maintenance( db );
+   stealth_parity_maintenance( db );
+   BOOST_REQUIRE_EQUAL( stealth_current_alarms( db ).burn_rate_pct, 0u );
+   BOOST_REQUIRE( !stealth_current_alarms( db ).burn_critical );
+
+   set_expiration( db, trx );
+   g2_swap sw = g2_build_swap( db, p, 0, GRAPHENE_STEALTH_PROOF_V2, "ee3fix-sp", 50 );
+   const int64_t f_maker = sw.expect.maker_market_fee.amount.value;
+   BOOST_TEST_MESSAGE( "ee3fix maker=" << f_maker
+                    << " taker=" << sw.expect.taker_market_fee.amount.value
+                    << " f_tx=" << sw.f_tx );
+   BOOST_REQUIRE_EQUAL( f_maker, 4 * gap_asset ); // the routed:granted ratio under test
+   trx.operations = { sw.op };
+   PUSH_TX( db, trx );
+   trx.clear();
+   generate_block();
+
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto ritr = st.interval_routed.find( aid_a );
+      BOOST_REQUIRE( ritr != st.interval_routed.end() ); // <-- THE FIX
+      BOOST_CHECK_EQUAL( ritr->second.value, f_maker );
+      auto gitr = st.interval_granted.find( aid_a );
+      BOOST_REQUIRE( gitr != st.interval_granted.end() );
+      BOOST_CHECK_EQUAL( gitr->second.value, gap_asset );
+      // The money never moved: the pool gained exactly the routed fee and paid
+      // exactly the grant back out of it.
+      BOOST_CHECK_EQUAL( T_ee_pool( db, aid_a ), 1000 + f_maker );
+      auto bitr = st.interval_routed.find( p.asset_b );
+      BOOST_REQUIRE( bitr != st.interval_routed.end() );
+      BOOST_CHECK_EQUAL( bitr->second.value, sw.expect.taker_market_fee.amount.value );
+   }
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 25u ); // 1e6 granted / 4e6 routed
+      BOOST_CHECK( !st.alarms.burn_warn );
+      BOOST_CHECK( !st.alarms.burn_critical );
+      BOOST_CHECK( st.interval_routed.empty() );  // the interval is rolled over
+      BOOST_CHECK( st.interval_granted.empty() );
+   }
+   // The consequence the fix exists for: the subsidy is still on offer.
+   BOOST_CHECK( stealth_parity_available( db, aid_a, share_type( gap_asset ) ) );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 11 — subsidy_op109_burn_critical_still_fires_on_excess.  EE-3fix's
+// negative case: registering the denominator must NOT read as softening the
+// alarm. Two independent ways the ratio must still fire, both with the fix in
+// place and the router registering the denominator exactly as Test 10 shows:
+//
+//   (a) GENUINE EXCESS: a swap whose routed maker fee is below its grant
+//       (80% of a 1e6 sell = 800k routed vs 1e6 granted -> 125%) must arm
+//       burn_critical and halt the next subsidy, even though interval_routed
+//       is now populated. The alarm is a RATIO, not a presence flag.
+//   (b) NO INFLOW AT ALL: the zero-market-fee pair must still fund NOTHING on
+//       the G2 path (interval_routed gets no entry — no invented funding) and
+//       an externally funded grant over it reads as the full 100% burn it is.
+//       This is also the bootstrap property subsidy_op109_empty_pool_refuses
+//       pins from the refusal side: a zero-fee pair cannot self-fund.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( subsidy_op109_burn_critical_still_fires_on_excess )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   // 10% market fee on 5e6-unit outputs over a DEEP pool: routed enough to
+   // fund the pool, far short of the grant (a), and shallow enough that f_tx
+   // stays under the cost anchor so the swap really takes the PARITY path. A
+   // shallow pool would hand f_tx (3.4e6 here) past the anchor and the swap
+   // would take the cost path instead — no grant, no interval, no ratio.
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "EE3X", 1000, 5000000 );
+   generate_block();
+   const asset_id_type aid_a = p.asset_a;
+   const int64_t anchor1_core = stealth_cost_anchor_core( db, 1 ).value;
+   const share_type parity_core = db.current_fee_schedule().calculate_fee(
+      operation( stealth_pool_exchange_operation() ) ).amount;
+   const share_type gap = stealth_parity_gap_core( db, 1, parity_core, 1 );
+   BOOST_REQUIRE_EQUAL( gap.value, anchor1_core );
+   const int64_t gap_asset = stealth_gap_to_asset( db, aid_a, gap ).value;
+   issue_uia( dan, asset( 10000000, aid_a ) );
+   issue_uia( dan, asset( 40000000, p.asset_b ) );
+   deposit_to_liquidity_pool( dan.get_id(), p.pool, asset( 29000000, aid_a ),
+                              asset( 29000000, p.asset_b ) );
+   // Deep pool -> the tx fee converts through the A fee pool at a size the
+   // fixture's 10 BTS does not cover. CORE, not A; moves no parity counter.
+   fund_fee_pool( dan, aid_a( db ), 20000000 );
+   generate_block(); // seal before the direct writes below (db_block.cpp:423)
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   // Two grants' worth, so both legs below can take the parity path.
+   T_seed_pool_external( *this, dan, aid_a( db ), 2 * gap_asset + 1000 );
+   T_defer_maintenance( db );
+   stealth_parity_maintenance( db );
+   stealth_parity_maintenance( db );
+   BOOST_REQUIRE( !stealth_current_alarms( db ).burn_critical );
+
+   // --- (a) routed 500k against granted 1e6 -> 200% ------------------------
+   set_expiration( db, trx );
+   g2_swap sw = g2_build_swap( db, p, 0, GRAPHENE_STEALTH_PROOF_V2, "ee3x-sp", 50 );
+   const int64_t f_maker = sw.expect.maker_market_fee.amount.value;
+   BOOST_REQUIRE_EQUAL( f_maker, gap_asset / 2 );   // 10% of a 5000000 sell
+   BOOST_REQUIRE( sw.f_tx < gap_asset );            // ... so the parity path runs
+   BOOST_REQUIRE( f_maker * 80 < gap_asset * 100 );  // over the critical line
+   trx.operations = { sw.op };
+   PUSH_TX( db, trx );
+   trx.clear();
+   generate_block();
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto ritr = st.interval_routed.find( aid_a );
+      BOOST_REQUIRE( ritr != st.interval_routed.end() ); // the fix is in place
+      BOOST_CHECK_EQUAL( ritr->second.value, f_maker );
+      BOOST_REQUIRE( st.interval_granted.find( aid_a ) != st.interval_granted.end() );
+      BOOST_CHECK_EQUAL( st.interval_granted.find( aid_a )->second.value, gap_asset );
+   }
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 200u );
+      BOOST_CHECK( st.alarms.burn_warn );
+      BOOST_CHECK( st.alarms.burn_critical );
+   }
+   // And the halt is real: the next subsidy is refused on this asset.
+   BOOST_CHECK( !stealth_parity_available( db, aid_a, share_type( gap_asset ) ) );
+   // Idle interval rolls the alarm back over (nothing granted, nothing routed).
+   stealth_parity_maintenance( db );
+   BOOST_REQUIRE( !stealth_current_alarms( db ).burn_critical );
+
+   // --- (b1) the same pair repriced to a ZERO market fee routes NOTHING -----
+   // No fee, no entry: the fix registers what the router ROUTES, never a
+   // synthetic inflow that would mask real burn. This is the bootstrap
+   // property subsidy_op109_empty_pool_refuses pins from the refusal side —
+   // a fee-less pair can never fund itself, and the fix invents nothing.
+   db.modify( aid_a( db ), []( asset_object& o ) { o.options.market_fee_percent = 0; } );
+   db.modify( p.asset_b( db ), []( asset_object& o ) { o.options.market_fee_percent = 0; } );
+   set_expiration( db, trx );
+   g2_swap qw = g2_build_swap( db, p, 1, GRAPHENE_STEALTH_PROOF_V2, "ee3x-zero", 50 );
+   BOOST_REQUIRE_EQUAL( qw.expect.maker_market_fee.amount.value, 0 );
+   BOOST_REQUIRE_EQUAL( qw.expect.taker_market_fee.amount.value, 0 );
+   trx.operations = { qw.op };
+   PUSH_TX( db, trx );
+   trx.clear();
+   generate_block();
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.interval_routed.find( aid_a ) == st.interval_routed.end() );
+      BOOST_CHECK( st.interval_routed.find( p.asset_b ) == st.interval_routed.end() );
+      BOOST_CHECK( st.interval_granted.find( aid_a ) == st.interval_granted.end() );
+   }
+
+   // --- (b2) a grant with NO routed inflow at all still reads as 100% ------
+   // Driven through the same entry point the evaluators call, with the (n,
+   // subsidy_n) pair op109 uses — no block-level way to interleave a grant
+   // into an otherwise fee-less interval.
+   stealth_consume_parity_subsidy( db, true, aid_a, 1, parity_core,
+                                   share_type( 0 ), 1 );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE( st.interval_granted.find( aid_a ) != st.interval_granted.end() );
+      BOOST_CHECK_EQUAL( st.interval_granted.find( aid_a )->second.value, gap_asset );
+      BOOST_CHECK( st.interval_routed.find( aid_a ) == st.interval_routed.end() );
+   }
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK_EQUAL( st.alarms.burn_rate_pct, 100u );
+      BOOST_CHECK( st.alarms.burn_warn );
+      BOOST_CHECK( st.alarms.burn_critical ); // a grant with no inflow is a full burn
+   }
+   BOOST_CHECK( !stealth_parity_available( db, aid_a, share_type( gap_asset ) ) );
+   verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

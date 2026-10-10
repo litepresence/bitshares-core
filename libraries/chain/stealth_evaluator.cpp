@@ -2001,6 +2001,14 @@ namespace {
 /// share behind an opt-in gate: the G2 fee path is defined as 100% parity
 /// routing (MG-04: it does not count toward the parity+h2 joint cap).
 /// Totals preserved exactly: parity increment + network cut == fee_amount.
+///
+/// EE-3fix: the block below mirrors stealth_parity_route_fee's shape exactly,
+/// including the interval_routed upsert. Without it a G2-only-funded asset
+/// credits the pool but leaves the burn-rate DENOMINATOR at zero, so the first
+/// grant reads as 100% burn, arms burn_critical and halts every later subsidy
+/// (BSIP-2 §2's alarm must measure routed fee inflow, not funding method).
+/// Only what actually lands in the pool is registered — the network cut above
+/// vests to COMMITTEE and is not routed inflow, so it is not registered here.
 void g2_route_market_fee_to_parity( database& db, asset_id_type recv_asset,
                                     share_type fee_amount )
 {
@@ -2033,6 +2041,11 @@ void g2_route_market_fee_to_parity( database& db, asset_id_type recv_asset,
          o.parity_pool[ recv_asset ] = issuer_fee;
       else
          itr->second += issuer_fee;
+      auto ritr = o.interval_routed.find( recv_asset );
+      if( ritr == o.interval_routed.end() )
+         o.interval_routed[ recv_asset ] = issuer_fee;
+      else
+         ritr->second += issuer_fee;
    } );
 }
 

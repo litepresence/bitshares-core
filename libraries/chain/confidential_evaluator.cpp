@@ -151,8 +151,10 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       // G1c parity float rule: withdrawals carry no blind outputs (n = 0).
-      // Rule R: op41 is an EXIT (ΔD_a = -1) and has no outputs member, so
-      // the classifier returns 0 and the literal `0` is preserved verbatim.
+      // Rule R (EE-1b): op41 is an EXPLICIT spend — it does consume its
+      // metadata-bearing inputs (-spent_counted below) — but it carries no
+      // outputs member at all, so n_out is 0 and the classifier returns 0 on
+      // every shape, preserving the literal `0` verbatim.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                                  o.fee.asset_id, 0,
                                  calculate_fee_for_operation( operation( o ) ),
@@ -238,9 +240,9 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
-      // G1c parity float rule (same skip guard). Rule R: blind_transfer is
-      // circulation (net 0 at 1-1-1) so the per-output component is not
-      // subsidized; only net-positive splits keep their full component.
+      // G1c parity float rule (same skip guard). Rule R (EE-1b): a ring
+      // spend consumes nothing from the live set, so ΔD_a is +n_out at any
+      // ring size and the full per-output component is available here.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                                  o.fee.asset_id, (uint32_t)o.outputs.size(),
                                  calculate_fee_for_operation( operation( o ) ),

@@ -218,11 +218,22 @@ void stealth_maybe_record_activation( database& db );
 /**
  * Rule R (spec docs/superpowers/specs/2026-10-10-stealth-entropy-economics.md
  * §4): the output count the PARITY SUBSIDY gap may be computed on, as a pure
- * function of the op's effect on the live anonymity set D_a (spec §1 table).
- * Deposits (+n) keep their full per-output component; net-positive ring ops
- * (+(m-1)) keep theirs; circulation ops (net 0) fall back to the base fee
- * (n = 1); exits (op41, op108's exit leg) get no blind outputs to count; and
- * an unknown op fails closed at 0.
+ * function of the op's effect on the live anonymity set D_a.
+ *
+ * THE MODEL IS THE CHAIN'S OWN LIVE-SET COUNTER, not the pre-Task-3 reading of
+ * spec §1 in which every op consumes its inputs (EE-1b, review F-1):
+ *   - RING spends consume NOTHING — the whole-ring spent write and its coupled
+ *     `stealth_pool_count_add(...,-1)` were both retired
+ *     (stealth_evaluator.cpp:769-771), so ΔD_a = +n_out for op40/op104/op106/
+ *     op109 at any ring size. A consolidation-shaped m-in/m-out ring op grows
+ *     the measured live set by m and keeps the full per-output component.
+ *   - EXPLICIT spends DO consume (-spent_counted at
+ *     confidential_evaluator.cpp:185 and stealth_evaluator.cpp:1924), so
+ *     op41/op108 net n_out - n_in: net-positive keeps the full component,
+ *     net <= 0 falls back to the base fee (n = 1), and op41 — which carries no
+ *     outputs member at all — and op108's exit leg get 0.
+ *   - op39 deposits keep the full component (+n, the only net source of value
+ *     into the blind set); an unknown op fails closed at 0.
  *
  * SCOPE — this NEVER governs the fee floor. The floor is
  * `stealth_cost_anchor_core(db, n_blind_outputs)`, which no user's fee is

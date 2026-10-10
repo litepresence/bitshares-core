@@ -11294,16 +11294,27 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_output )
 // The classifier returns the output count the SUBSIDY gap may be computed on.
 // It never touches the fee floor (stealth_cost_anchor_core) and callers pass
 // subsidy_n = min(n_blind_outputs, classifier(op)) so the cap can only shrink
-// the gap. Per spec §1 the live-set effect (ΔD_a) selects the bucket:
+// the gap. EE-1b (review F-1): the model is the chain's OWN live-set counter —
+// what the evaluators actually pass to stealth_pool_count_add — NOT the
+// pre-Task-3 "every op consumes its inputs" reading of spec §1:
 //
-//   op39 deposit            +n   -> growth, full subsidy
-//   op104 m-in/m-out   n_out-n_in -> growth only when net > 0
-//   op106 turnstile          0   -> one new output, capped at 1
-//   op109 swap               0   -> rotates A->B, 1-in/1-out -> capped at 1
-//   op40  blind->blind       0   -> circulation, base fee only (n = 1)
-//   op41  blind->clear    -1    -> exit, no blind outputs at all -> 0
-//   op108 blind->blind       0   -> capped at 1; exit leg (no outputs) -> 0
-//   unknown op               -   -> 0, fail closed
+//   RING spends consume NOTHING: the coupled `pool_count_add(...,-1)` was
+//   retired together with the whole-ring spent write
+//   (stealth_evaluator.cpp:769-771), so ring members stay decoy-eligible and
+//   only the new outputs join the count (:791). ΔD_a = +n_out.
+//   EXPLICIT spends really do consume: `-spent_counted` at
+//   confidential_evaluator.cpp:185 (op41) and stealth_evaluator.cpp:1924
+//   (op108). ΔD_a = n_out - n_in.
+//
+//   op39 deposit         +n     -> n
+//   op40  blind_transfer +n     -> n      (m-in/m-out GROWS D_a by m)
+//   op104 stealth        +n     -> n      (m-in/m-out GROWS D_a by m)
+//   op106 turnstile       0     -> 1      (-1/+1 nets zero; one new output)
+//   op109 swap            0     -> 1      (rotates A->B; one counter output)
+//   op41  blind->clear   -n     -> 0      (carries no outputs member at all)
+//   op108 blind->blind   net   -> n when net > 0, else min(n_out, 1)
+//   op108 exit leg       -n     -> 0
+//   unknown op            -     -> 0, fail closed
 BOOST_AUTO_TEST_CASE( subsidy_rule_table )
 { try {
    // --- op39 transfer_to_blind (deposit): the only net source, unsubsidized
@@ -11317,17 +11328,18 @@ BOOST_AUTO_TEST_CASE( subsidy_rule_table )
       BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o8 ) ), 8u );
    }
    // --- op41 transfer_from_blind (exit): the op carries NO blind outputs
-   // member at all, so the classifier must return 0 and the existing literal
-   // `0` passed at confidential_evaluator.cpp:149 is preserved verbatim.
+   // member at all, so n_out is 0 and the classifier returns 0 on every shape,
+   // preserving the existing literal `0` passed at
+   // confidential_evaluator.cpp:156-159 (require) and :186-190 (consume).
    {
       transfer_from_blind_operation o;
       o.inputs.resize( 1 );
       BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 0u );
    }
-   // --- op40 blind_transfer (circulation): net = n_out - n_in. 1-1-1 is
-   // circulation -> base fee only (n = 1, same value the call site passes
-   // today via o.outputs.size()). 1-in-8-out is net-positive growth -> 8.
-   // 8-in-8-out is consolidation -> capped at 1.
+   // --- op40 blind_transfer: a ring spend CONSUMES NOTHING
+   // (stealth_evaluator.cpp:769-771), so ΔD_a = +n_out and the classifier
+   // ignores inputs entirely. 1-1-1 -> 1; 1-in-8-out -> 8; 8-in-8-out is NOT
+   // consolidation under the chain's own counter (it grows D_a by 8) -> 8.
    {
       blind_transfer_operation o;
       o.inputs.resize( 1 );
@@ -11340,9 +11352,10 @@ BOOST_AUTO_TEST_CASE( subsidy_rule_table )
       blind_transfer_operation consol;
       consol.inputs.resize( 8 );
       consol.outputs.resize( 8 );
-      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( consol ) ), 1u );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( consol ) ), 8u );
    }
-   // --- op104 stealth_transfer: net = n_out - n_in (spec §1).
+   // --- op104 stealth_transfer: same live-set model as op40 (the ring spend
+   // at stealth_evaluator.cpp:791 adds outputs.size() and nothing else).
    {
       stealth_transfer_operation o;
       o.inputs.resize( 1 );
@@ -11351,20 +11364,33 @@ BOOST_AUTO_TEST_CASE( subsidy_rule_table )
       stealth_transfer_operation consol;
       consol.inputs.resize( 8 );
       consol.outputs.resize( 8 );
-      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( consol ) ), 1u );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( consol ) ), 8u );
    }
-   // --- op106 turnstile_reproof: exactly one migrated output, capped at 1.
+   // --- op106 turnstile_reproof: exactly one migrated output (n_out = 1);
+   // its counter nets zero (-1/+1 at :1069-1071), so 1 is correct under the
+   // ring model and the explicit model alike.
    {
       turnstile_reproof_operation o;
       BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 1u );
    }
-   // --- op108 stealth_explicit_spend: outputs non-empty => blind->blind leg
-   // (circulation -> 1); outputs empty => exit leg (no subsidy -> 0).
+   // --- op108 stealth_explicit_spend: an explicit spend DOES consume
+   // (-spent_counted at :1924), so it uses the net rule. net > 0 is real live-
+   // set growth and keeps the full component; net <= 0 is circulation and
+   // falls back to the base fee (the intentional conservatism of review F-2);
+   // the exit leg has no outputs at all -> 0.
    {
-      stealth_explicit_spend_operation o;
-      o.inputs.resize( 1 );
-      o.outputs.resize( 4 );
-      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 1u );
+      stealth_explicit_spend_operation grow;
+      grow.inputs.resize( 1 );
+      grow.outputs.resize( 4 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( grow ) ), 4u );
+      stealth_explicit_spend_operation shrink;
+      shrink.inputs.resize( 6 );
+      shrink.outputs.resize( 4 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( shrink ) ), 1u );
+      stealth_explicit_spend_operation flat;
+      flat.inputs.resize( 4 );
+      flat.outputs.resize( 4 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( flat ) ), 1u );
       stealth_explicit_spend_operation exit_leg;
       exit_leg.inputs.resize( 1 );
       exit_leg.outputs.resize( 0 );

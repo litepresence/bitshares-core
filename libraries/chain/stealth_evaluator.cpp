@@ -534,8 +534,9 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    // G1c parity float rule (BSIP-2 §2): pool-empty / cap-hit /
    // review-missed floats the required fee to the cost anchor. Skipped
    // exactly when the fee-schedule check is skipped (no fee paid, no subsidy
-   // consumed — same context as genesis/test/generator paths). Rule R: net
-   // growth (n_out > n_in) keeps the full component, consolidation is capped.
+   // consumed — same context as genesis/test/generator paths). Rule R (EE-1b):
+   // a ring spend consumes nothing from the live set (:769-771), so ΔD_a is
+   // +n_out and the full per-output component is always available here.
    stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                              o.fee.asset_id, (uint32_t)o.outputs.size(),
                              calculate_fee_for_operation( operation( o ) ),
@@ -884,7 +885,7 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( o.fee.amount >= 0 );
    FC_ASSERT( o.new_proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Turnstile migrates to V2 (the surviving system)" );
-// G1c parity float rule (one new blind output; same skip guard).
+   // G1c parity float rule (one new blind output; same skip guard).
    // Rule R: turnstile is circulation (ΔD_a = 0) -> base fee only (n = 1),
    // which is the literal already passed here.
    stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
@@ -1137,12 +1138,41 @@ namespace {
 /// Rule R classifier body (spec 2026-10-10-stealth-entropy-economics §4).
 /// Lives at namespace scope because fc::static_variant visits need a
 /// result_type and a real (non-local) class. Pure: no db, no state, integer only.
+///
+/// MODEL (EE-1b, review F-1). This classifies by the live-set effect ΔD_a the
+/// chain's OWN counter actually measures — i.e. what each evaluator passes to
+/// stealth_pool_count_add — NOT the pre-Task-3 reading of spec §1 in which every
+/// op consumes its inputs. The two differ, and the difference is the whole
+/// point:
+///
+///   RING spends consume NOTHING. The Task-3 nullifier migration retired the
+///   whole-ring spent write together with its coupled counter decrement
+///   (stealth_evaluator.cpp:769-771: "// DELETED: the coupled
+///   stealth_pool_count_add( db(), o.asset_id, -1 )."). Ring members therefore
+///   stay decoy-eligible by design and ΔD_a = +n_out, whatever the ring size.
+///   op104 :791 is the coded witness — `pool_count_add(... outputs.size())` and
+///   nothing else. A consolidation-shaped 8-in/8-out ring op therefore GROWS
+///   the measured live set by 8, so it must not be capped at 1.
+///
+///   EXPLICIT spends really do consume: `-spent_counted` at
+///   confidential_evaluator.cpp:185 (op41) and stealth_evaluator.cpp:1924
+///   (op108), so ΔD_a = n_out - n_in there.
+///
+/// Reading the counter — not the pre-Task-3 intent — is what keeps the money
+/// following the product. It RAISES the cap for consolidation-shaped ring ops
+/// relative to the pre-EE-1b classifier, which under-rewarded exactly the ops
+/// that grow D_a: the opposite of Rule R's purpose. It is safe because it
+/// never moves the FLOOR: both floor legs (stealth_require_blind_fee and
+/// stealth_consume_parity_subsidy) keep receiving the op's REAL
+/// n_blind_outputs, and stealth_cost_anchor_core is untouched.
 struct subsidy_rule_visitor
 {
    typedef uint32_t result_type;
 
-   /// Shared shape for the vector-in/vector-out blind ops: growth keeps the
-   /// full per-output component, circulation falls back to the base fee.
+   /// Shared shape for the ops that really do consume their inputs: net growth
+   /// keeps the full per-output component, circulation falls back to the base
+   /// fee. Ring spends pass n_in = 0 because they consume nothing, which makes
+   /// this one helper express both models (ring ops reduce to plain n_out).
    static uint32_t net_rule( uint32_t n_out, uint32_t n_in )
    {
       if( n_out > n_in )
@@ -1157,44 +1187,52 @@ struct subsidy_rule_visitor
       return (uint32_t)o.outputs.size();
    }
 
-   /// op41 transfer_from_blind (exit): ΔD_a = -1. The op carries NO blind
-   /// outputs member at all, so there is no per-output component to subsidize;
-   /// returns 0, preserving the literal `0` the call site has always passed
-   /// (confidential_evaluator.cpp:149).
-   uint32_t operator()( const protocol::transfer_from_blind_operation& ) const
+   /// op41 transfer_from_blind (exit): an EXPLICIT spend, so net_rule with the
+   /// op's real inputs; but the op carries NO blind outputs member at all, so
+   /// n_out is 0 and the circulation branch collapses to 0 — preserving the
+   /// literal `0` the call site has always passed
+   /// (confidential_evaluator.cpp:159/:190).
+   uint32_t operator()( const protocol::transfer_from_blind_operation& o ) const
    {
-      return 0;
+      return net_rule( 0u, (uint32_t)o.inputs.size() );
    }
 
-   /// op40 blind_transfer: ΔD_a = n_out - n_in (circulation at 1-1-1).
+   /// op40 blind_transfer: a RING spend — consumes nothing (:769-771), so
+   /// ΔD_a = +n_out and inputs are deliberately NOT consulted.
    uint32_t operator()( const protocol::blind_transfer_operation& o ) const
    {
-      return net_rule( (uint32_t)o.outputs.size(), (uint32_t)o.inputs.size() );
+      return net_rule( (uint32_t)o.outputs.size(), 0u );
    }
 
-   /// op104 stealth_transfer: ΔD_a = n_out - n_in (spec §1, +(m-1)).
+   /// op104 stealth_transfer: same RING model, same counter site (:791).
    uint32_t operator()( const protocol::stealth_transfer_operation& o ) const
    {
-      return net_rule( (uint32_t)o.outputs.size(), (uint32_t)o.inputs.size() );
+      return net_rule( (uint32_t)o.outputs.size(), 0u );
    }
 
-   /// op106 turnstile_reproof: exactly one migrated output, ΔD_a = 0.
+   /// op106 turnstile_reproof: exactly one migrated output (singular member),
+   /// and its counter nets zero (-1/+1 at :1069-1071). n_out = 1 is the same
+   /// answer under either model.
    uint32_t operator()( const protocol::turnstile_reproof_operation& ) const
    {
       return 1;
    }
 
-   /// op108 stealth_explicit_spend: outputs non-empty => blind->blind leg
-   /// (circulation, capped at 1); outputs empty => exit leg (no subsidy).
+   /// op108 stealth_explicit_spend: an EXPLICIT spend — it DOES consume its
+   /// metadata-bearing inputs (-spent_counted, :1924), so this is the one
+   /// non-ring op that uses net_rule with real inputs. net > 0 is real live-set
+   /// growth and keeps the full component; net <= 0 is circulation and falls
+   /// back to the base fee (the intentional conservatism of review F-2 — do
+   /// not widen it to full subsidy); the exit leg has no outputs at all -> 0.
    uint32_t operator()( const protocol::stealth_explicit_spend_operation& o ) const
    {
-      const uint32_t n_out = (uint32_t)o.outputs.size();
-      return n_out < 1u ? 0u : 1u;
+      return net_rule( (uint32_t)o.outputs.size(), (uint32_t)o.inputs.size() );
    }
 
-   /// op109 stealth_pool_exchange: 1-in/1-out BY SOUNDNESS (singular
-   /// input/output members, not vectors), ΔD_a = 0 (rotates D_A to D_B).
-   /// Circulation rule => base fee only.
+   /// op109 stealth_pool_exchange: a RING spend (the input is ring membership,
+   /// so nothing is removed — :2317-2319 adds only the counter-asset output),
+   /// 1-in/1-out BY SOUNDNESS (singular input/output members, not vectors), so
+   /// n_out = 1 and the circulation result is 1 either way.
    uint32_t operator()( const protocol::stealth_pool_exchange_operation& ) const
    {
       return 1;
@@ -1211,9 +1249,13 @@ uint32_t stealth_subsidy_output_count( const protocol::operation& op )
 {
    // Rule R selects the output count the SUBSIDY gap may be computed on by
    // the op's effect on the live anonymity set D_a (spec §1 table) — NOT by
-   // its being a blind op (finding F-01). The caller still passes
-   // min(n_blind_outputs, result); this never raises a call site's own n and
-   // never touches stealth_cost_anchor_core, so no user's fee floor moves.
+   // its being a blind op (finding F-01). Since EE-1b that effect is read off
+   // the chain's own live-set counter (see subsidy_rule_visitor's MODEL note:
+   // ring spends consume nothing at :769-771, explicit spends do at :1924),
+   // not off the pre-Task-3 "every op consumes its inputs" assumption. The
+   // caller still passes min(n_blind_outputs, result); this never raises a
+   // call site's own n and never touches stealth_cost_anchor_core, so no
+   // user's fee floor moves.
    subsidy_rule_visitor v;
    return op.visit( v );
 }
@@ -1729,8 +1771,10 @@ void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explici
    // (ring :488, turnstile :879, op41 :145, op40 :225, op39 :63). Without it
    // op108 bypasses the fee-parity floor while still calling
     // stealth_consume_parity_subsidy in do_apply — a half-wired parity rule.
-    // Rule R: op108's blind->blind leg is circulation (capped at 1) and its
-    // exit leg has no outputs at all (no subsidy) — min() collapses both.
+   // Rule R (EE-1b): op108 is an EXPLICIT spend, so it DOES consume its
+   // metadata-bearing inputs — net > 0 (a real split) keeps the full
+   // per-output component, net <= 0 falls back to the base fee, and the exit
+   // leg has no outputs at all (no subsidy).
     stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                               o.fee.asset_id, (uint32_t)o.outputs.size(),
                               calculate_fee_for_operation( operation( o ) ),
@@ -2247,7 +2291,7 @@ void_result stealth_pool_exchange_evaluator::do_apply( const stealth_pool_exchan
    // accumulated_fees); committee network_percent cut vests to COMMITTEE iff
    // nonzero; registrar/referrer rewards forfeited (no identifiable taker).
    g2_route_market_fee_to_parity( db(), o.amount_to_sell.asset_id, _amounts.maker_market_fee.amount );
-    g2_route_market_fee_to_parity( db(), o.min_to_receive.asset_id, _amounts.taker_market_fee.amount );
+   g2_route_market_fee_to_parity( db(), o.min_to_receive.asset_id, _amounts.taker_market_fee.amount );
 
     // G1c: parity subsidy settlement (Rule R, F-02). Sits beside the market-fee
     // routing because that is where the pool's funds come from — op109 now

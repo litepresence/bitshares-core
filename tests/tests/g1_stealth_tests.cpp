@@ -842,6 +842,10 @@ static void g1c_seed_pool( database& db, account_id_type payer,
 // a pre-fork balance looks like: created_block == 0 (never counted — back
 // out the +1 the post-fork create added). Supply/shadow untouched, so
 // verify_asset_supplies and the shadow reconciliation cannot see it.
+// CALL ONLY ON SEALED DEPOSITS: _generate_block throws away the pending
+// session and re-applies pending txs (db_block.cpp), wiping direct modifies
+// to not-yet-sealed objects (both the created_block zeroing AND the counter
+// back-out). Pattern: PUSH_TX, generate_block, THEN T_grandfather.
 static void T_grandfather( database& db, asset_id_type asset,
                            const fc::ecc::commitment_type& c )
 {
@@ -1371,10 +1375,11 @@ BOOST_AUTO_TEST_CASE( negative_mint_rejected )
       trx.operations = { fund };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear();
+      generate_block(); // seal first: _generate_block re-applies pending txs,
+      // wiping direct modifies — T_grandfather must run on sealed state.
       // Task 3: the forgery below must reach the sound-range-proof gate, not
       // the legacy-leg created_block gate — grandfather the funded input.
       T_grandfather( db, core.get_id(), fo.commitment );
-      generate_block();
    }
 
    // The forgery: spend C_in (1000), create C1 (600) + C2 (400) with
@@ -2210,6 +2215,18 @@ BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_blind_transfer )
    BOOST_CHECK_EQUAL( t5_supply( db, core ), 15 * p.each + 600 + 390 );
 } FC_CAPTURE_AND_RETHROW() }
 
+// Forward declarations (Task 3 re-point): the R15 recovery helpers are
+// defined with the R15 suite below, but the turnstile cross-path case needs
+// them here. Single definitions live below; t5_pool is defined above.
+static void T_set_recovery_v2( turnstile_reproof_operation& t,
+                               const fc::ecc::commitment_type& I1,
+                               const fc::ecc::commitment_type& I2,
+                               const std::vector<char>& proof );
+static void T_r15_prove_true( const t5_pool& p, size_t s, asset_id_type asset,
+                              fc::ecc::commitment_type& I1,
+                              fc::ecc::commitment_type& I2,
+                              std::vector<char>& proof );
+
 // M04/V-04: a stealth-spent commitment re-spent via turnstile_reproof.
 BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_turnstile )
 { try {
@@ -2247,10 +2264,25 @@ BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_turnstile )
    t.fee = core.amount( 10 );
    t.old_blind = p.blinds[s];
    t.new_blind = Bn;
+   // Task 3: the retired flag no longer refuses this (the no-extension hole,
+   // pinned by r15_no_extension_unchanged, closes in Task 4) — submit WITH
+   // the true extension so the production nullifier guard decides, exactly
+   // as a wallet-driven recovery of a really-spent output would.
+   {
+      fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+      T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+      T_set_recovery_v2( t, I1, I2, proof );
+   }
    set_expiration( db, trx );
    trx.operations = { t };
    sign( trx, p.keys[s] );
-   BOOST_CHECK_THROW( PUSH_TX( db, trx ), fc::exception );
+   try {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "turnstile recovery of a nullified output must be refused" );
+   } catch( const fc::exception& e ) {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "nullifier" ) != std::string::npos,
+                           e.to_detail_string() );
+   }
    trx.clear_signatures(); trx.operations.clear();
    BOOST_CHECK_EQUAL( t5_supply( db, core ), live );
    BOOST_CHECK_EQUAL( t5_supply( db, core ), 15 * p.each + 600 + 390 );
@@ -2298,7 +2330,9 @@ BOOST_AUTO_TEST_CASE( cross_version_double_spend_rejected )
       generate_block();
    }
    set_expiration( db, trx );
-   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+   // Live-set counter (Task 3): 16 funded + 2 from the honest spend + 14
+   // cost-path top-ups (the ring removed nothing) = 32 decoy candidates.
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 32u );
    g1c_seed_pool( db, dan_id, core, 5000000 );
    stealth_transfer_operation v2 = t5_build_spend( core, p, 5,
       GRAPHENE_STEALTH_PROOF_V2, "t5-xv-2", 600, 390, 10 );
@@ -2310,7 +2344,9 @@ BOOST_AUTO_TEST_CASE( cross_version_double_spend_rejected )
     }
    catch( const fc::exception& e )
    {
-      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "spent" ) != std::string::npos,
+      // Nullifier gate (not the retired spent-membership gate): the exact
+      // new message pins the refusal reason.
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Key image already spent" ) != std::string::npos,
                            e.to_detail_string() );
    }
    trx.clear();
@@ -2563,13 +2599,13 @@ BOOST_AUTO_TEST_CASE( transfer_from_blind_asset_gate_consensus )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
-      // Task 3: the control leg below must reach the asset gate (and apply),
-      // not the legacy-leg created_block gate — grandfather the balance.
-      T_grandfather( db, core.get_id(), o.commitment );
       c = o.commitment;
       own = o.owner;
    }
-   generate_block();
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note)
+   // Task 3: the control leg below must reach the asset gate (and apply),
+   // not the legacy-leg created_block gate — grandfather the sealed balance.
+   T_grandfather( db, core.get_id(), c );
    // Mismatched assets, validate bypassed: the consensus gate must refuse.
    transfer_from_blind_operation bad;
    bad.to = dan.id;
@@ -4296,10 +4332,6 @@ BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
-      // Task 3: every deposit from this lambda is withdrawn via the legacy
-      // op41 leg below — grandfather each so the fee rule (not the
-      // created_block gate) decides every leg.
-      T_grandfather( db, core.get_id(), o.commitment );
       return { o.commitment, B };
    };
    // transfer_from_blind conservation is exact at validate time (input
@@ -4310,7 +4342,13 @@ BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )
    auto cA = deposit( "a", 500900 );
    auto cB = deposit( "b", 900 );
    auto cC = deposit( "c", 900 );
-   generate_block();
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note)
+   // Task 3: every deposit above is withdrawn via the legacy op41 leg below
+   // — grandfather each sealed balance so the fee rule (not the
+   // created_block gate) decides every leg.
+   T_grandfather( db, core.get_id(), cA.first );
+   T_grandfather( db, core.get_id(), cB.first );
+   T_grandfather( db, core.get_id(), cC.first );
 
    // Withdrawals carry no blind outputs (n = 0): gap is the full anchor
    // (500000) against the zeroed schedule. The pool holds 50000 — short.
@@ -4432,13 +4470,15 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
-      // Task 3: all 52 are withdrawn via the legacy op41 leg below —
-      // grandfather each so the CAP rule (not the created_block gate) decides.
-      T_grandfather( db, core.get_id(), o.commitment );
       cs.push_back( o.commitment );
       bs.push_back( B );
    }
-   generate_block();
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note)
+   // Task 3: all 52 are withdrawn via the legacy op41 leg below —
+   // grandfather each sealed balance so the CAP rule (not the created_block
+   // gate) decides.
+   for( const auto& c : cs )
+      T_grandfather( db, core.get_id(), c );
 
    // 50 subsidized withdrawals in one pending block (fee = parity 499000).
    for( int i = 0; i < 50; ++i )
@@ -4607,14 +4647,15 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
-      // Task 3: all three are withdrawn via the legacy op41 leg below —
-      // grandfather each so the review/funding gates (not the
-      // created_block gate) decide every leg.
-      T_grandfather( db, core.get_id(), o.commitment );
       cs.push_back( o.commitment );
       bs.push_back( B );
    }
-   generate_block();
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note)
+   // Task 3: all three are withdrawn via the legacy op41 leg below —
+   // grandfather each sealed balance so the review/funding gates (not the
+   // created_block gate) decide every leg.
+   for( const auto& c : cs )
+      T_grandfather( db, core.get_id(), c );
    BOOST_CHECK( stealth_parity_available( db, core_id, share_type( 10000 ) ) );
 
    // Jump 7 months: 1 missed 6-month review + 2 missed quarterly reports.
@@ -4817,13 +4858,13 @@ BOOST_AUTO_TEST_CASE( parity_alarms_computed_and_queryable )
       cs.push_back( o.commitment );
       bs.push_back( B );
    }
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note)
    // Task 3: the two withdrawn below (cs[0], cs[1]) go through the legacy
-   // op41 leg — grandfather them so the subsidy gates (not the
-   // created_block gate) decide. cs[2] stays post-fork (counted), so the
+   // op41 leg — grandfather the sealed balances so the subsidy gates (not
+   // the created_block gate) decide. cs[2] stays post-fork (counted), so the
    // effective-set pin keeps measuring a live member.
    T_grandfather( db, core.get_id(), cs[0] );
    T_grandfather( db, core.get_id(), cs[1] );
-   generate_block();
    auto withdraw = [&]( size_t ci ) {
       transfer_from_blind_operation x;
       x.to = dan.id; x.amount = core.amount( 900 ); x.fee = core.amount( 0 );
@@ -5419,10 +5460,6 @@ BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
-      // Task 3: every deposit from this lambda is withdrawn via the legacy
-      // op41 leg below — grandfather each so the halt/cost gates (not the
-      // created_block gate) decide every leg.
-      T_grandfather( db, core.get_id(), o.commitment );
       return { o.commitment, B };
    };
    // Exact-conservation inputs: parity leg spends 900 + 490000, cost leg
@@ -5430,7 +5467,15 @@ BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
    auto cP = deposit( "parity", 490900 );
    auto cC = deposit( "cost", 500900 );
    auto cR = deposit( "resume", 490900 );
-   generate_block(); // seal: the halt flag below is a direct modify
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note).
+   // (The halt flag below is also a direct modify, but on the sealed status
+   // object — no pending tx recreates it, so it persists.)
+   // Task 3: every deposit above is withdrawn via the legacy op41 leg below
+   // — grandfather each sealed balance so the halt/cost gates (not the
+   // created_block gate) decide every leg.
+   T_grandfather( db, core.get_id(), cP.first );
+   T_grandfather( db, core.get_id(), cC.first );
+   T_grandfather( db, core.get_id(), cR.first );
    auto withdraw = [&]( const std::pair<fc::ecc::commitment_type, fc::sha256>& in,
                         int64_t fee, bool expect_ok ) {
       transfer_from_blind_operation x;
@@ -8456,7 +8501,12 @@ BOOST_AUTO_TEST_CASE( g1_decoyed_output_remains_spendable_after_flag_retirement 
    // Ring spend #2 over the SAME ring with a different real input: d is a
    // decoy again. Pre-retirement this refuses at the spent-membership gate
    // (every member was whole-ring flagged); post-retirement it succeeds.
-   stealth_transfer_operation stop2 = t5_build_spend( core, p, d,
+   // NOTE: the real input here is r2, NOT d — d must stay un-nullified so
+   // the op108 leg below proves owner-spendability (spending d as real here
+   // would nullify it, and the op108 refusal would be a correct double-spend
+   // guard, not the retirement property).
+   const size_t r2 = 9;
+   stealth_transfer_operation stop2 = t5_build_spend( core, p, r2,
       GRAPHENE_STEALTH_PROOF_V2, "t3-decoy-sp2", 600, 390, 10 );
    trx.operations = { stop2 };
    set_expiration( db, trx );
@@ -8508,8 +8558,9 @@ BOOST_AUTO_TEST_CASE( g1_grandfathered_balance_still_spends_via_legacy_legs )
    g1c_seed_pool( db, dan.get_id(), core, 5000000 );
    auto k = fc::ecc::private_key::generate();
    authority own( 1, public_key_type( k.get_public_key() ), 1 );
-   // Two post-fork deposits, then grandfathered: created_block == 0,
-   // never counted — exactly what a pre-fork balance looks like.
+   // Two post-fork deposits, sealed, then grandfathered below:
+   // created_block == 0, never counted — exactly what a pre-fork balance
+   // looks like.
    std::vector<fc::ecc::commitment_type> cs;
    std::vector<fc::sha256> bs;
    for( int i = 0; i < 2; ++i )
@@ -8530,11 +8581,14 @@ BOOST_AUTO_TEST_CASE( g1_grandfathered_balance_still_spends_via_legacy_legs )
       trx.operations = { ttb };
       sign( trx, dan_private_key );
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
-      T_grandfather( db, core.get_id(), bo.commitment );
       cs.push_back( bo.commitment );
       bs.push_back( B );
    }
-   generate_block();
+   generate_block(); // seal BEFORE grandfathering (see T_grandfather note)
+   // Grandfather the sealed deposits: created_block == 0, never counted —
+   // exactly what a pre-fork balance looks like.
+   for( const auto& c : cs )
+      T_grandfather( db, core.get_id(), c );
    // (a) op40 blind_transfer on a grandfathered balance (1000 -> 990 under
    // the same blind + fee 10, real V1 range proof).
    {

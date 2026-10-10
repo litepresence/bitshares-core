@@ -35,6 +35,62 @@
 
 namespace graphene { namespace chain {
 
+pool_exchange_amounts calculate_pool_exchange_amounts( const database& d,
+      const liquidity_pool_object& pool,
+      const asset& amount_to_sell, const asset& min_to_receive )
+{ try {
+   pool_exchange_amounts r;
+
+   const asset_object& asset_obj_a = pool.asset_a(d);
+   const asset_object& asset_obj_b = pool.asset_b(d);
+
+   const asset_object* pool_receives_asset =
+      ( amount_to_sell.asset_id == pool.asset_a ? &asset_obj_a : &asset_obj_b );
+
+   r.maker_market_fee = d.calculate_market_fee( *pool_receives_asset, amount_to_sell, true );
+   FC_ASSERT( r.maker_market_fee < amount_to_sell,
+              "Aborting since the maker market fee of the selling asset is too high" );
+   r.pool_receives = amount_to_sell - r.maker_market_fee;
+
+   fc::uint128_t delta;
+   const asset_object* pool_pays_asset = nullptr;
+   if( amount_to_sell.asset_id == pool.asset_a )
+   {
+      share_type new_balance_a = pool.balance_a + r.pool_receives.amount;
+      // round up
+      fc::uint128_t new_balance_b = ( pool.virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
+      FC_ASSERT( new_balance_b <= pool.balance_b, "Internal error" );
+      delta = fc::uint128_t( pool.balance_b.value ) - new_balance_b;
+      pool_pays_asset = &asset_obj_b;
+   }
+   else
+   {
+      share_type new_balance_b = pool.balance_b + r.pool_receives.amount;
+      // round up
+      fc::uint128_t new_balance_a = ( pool.virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
+      FC_ASSERT( new_balance_a <= pool.balance_a, "Internal error" );
+      delta = fc::uint128_t( pool.balance_a.value ) - new_balance_a;
+      pool_pays_asset = &asset_obj_a;
+   }
+
+   fc::uint128_t pool_taker_fee = delta * pool.taker_fee_percent / GRAPHENE_100_PERCENT;
+   FC_ASSERT( pool_taker_fee <= delta, "Taker fee percent of the pool is too high" );
+
+   r.pool_pays = asset( static_cast<int64_t>( delta - pool_taker_fee ), min_to_receive.asset_id );
+
+   r.taker_market_fee = d.calculate_market_fee( *pool_pays_asset, r.pool_pays, false );
+   FC_ASSERT( r.taker_market_fee <= r.pool_pays, "Market fee should not be greater than the amount to receive" );
+   r.account_receives = r.pool_pays - r.taker_market_fee;
+
+   GRAPHENE_ASSERT( r.account_receives.amount >= min_to_receive.amount,
+                    liquidity_pool_exchange_unfillable_price,
+                    "Unable to exchange at expected price" );
+
+   r.pool_taker_fee = asset( static_cast<int64_t>( pool_taker_fee ), min_to_receive.asset_id );
+
+   return r;
+} FC_CAPTURE_AND_RETHROW( (amount_to_sell)(min_to_receive) ) }
+
 void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_create_operation& op)
 { try {
    const database& d = db();
@@ -393,49 +449,22 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
       }
    }
 
-   _pool_receives_asset = ( op.amount_to_sell.asset_id == _pool->asset_a ? &asset_obj_a : &asset_obj_b );
+    _pool_receives_asset = ( op.amount_to_sell.asset_id == _pool->asset_a ? &asset_obj_a : &asset_obj_b );
+    _pool_pays_asset = ( op.amount_to_sell.asset_id == _pool->asset_a ? &asset_obj_b : &asset_obj_a );
 
-   _maker_market_fee = d.calculate_market_fee( *_pool_receives_asset, op.amount_to_sell, true );
-   FC_ASSERT( _maker_market_fee < op.amount_to_sell,
-              "Aborting since the maker market fee of the selling asset is too high" );
-   _pool_receives = op.amount_to_sell - _maker_market_fee;
+    // Shared G2 pool math (byte-equivalent to the block below it replaced):
+    // the same calls, asserts, rounding, and unfillable-price throw, now
+    // single-sourced with the blind pool swap.
+    const pool_exchange_amounts amounts =
+         calculate_pool_exchange_amounts( d, *_pool, op.amount_to_sell, op.min_to_receive );
+    _maker_market_fee = amounts.maker_market_fee;
+    _pool_receives = amounts.pool_receives;
+    _pool_pays = amounts.pool_pays;
+    _taker_market_fee = amounts.taker_market_fee;
+    _account_receives = amounts.account_receives;
+    _pool_taker_fee = amounts.pool_taker_fee;
 
-   fc::uint128_t delta;
-   if( op.amount_to_sell.asset_id == _pool->asset_a )
-   {
-      share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
-      FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
-      _pool_pays_asset = &asset_obj_b;
-   }
-   else
-   {
-      share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
-      FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
-      _pool_pays_asset = &asset_obj_a;
-   }
-
-   fc::uint128_t pool_taker_fee = delta * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-   FC_ASSERT( pool_taker_fee <= delta, "Taker fee percent of the pool is too high" );
-
-   _pool_pays = asset( static_cast<int64_t>( delta - pool_taker_fee ), op.min_to_receive.asset_id );
-
-   _taker_market_fee = d.calculate_market_fee( *_pool_pays_asset, _pool_pays, false );
-   FC_ASSERT( _taker_market_fee <= _pool_pays, "Market fee should not be greater than the amount to receive" );
-   _account_receives = _pool_pays - _taker_market_fee;
-
-   GRAPHENE_ASSERT( _account_receives.amount >= op.min_to_receive.amount,
-                    liquidity_pool_exchange_unfillable_price,
-                    "Unable to exchange at expected price" );
-
-   _pool_taker_fee = asset( static_cast<int64_t>( pool_taker_fee ), op.min_to_receive.asset_id );
-
-   return void_result();
+    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
 generic_exchange_operation_result liquidity_pool_exchange_evaluator::do_apply(

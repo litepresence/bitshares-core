@@ -23,6 +23,7 @@
 #include <fc/crypto/elliptic.hpp>
 #include <fc/uint128.hpp>
 
+#include <algorithm>
 #include <map>
 
 namespace graphene { namespace chain {
@@ -533,10 +534,13 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    // G1c parity float rule (BSIP-2 §2): pool-empty / cap-hit /
    // review-missed floats the required fee to the cost anchor. Skipped
    // exactly when the fee-schedule check is skipped (no fee paid, no subsidy
-   // consumed — same context as genesis/test/generator paths).
+   // consumed — same context as genesis/test/generator paths). Rule R: net
+   // growth (n_out > n_in) keeps the full component, consolidation is capped.
    stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
-                              o.fee.asset_id, (uint32_t)o.outputs.size(),
-                              calculate_fee_for_operation( operation( o ) ) );
+                             o.fee.asset_id, (uint32_t)o.outputs.size(),
+                             calculate_fee_for_operation( operation( o ) ),
+                             std::min( (uint32_t)o.outputs.size(),
+                                stealth_subsidy_output_count( operation( o ) ) ) );
    FC_ASSERT( !o.inputs.empty() && o.inputs.size() <= 8, "Input count out of bounds" );
    FC_ASSERT( !o.outputs.empty() && o.outputs.size() <= 8, "Output count out of bounds" );
 
@@ -789,7 +793,9 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
    // and count the new outputs in the skew histogram window.
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                   std::min( (uint32_t)o.outputs.size(),
+                                      stealth_subsidy_output_count( operation( o ) ) ) );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    stealth_count_blind_work( db(), stealth_work_for_stealth_transfer( o ) );
@@ -878,10 +884,13 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( o.fee.amount >= 0 );
    FC_ASSERT( o.new_proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Turnstile migrates to V2 (the surviving system)" );
-   // G1c parity float rule (one new blind output; same skip guard).
+// G1c parity float rule (one new blind output; same skip guard).
+   // Rule R: turnstile is circulation (ΔD_a = 0) -> base fee only (n = 1),
+   // which is the literal already passed here.
    stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
-                              o.fee.asset_id, 1,
-                              calculate_fee_for_operation( operation( o ) ) );
+                             o.fee.asset_id, 1,
+                             calculate_fee_for_operation( operation( o ) ),
+                             std::min( 1u, stealth_subsidy_output_count( operation( o ) ) ) );
    FC_ASSERT( !o.new_output.range_proof.empty(), "Migrated output must carry a range proof" );
    for( const auto& a : o.owner.account_auths )
       a.first( d );
@@ -1063,7 +1072,8 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    // G1c: parity subsidy settlement + skew histogram (one new output).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, 1,
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                   std::min( 1u, stealth_subsidy_output_count( operation( o ) ) ) );
     stealth_window_count_add( db(), 1 );
     stealth_count_blind_op( db() );
     // Task 4: mirror the do_evaluate work gate exactly — one shared
@@ -1122,6 +1132,92 @@ bool live_review_current( const database& db, const stealth_status_object& s )
 
 } // anonymous namespace
 
+namespace {
+
+/// Rule R classifier body (spec 2026-10-10-stealth-entropy-economics §4).
+/// Lives at namespace scope because fc::static_variant visits need a
+/// result_type and a real (non-local) class. Pure: no db, no state, integer only.
+struct subsidy_rule_visitor
+{
+   typedef uint32_t result_type;
+
+   /// Shared shape for the vector-in/vector-out blind ops: growth keeps the
+   /// full per-output component, circulation falls back to the base fee.
+   static uint32_t net_rule( uint32_t n_out, uint32_t n_in )
+   {
+      if( n_out > n_in )
+         return n_out;                 // net growth: full component
+      return n_out < 1u ? 0u : 1u;     // circulation: base fee only
+   }
+
+   /// op39 transfer_to_blind (deposit): ΔD_a = +n, the only net source of
+   /// value into the blind set — full per-output component preserved.
+   uint32_t operator()( const protocol::transfer_to_blind_operation& o ) const
+   {
+      return (uint32_t)o.outputs.size();
+   }
+
+   /// op41 transfer_from_blind (exit): ΔD_a = -1. The op carries NO blind
+   /// outputs member at all, so there is no per-output component to subsidize;
+   /// returns 0, preserving the literal `0` the call site has always passed
+   /// (confidential_evaluator.cpp:149).
+   uint32_t operator()( const protocol::transfer_from_blind_operation& ) const
+   {
+      return 0;
+   }
+
+   /// op40 blind_transfer: ΔD_a = n_out - n_in (circulation at 1-1-1).
+   uint32_t operator()( const protocol::blind_transfer_operation& o ) const
+   {
+      return net_rule( (uint32_t)o.outputs.size(), (uint32_t)o.inputs.size() );
+   }
+
+   /// op104 stealth_transfer: ΔD_a = n_out - n_in (spec §1, +(m-1)).
+   uint32_t operator()( const protocol::stealth_transfer_operation& o ) const
+   {
+      return net_rule( (uint32_t)o.outputs.size(), (uint32_t)o.inputs.size() );
+   }
+
+   /// op106 turnstile_reproof: exactly one migrated output, ΔD_a = 0.
+   uint32_t operator()( const protocol::turnstile_reproof_operation& ) const
+   {
+      return 1;
+   }
+
+   /// op108 stealth_explicit_spend: outputs non-empty => blind->blind leg
+   /// (circulation, capped at 1); outputs empty => exit leg (no subsidy).
+   uint32_t operator()( const protocol::stealth_explicit_spend_operation& o ) const
+   {
+      const uint32_t n_out = (uint32_t)o.outputs.size();
+      return n_out < 1u ? 0u : 1u;
+   }
+
+   /// op109 stealth_pool_exchange: 1-in/1-out BY SOUNDNESS (singular
+   /// input/output members, not vectors), ΔD_a = 0 (rotates D_A to D_B).
+   /// Circulation rule => base fee only.
+   uint32_t operator()( const protocol::stealth_pool_exchange_operation& ) const
+   {
+      return 1;
+   }
+
+   /// Every other op fails CLOSED: no subsidy, never a grant.
+   template<typename Op>
+   uint32_t operator()( const Op& ) const { return 0; }
+};
+
+} // anonymous namespace
+
+uint32_t stealth_subsidy_output_count( const protocol::operation& op )
+{
+   // Rule R selects the output count the SUBSIDY gap may be computed on by
+   // the op's effect on the live anonymity set D_a (spec §1 table) — NOT by
+   // its being a blind op (finding F-01). The caller still passes
+   // min(n_blind_outputs, result); this never raises a call site's own n and
+   // never touches stealth_cost_anchor_core, so no user's fee floor moves.
+   subsidy_rule_visitor v;
+   return op.visit( v );
+}
+
 share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs )
 {
    // G3-01: the current-schedule leg is derived through
@@ -1161,9 +1257,13 @@ share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_output
 }
 
 share_type stealth_parity_gap_core( const database& db, uint32_t n_blind_outputs,
-                                    share_type parity_core )
+                                    share_type parity_core, uint32_t subsidy_n )
 {
-   share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
+   // Rule R: the DISCOUNT is capped at subsidy_n outputs; the FLOOR (below,
+   // and in require/consume) keeps the op's real n_blind_outputs. min() makes
+   // the cap monotonic — subsidy_n above n is a no-op, never a raise.
+   const uint32_t n = ( subsidy_n < n_blind_outputs ) ? subsidy_n : n_blind_outputs;
+   share_type cost = stealth_cost_anchor_core( db, n );
    if( cost <= parity_core )
       return share_type( 0 );
    return cost - parity_core;
@@ -1253,15 +1353,18 @@ bool stealth_parity_available( const database& db, asset_id_type fee_asset,
 
 void stealth_require_blind_fee( const database& db, share_type core_fee_paid,
                                 bool fees_enforced, asset_id_type fee_asset,
-                                uint32_t n_blind_outputs, share_type parity_core )
+                                uint32_t n_blind_outputs, share_type parity_core,
+                                uint32_t subsidy_n )
 {
    if( !stealth_passed( db ) || !fees_enforced )
       return;
-   share_type gap = stealth_parity_gap_core( db, n_blind_outputs, parity_core );
+   share_type gap = stealth_parity_gap_core( db, n_blind_outputs, parity_core,
+                                             subsidy_n );
    if( stealth_parity_available( db, fee_asset, gap ) )
       return; // subsidized: the central schedule check enforces parity level
    // Pool-empty / cap-hit / review-missed: blind fees float to cost.
    // Deterministic rule from the public schedule — no committee action here.
+   // NOTE the REAL n_blind_outputs: Rule R caps the discount, never the floor.
    share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
    FC_ASSERT( core_fee_paid >= cost,
               "Blind fee below cost level (parity pool cannot subsidize: "
@@ -1272,13 +1375,19 @@ void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
                                      asset_id_type fee_asset,
                                      uint32_t n_blind_outputs,
                                      share_type parity_core,
-                                     share_type core_fee_paid )
+                                     share_type core_fee_paid,
+                                     uint32_t subsidy_n )
 {
    if( !stealth_passed( db ) || !fees_enforced )
       return;
-   share_type gap = stealth_parity_gap_core( db, n_blind_outputs, parity_core );
+   // Same (n_blind_outputs, subsidy_n) derivation as do_evaluate's require, so
+   // the debit can never exceed what the require admitted (mirror exactly;
+   // a drained pool still fails closed on the availability assert below).
+   share_type gap = stealth_parity_gap_core( db, n_blind_outputs, parity_core,
+                                             subsidy_n );
    if( gap.value <= 0 )
       return;
+   // Real n_blind_outputs: an op that paid the full anchor is never debited.
    share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
    if( core_fee_paid >= cost )
       return; // cost path: user paid the anchor level, no discount granted
@@ -1619,10 +1728,14 @@ void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explici
    // G1c parity float rule — every other blind op calls this in do_evaluate
    // (ring :488, turnstile :879, op41 :145, op40 :225, op39 :63). Without it
    // op108 bypasses the fee-parity floor while still calling
-   // stealth_consume_parity_subsidy in do_apply — a half-wired parity rule.
-   stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+    // stealth_consume_parity_subsidy in do_apply — a half-wired parity rule.
+    // Rule R: op108's blind->blind leg is circulation (capped at 1) and its
+    // exit leg has no outputs at all (no subsidy) — min() collapses both.
+    stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                               o.fee.asset_id, (uint32_t)o.outputs.size(),
-                              calculate_fee_for_operation( operation( o ) ) );
+                              calculate_fee_for_operation( operation( o ) ),
+                              std::min( (uint32_t)o.outputs.size(),
+                                 stealth_subsidy_output_count( operation( o ) ) ) );
 
    // V1 sunset, mirroring the ring at :495-497. Without this a V1 op108 past
    // sunset would mint fresh V1-range-proven outputs, defeating the sunset.
@@ -1810,9 +1923,11 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
    // Mirrors confidential_evaluator.cpp:266-267.
    stealth_pool_count_add( db(), o.asset_id, -spent_counted );
    stealth_pool_count_add( db(), o.asset_id, (int32_t)o.outputs.size() );
-   stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
-                                   o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                    std::min( (uint32_t)o.outputs.size(),
+                                       stealth_subsidy_output_count( operation( o ) ) ) );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    // SAME calculator as do_evaluate — one definition, so gate and accounting
@@ -2026,6 +2141,19 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
     fc::uint128_t link4_rhs( (uint64_t)( _amounts.pool_pays.amount.value - _amounts.taker_market_fee.amount.value ) );
     FC_ASSERT( link4_lhs == link4_rhs, "Fee must exactly cover slippage: amount − F == pool_pays − taker_fee" );
 
+   // (9b) G1c parity float rule + Rule R (spec
+   // 2026-10-10-stealth-entropy-economics §4, finding F-02). Placement is
+   // load-bearing twice over: it follows the pool math so F is final, and it
+   // precedes acceptance (the ring message, nullifier, proof and kernel
+   // asserts below all refuse), mirroring design §7's order. Rule R admits
+   // op109 on the CIRCULATION rule — a swap is set-neutral (rotates D_A to
+   // D_B, 1-in/1-out by soundness) so only the base-fee component of the gap
+   // is granted; the floor is anchor(1), unchanged for any user.
+   stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
+                              o.fee.asset_id, 1,
+                              calculate_fee_for_operation( operation( o ) ),
+                              std::min( 1u, stealth_subsidy_output_count( operation( o ) ) ) );
+
    // (10) Ring signature + alt leg over G2RM (binds version, input asset,
    // pool, claimed value, slippage floor, image, ring, pseudo, outputs, F).
    const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
@@ -2119,7 +2247,19 @@ void_result stealth_pool_exchange_evaluator::do_apply( const stealth_pool_exchan
    // accumulated_fees); committee network_percent cut vests to COMMITTEE iff
    // nonzero; registrar/referrer rewards forfeited (no identifiable taker).
    g2_route_market_fee_to_parity( db(), o.amount_to_sell.asset_id, _amounts.maker_market_fee.amount );
-   g2_route_market_fee_to_parity( db(), o.min_to_receive.asset_id, _amounts.taker_market_fee.amount );
+    g2_route_market_fee_to_parity( db(), o.min_to_receive.asset_id, _amounts.taker_market_fee.amount );
+
+    // G1c: parity subsidy settlement (Rule R, F-02). Sits beside the market-fee
+    // routing because that is where the pool's funds come from — op109 now
+    // draws on parity_pool under the same availability assert every other
+    // blind op uses. The (n, subsidy_n) pair mirrors the do_evaluate require
+    // at (9b) EXACTLY, so the debit can never exceed what require admitted;
+    // if the pool drained in between, the availability assert in consume
+    // fires closed and the block is rejected.
+    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
+                                    o.fee.asset_id, 1,
+                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                    std::min( 1u, stealth_subsidy_output_count( operation( o ) ) ) );
 
    // Nullifiers, both version legs (relative tags, ring-path discipline:
    // key_image rides o.proof_version, alt rides the other version).

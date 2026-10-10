@@ -846,6 +846,43 @@ static void g1c_seed_pool( database& db, account_id_type payer,
    db.pay_market_fees( nullptr, core, core.amount( fee ), true, core.amount( fee ) );
 }
 
+// Seed helper: fund parity_pool[UIA] through the real Task-7 funding path
+// (opt-in + pay_market_fees routing at the 5% share, mirroring
+// g1c_seed_pool) so the builder's parity leg can clear the float rule.
+//
+// DURABILITY (db_block.cpp:423). This helper performs DIRECT state writes ONLY
+// and must be called on SEALED state with no push in between: PUSH_TX opens
+// _pending_tx_session, and any direct modify made while a session is open is
+// discarded when generate_block resets it. The earlier version of this helper
+// called f.issue_uia() (a PUSH_TX) before adjusting balances, so its opt-in,
+// debit and market-fee routing all landed inside that session and were silently
+// wiped — the seeding never took effect, which only went unnoticed while op109
+// had no float rule at all. Callers must top the payer's UIA balance through a
+// real transaction BEFORE calling this.
+static void T_seed_pool_uia( database_fixture& f, const account_object& payer,
+                             const asset_object& uia, int64_t need )
+{
+   database& db = f.db;
+   g1c_opt_in_parity( db, uia.get_id() );
+   const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+   auto itr = st.parity_pool.find( uia.get_id() );
+   share_type have = ( itr == st.parity_pool.end() ) ? share_type( 0 ) : itr->second;
+   if( have.value >= need )
+      return;
+   int64_t fee = ( need - have.value ) * 20; // 5% routes to the pool, exact
+   BOOST_REQUIRE_MESSAGE(
+      db.get_balance( payer.get_id(), uia.get_id() ).amount.value >= fee,
+      "T_seed_pool_uia: payer lacks the UIA balance to seed the "
+      "parity pool — issue it in a real transaction first" );
+   db.adjust_balance( payer.get_id(), uia.amount( -fee ) );
+   db.pay_market_fees( nullptr, uia, uia.amount( fee ), true, uia.amount( fee ) );
+   const auto& st2 = *db.get_index_type<stealth_status_index>().indices().begin();
+   auto itr2 = st2.parity_pool.find( uia.get_id() );
+   BOOST_REQUIRE( itr2 != st2.parity_pool.end() );
+   BOOST_REQUIRE( itr2->second.value >= need );
+}
+
+
 // Task 3 (flag retirement): give a post-fork-created balance grandfathered
 // status so the legacy op40/op41 legs still accept it. Mirrors exactly what
 // a pre-fork balance looks like: created_block == 0 (never counted — back
@@ -4326,10 +4363,10 @@ BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )
                          (int64_t)( 5 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
       BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 1 ).value,
                          (int64_t)( 10 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
-      BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 0 ) ).value,
+      BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 0 ), 0 ).value,
                          stealth_cost_anchor_core( db, 0 ).value );
       BOOST_CHECK_EQUAL(
-         stealth_parity_gap_core( db, 0, stealth_cost_anchor_core( db, 0 ) ).value, 0 );
+         stealth_parity_gap_core( db, 0, stealth_cost_anchor_core( db, 0 ), 0 ).value, 0 );
    }
 
    // --- deposits (cost path: pool is short by design, so the pinned ---
@@ -4463,7 +4500,7 @@ BOOST_AUTO_TEST_CASE( parity_per_block_subsidy_cap_and_reserve )
       auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
       itr->get<transfer_from_blind_operation::fee_params_t>().fee = 499000;
    } );
-   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 499000 ) ).value, 1000 );
+   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 499000 ), 0 ).value, 1000 );
    // Task 7 legacy gate: opt CORE in so the seeding below routes.
    g1c_opt_in_parity( db, core_id );
    // Seed exactly 50 subsidies: route 1M nominal (5% = 50000).
@@ -5669,7 +5706,7 @@ BOOST_AUTO_TEST_CASE( parity_burn_critical_halts_new_subsidies )
       auto itr = fee_params.find( transfer_from_blind_operation::fee_params_t() );
       itr->get<transfer_from_blind_operation::fee_params_t>().fee = 490000;
    } );
-   BOOST_REQUIRE_EQUAL( stealth_parity_gap_core( db, 0, share_type( 490000 ) ).value, 10000 );
+   BOOST_REQUIRE_EQUAL( stealth_parity_gap_core( db, 0, share_type( 490000 ), 0 ).value, 10000 );
    // Seed the pool (5% of 1M = 50000) BEFORE forcing the halt.
    // Task 7 legacy gate: opt CORE in so the seeding below routes.
    g1c_opt_in_parity( db, core_id );
@@ -6016,7 +6053,7 @@ BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
    // Scale 100%: parity 500000, anchor max(600000, pinned 500000) = 600000.
    BOOST_CHECK_EQUAL( parity_at( GRAPHENE_100_PERCENT ).value, 500000 );
    BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 0 ).value, 600000 );
-   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 500000 ) ).value, 100000 );
+   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 500000 ), 0 ).value, 100000 );
    // Scale 200%: BOTH legs double — anchor 1200000 (not the raw 600000 a
    // scale-blind read would pin), parity 1000000, gap 200000. G3-01 pin:
    // without the fix the anchor would sit at 600000 while parity cleared
@@ -6024,7 +6061,7 @@ BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
    BOOST_CHECK_EQUAL( parity_at( 2 * GRAPHENE_100_PERCENT ).value, 1000000 );
    BOOST_CHECK_EQUAL( stealth_cost_anchor_core( db, 0 ).value, 1200000 );
    BOOST_CHECK_NE( stealth_cost_anchor_core( db, 0 ).value, 600000 );
-   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 1000000 ) ).value, 200000 );
+   BOOST_CHECK_EQUAL( stealth_parity_gap_core( db, 0, share_type( 1000000 ), 0 ).value, 200000 );
    verify_asset_supplies( db );
    generate_block();
 } FC_CAPTURE_AND_RETHROW() }
@@ -6214,15 +6251,15 @@ BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
    {
       const asset_object& core = asset_id_type()(db);
       const asset_id_type core_id = core.get_id();
-      share_type gap = stealth_parity_gap_core( db, 1, share_type( 0 ) );
+      share_type gap = stealth_parity_gap_core( db, 1, share_type( 0 ), 1 );
       BOOST_REQUIRE( gap.value > 0 ); // real gap: anchor above zero-fee parity
       BOOST_CHECK_NO_THROW( stealth_require_blind_fee( db, share_type( 0 ), false,
-                                                       core_id, 1, share_type( 0 ) ) );
+                                                       core_id, 1, share_type( 0 ), 1 ) );
       const auto& st0 = *db.get_index_type<stealth_status_index>().indices().begin();
       auto pit = st0.parity_pool.find( core_id );
       share_type before = ( pit == st0.parity_pool.end() ) ? share_type( 0 ) : pit->second;
       BOOST_CHECK_NO_THROW( stealth_consume_parity_subsidy( db, false, core_id, 1,
-                                                            share_type( 0 ), share_type( 0 ) ) );
+                                                            share_type( 0 ), share_type( 0 ), 1 ) );
       const auto& st1 = *db.get_index_type<stealth_status_index>().indices().begin();
       auto pit2 = st1.parity_pool.find( core_id );
       share_type after = ( pit2 == st1.parity_pool.end() ) ? share_type( 0 ) : pit2->second;
@@ -8342,9 +8379,9 @@ BOOST_AUTO_TEST_CASE( r15_migrated_output_ring_spend_succeeds )
       // is far below the 1.500000 cost anchor for 2 outputs), so the pool
       // must be able to cover the gap at push time.
       share_type parity2 = db.current_fee_schedule().calculate_fee( operation( stop ) ).amount;
-      BOOST_REQUIRE( stealth_parity_gap_core( db, 2, parity2 ) > share_type( 0 ) );
+      BOOST_REQUIRE( stealth_parity_gap_core( db, 2, parity2, 2 ) > share_type( 0 ) );
       BOOST_REQUIRE( stealth_parity_available( db, core.get_id(),
-         stealth_parity_gap_core( db, 2, parity2 ) ) );
+         stealth_parity_gap_core( db, 2, parity2, 2 ) ) );
    }
    try {
       PUSH_TX( db, trx );
@@ -9590,7 +9627,13 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
    // Pool + deposit pre-date the blinds (no aging needed for reserves).
    const liquidity_pool_id_type pool_id = f.create_liquidity_pool( funder.get_id(),
       aid_a, aid_b, sid, 0, 0 ).get_id();
-   f.issue_uia( funder, asset( 3000000, aid_a ) );
+   // 25M of A (not 3M): EE-1's Rule R puts op109's 1-output subsidy gap at
+   // anchor(1) = 10 BTS = 1,000,000 units of A, and T_seed_pool_uia funds
+   // parity_pool[A] through the REAL 5%-share market-fee routing, so the payer
+   // must spend 20x the gap (20,020,000) plus 1M to the pool and 1M to the fee
+   // pool — 3M leaves nothing. The extra is inert: it sits on the funder's
+   // balance and never enters the pool reserves the cases assert.
+   f.issue_uia( funder, asset( 25000000, aid_a ) );
    f.issue_uia( funder, asset( 3000000, aid_b ) );
    f.deposit_to_liquidity_pool( funder.get_id(), pool_id,
       asset( 1000000, aid_a ), asset( 1000000, aid_b ) );
@@ -9769,9 +9812,29 @@ BOOST_AUTO_TEST_CASE( poolswap_happy_path )
    transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
    generate_block();
    g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2HAPPY", 0 );
+   // EE-1 (Rule R, F-02): op109 is now INSIDE the parity mechanism, so with an
+   // empty pool it must pay the cost anchor (stealth_require_blind_fee) — which
+   // a swap's kernel-pinned tx fee (f_tx = a - f_maker - pool_pays) cannot reach.
+   // Seed parity_pool[A] through the real funding path, exactly as the wallet
+   // builder test does, so this case tests the swap, not the float rule.
+   // Fixture discipline (db_block.cpp:423, same as wallet_poolswap_builder_*
+   //): SEAL the pool setup with a block first, then make the direct modifies
+   // (fee cap, parity seeding) into the fresh pending session the push reads —
+   // a generate_block AFTER them would reset pending and wipe them.
+   generate_block();
    db.modify( db.get_global_properties(), []( global_property_object& gp ) {
       gp.parameters.maximum_transaction_size = 1024 * 1024;
    } );
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core ) ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need = stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, p.asset_a ), 16u );
    const liquidity_pool_object& pool0 = p.pool( db );
    const int64_t bal_a0 = pool0.balance_a.value, bal_b0 = pool0.balance_b.value;
@@ -9820,10 +9883,20 @@ BOOST_AUTO_TEST_CASE( poolswap_happy_path )
    BOOST_CHECK_EQUAL(
       p.asset_b( db ).dynamic_asset_data_id( db ).confidential_supply.value,
       conf_b0 + sw.v_out );
-   // Zero-fee assets: parity pools untouched (no subsidy exists).
+   // EE-1 (Rule R): op109 now draws its subsidy from parity_pool, so the
+   // zero-fee / zero-market-fee assets mean only "no market-fee routing" —
+   // parity_pool[A] holds exactly the seed MINUS the grant. Before EE-1 this
+   // pair asserted the pools were untouched (op109 had no parity pair at all,
+   // finding F-02).
    const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
-   BOOST_CHECK( st.parity_pool.find( p.asset_a ) == st.parity_pool.end() );
-   BOOST_CHECK( st.parity_pool.find( p.asset_b ) == st.parity_pool.end() );
+   {
+      auto ita = st.parity_pool.find( p.asset_a );
+      BOOST_REQUIRE( ita != st.parity_pool.end() );
+      BOOST_CHECK_EQUAL( ita->second.value, 1000 ); // seed surplus after the debit
+      // B never receives a market fee here (0%), and the subsidy is
+      // denominated in the sold asset, so B is untouched.
+      BOOST_CHECK( st.parity_pool.find( p.asset_b ) == st.parity_pool.end() );
+   }
    // Counter-asset decoy set grew by the one new output; input side unchanged.
    BOOST_CHECK_EQUAL( stealth_pool_depth( db, p.asset_b ), 1u );
    BOOST_CHECK_EQUAL( stealth_pool_depth( db, p.asset_a ), 16u );
@@ -9952,9 +10025,23 @@ BOOST_AUTO_TEST_CASE( poolswap_retarget_amount_fails )
    transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
    generate_block();
    g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2MIN", 0 );
+   // EE-1: op109 is inside the parity mechanism now — seed parity_pool[A] so
+   // this case still fails at the RING (the property under test), not at the
+   // float rule that fires earlier in do_evaluate. Seal first (db_block.cpp:423).
+   generate_block();
    db.modify( db.get_global_properties(), []( global_property_object& gp ) {
       gp.parameters.maximum_transaction_size = 1024 * 1024;
    } );
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core ) ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need = stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
    g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "G2MIN-sp", 50 );
    // Tighter but still satisfiable floor: pool math passes, ring message differs.
    sw.op.min_to_receive = asset( sw.v_out - 10, p.asset_b );
@@ -10020,10 +10107,34 @@ BOOST_AUTO_TEST_CASE( poolswap_fee_routing )
    transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
    generate_block();
    g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2FEE", 200 );
+   // EE-1: op109 draws from parity_pool now, so seed it enough to clear the
+   // float rule. The DEBIT is asserted exactly below against the pre-push
+   // balance, so this case still pins the market-fee routing claim.
+   // Seal the pool setup first (db_block.cpp:423 pending discipline).
+   generate_block();
    db.modify( db.get_global_properties(), []( global_property_object& gp ) {
       gp.parameters.maximum_transaction_size = 1024 * 1024;
    } );
    BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters.get_market_fee_network_percent(), 0 );
+   int64_t gap_sub = 0;
+   int64_t pp_a0 = 0;
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core ) ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need = stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+      gap_sub = stealth_parity_gap_core( db, 1, parity_core, 1 ).value;
+      BOOST_REQUIRE( gap_sub > 0 );
+      const auto& st0 = *db.get_index_type<stealth_status_index>().indices().begin();
+      auto i0 = st0.parity_pool.find( p.asset_a );
+      BOOST_REQUIRE( i0 != st0.parity_pool.end() );
+      pp_a0 = i0->second.value;
+      BOOST_REQUIRE_EQUAL( pp_a0 - gap_sub, 1000 ); // seed left the exact surplus
+   }
+   set_expiration( db, trx );
    const int64_t acc_a0 = p.asset_a( db ).dynamic_asset_data_id( db ).accumulated_fees.value;
    const int64_t acc_b0 = p.asset_b( db ).dynamic_asset_data_id( db ).accumulated_fees.value;
    g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "G2FEE-sp", 50 );
@@ -10037,13 +10148,19 @@ BOOST_AUTO_TEST_CASE( poolswap_fee_routing )
    auto itb = st.parity_pool.find( p.asset_b );
    BOOST_REQUIRE( ita != st.parity_pool.end() );
    BOOST_REQUIRE( itb != st.parity_pool.end() );
-   BOOST_CHECK_EQUAL( ita->second.value, sw.expect.maker_market_fee.amount.value );
+   // A: seed + maker market fee routed in - the Rule R subsidy debit (op109 is
+   // the fee asset's asset, and the circulation rule grants anchor(1)-parity).
+   // B: taker market fee only — no subsidy leg (the subsidy is denominated in
+   // o.fee.asset_id, which the evaluator pins to the SOLD asset).
+   BOOST_CHECK_EQUAL( ita->second.value,
+      pp_a0 + sw.expect.maker_market_fee.amount.value - gap_sub );
    BOOST_CHECK_EQUAL( itb->second.value, sw.expect.taker_market_fee.amount.value );
-   // Market fees bypass accumulated_fees: A takes only the tx-fee conversion
-   // (framework convert_fee leg), B takes nothing at all.
+   // Market fees bypass accumulated_fees: A additionally takes the Rule R
+   // subsidy credit (the pool debit is supply-neutral by construction), B
+   // takes nothing at all.
    BOOST_CHECK_EQUAL(
       p.asset_a( db ).dynamic_asset_data_id( db ).accumulated_fees.value,
-      acc_a0 + sw.f_tx );
+      acc_a0 + sw.f_tx + gap_sub );
    BOOST_CHECK_EQUAL(
       p.asset_b( db ).dynamic_asset_data_id( db ).accumulated_fees.value, acc_b0 );
    verify_asset_supplies( db );
@@ -10612,25 +10729,6 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
 // ---- G2-3 wallet (Step 4a, TDD RED): production op builder.
 // stealth_prove_pool_exchange is declared (stealth_pool_builder.hpp) but
 // NOT defined anywhere: RED = link failure (undefined reference).
-// Seed helper: fund parity_pool[UIA] through the real Task-7 funding path
-// (opt-in + pay_market_fees routing at the 5% share, mirroring
-// g1c_seed_pool) so the builder's parity leg can clear the float rule.
-static void T_seed_pool_uia( database_fixture& f, const account_object& payer,
-                             const asset_object& uia, int64_t need )
-{
-   database& db = f.db;
-   g1c_opt_in_parity( db, uia.get_id() );
-   const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
-   auto itr = st.parity_pool.find( uia.get_id() );
-   share_type have = ( itr == st.parity_pool.end() ) ? share_type( 0 ) : itr->second;
-   if( have.value >= need )
-      return;
-   int64_t fee = ( need - have.value ) * 20; // 5% routes to the pool, exact
-   f.issue_uia( payer, uia.amount( fee + 1000 ) );
-   db.adjust_balance( payer.get_id(), uia.amount( -fee ) );
-   db.pay_market_fees( nullptr, uia, uia.amount( fee ), true, uia.amount( fee ) );
-}
-
 // Round trip: fund → seed parity → build via the PRODUCTION builder →
 // validate → push → exact reserve/supply/nullifier deltas.
 BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_roundtrip )
@@ -11188,6 +11286,109 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_output )
    BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_a.value, 1000000 );
    BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_b.value, 1000000 );
    verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- EE-1 (Rule R, spec 2026-10-10-stealth-entropy-economics §4) ----
+// RED: stealth_subsidy_output_count is undeclared (compile failure).
+//
+// The classifier returns the output count the SUBSIDY gap may be computed on.
+// It never touches the fee floor (stealth_cost_anchor_core) and callers pass
+// subsidy_n = min(n_blind_outputs, classifier(op)) so the cap can only shrink
+// the gap. Per spec §1 the live-set effect (ΔD_a) selects the bucket:
+//
+//   op39 deposit            +n   -> growth, full subsidy
+//   op104 m-in/m-out   n_out-n_in -> growth only when net > 0
+//   op106 turnstile          0   -> one new output, capped at 1
+//   op109 swap               0   -> rotates A->B, 1-in/1-out -> capped at 1
+//   op40  blind->blind       0   -> circulation, base fee only (n = 1)
+//   op41  blind->clear    -1    -> exit, no blind outputs at all -> 0
+//   op108 blind->blind       0   -> capped at 1; exit leg (no outputs) -> 0
+//   unknown op               -   -> 0, fail closed
+BOOST_AUTO_TEST_CASE( subsidy_rule_table )
+{ try {
+   // --- op39 transfer_to_blind (deposit): the only net source, unsubsidized
+   // per-output component is PRESERVED (growth).
+   {
+      transfer_to_blind_operation o1;
+      o1.outputs.resize( 1 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o1 ) ), 1u );
+      transfer_to_blind_operation o8;
+      o8.outputs.resize( 8 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o8 ) ), 8u );
+   }
+   // --- op41 transfer_from_blind (exit): the op carries NO blind outputs
+   // member at all, so the classifier must return 0 and the existing literal
+   // `0` passed at confidential_evaluator.cpp:149 is preserved verbatim.
+   {
+      transfer_from_blind_operation o;
+      o.inputs.resize( 1 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 0u );
+   }
+   // --- op40 blind_transfer (circulation): net = n_out - n_in. 1-1-1 is
+   // circulation -> base fee only (n = 1, same value the call site passes
+   // today via o.outputs.size()). 1-in-8-out is net-positive growth -> 8.
+   // 8-in-8-out is consolidation -> capped at 1.
+   {
+      blind_transfer_operation o;
+      o.inputs.resize( 1 );
+      o.outputs.resize( 1 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 1u );
+      blind_transfer_operation grow;
+      grow.inputs.resize( 1 );
+      grow.outputs.resize( 8 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( grow ) ), 8u );
+      blind_transfer_operation consol;
+      consol.inputs.resize( 8 );
+      consol.outputs.resize( 8 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( consol ) ), 1u );
+   }
+   // --- op104 stealth_transfer: net = n_out - n_in (spec §1).
+   {
+      stealth_transfer_operation o;
+      o.inputs.resize( 1 );
+      o.outputs.resize( 8 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 8u );
+      stealth_transfer_operation consol;
+      consol.inputs.resize( 8 );
+      consol.outputs.resize( 8 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( consol ) ), 1u );
+   }
+   // --- op106 turnstile_reproof: exactly one migrated output, capped at 1.
+   {
+      turnstile_reproof_operation o;
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 1u );
+   }
+   // --- op108 stealth_explicit_spend: outputs non-empty => blind->blind leg
+   // (circulation -> 1); outputs empty => exit leg (no subsidy -> 0).
+   {
+      stealth_explicit_spend_operation o;
+      o.inputs.resize( 1 );
+      o.outputs.resize( 4 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 1u );
+      stealth_explicit_spend_operation exit_leg;
+      exit_leg.inputs.resize( 1 );
+      exit_leg.outputs.resize( 0 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( exit_leg ) ), 0u );
+   }
+   // --- op109 stealth_pool_exchange: singular input/output (NOT vectors) --
+   // 1-in/1-out -> circulation -> base fee only (1).
+   {
+      stealth_pool_exchange_operation o;
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( o ) ), 1u );
+   }
+   // --- Unknown ops fail CLOSED (0), never grant a subsidy.
+   {
+      transfer_operation plain;
+      plain.amount = asset( 1, asset_id_type() );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( plain ) ), 0u );
+      transfer_from_blind_operation exitop;
+      transfer_to_blind_operation deposit;
+      // A zero-output deposit is degenerate; classifier returns 0, and the
+      // caller-side min() keeps the gap non-growing regardless.
+      deposit.outputs.resize( 0 );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( deposit ) ), 0u );
+      BOOST_CHECK_EQUAL( stealth_subsidy_output_count( operation( exitop ) ), 0u );
+   }
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

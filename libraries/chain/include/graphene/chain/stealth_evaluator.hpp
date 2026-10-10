@@ -216,6 +216,24 @@ void stealth_maybe_record_activation( database& db );
 // ---------------------------------------------------------------------------
 
 /**
+ * Rule R (spec docs/superpowers/specs/2026-10-10-stealth-entropy-economics.md
+ * §4): the output count the PARITY SUBSIDY gap may be computed on, as a pure
+ * function of the op's effect on the live anonymity set D_a (spec §1 table).
+ * Deposits (+n) keep their full per-output component; net-positive ring ops
+ * (+(m-1)) keep theirs; circulation ops (net 0) fall back to the base fee
+ * (n = 1); exits (op41, op108's exit leg) get no blind outputs to count; and
+ * an unknown op fails closed at 0.
+ *
+ * SCOPE — this NEVER governs the fee floor. The floor is
+ * `stealth_cost_anchor_core(db, n_blind_outputs)`, which no user's fee is
+ * computed against differently after this function exists. Callers MUST pass
+ *     subsidy_n = min( n_blind_outputs, stealth_subsidy_output_count(op) )
+ * so the cap can only SHRINK the gap; taking the classifier result directly
+ * would let a call site's own (possibly larger) n leak back in.
+ */
+uint32_t stealth_subsidy_output_count( const protocol::operation& op );
+
+/**
  * Cost anchor for one blind op in CORE units: max(activation snapshot of the
  * transfer_to_blind schedule, pinned upstream defaults, current schedule),
  * mapped onto n blind outputs (fee + n*price_per_output).
@@ -224,16 +242,22 @@ void stealth_maybe_record_activation( database& db );
  * (the op's own schedule) and this anchor by pool state. That split is
  * what "floats by rule, not by surprise" means: no committee action happens
  * at float time, and the float level is computable from public inputs.
+ *
+ * THE FLOOR. This is the unsubsidized required fee and Rule R must not move
+ * it: callers pass the op's REAL n_blind_outputs here, never subsidy_n.
  */
 share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs );
 
 /**
- * Discount actually granted, CORE units: max(0, anchor - parity), where
- * parity is the op's own scheduled fee. Zero when the committee never priced
- * below the anchor (no discount, no debit — the pool then only accumulates).
+ * Discount actually granted, CORE units: max(0, anchor(min(n_blind_outputs,
+ * subsidy_n)) - parity), where parity is the op's own scheduled fee. Zero
+ * when the committee never priced below the anchor (no discount, no debit —
+ * the pool then only accumulates). subsidy_n caps the gap at the base-fee
+ * component for ops that do not grow the anonymity set; it can only shrink
+ * the anchor leg, never raise it (see stealth_subsidy_output_count).
  */
 share_type stealth_parity_gap_core( const database& db, uint32_t n_blind_outputs,
-                                    share_type parity_core );
+                                    share_type parity_core, uint32_t subsidy_n );
 
 /**
  * True when a gap of gap_core (CORE units) payable in fee_asset can be
@@ -262,11 +286,14 @@ share_type stealth_gap_to_asset( const database& db, asset_id_type fee_asset,
  * genesis/test/generator context where no fee is paid and no subsidy may be
  * consumed). When subsidized, the central schedule check already enforces
  * the parity level, so this only binds on the cost path:
- * core_fee_paid >= cost_anchor.
+ * core_fee_paid >= cost_anchor. cost_anchor is computed from the REAL
+ * n_blind_outputs (Rule R never lowers a user's floor); subsidy_n only caps
+ * the DISCOUNT that would have been granted below it.
  */
 void stealth_require_blind_fee( const database& db, share_type core_fee_paid,
                                 bool fees_enforced, asset_id_type fee_asset,
-                                uint32_t n_blind_outputs, share_type parity_core );
+                                uint32_t n_blind_outputs, share_type parity_core,
+                                uint32_t subsidy_n );
 
 /**
  * Consume the subsidy in do_apply (same skip guard as the check): the op's
@@ -277,12 +304,17 @@ void stealth_require_blind_fee( const database& db, share_type core_fee_paid,
  * amount to the fee asset's accumulated_fees for supply-neutrality, record
  * interval flow, consume one per-block subsidy unit). All-or-nothing:
  * partial gaps are never split (deterministic, no dust games).
+ *
+ * The cost-path test uses the REAL n_blind_outputs, so an op that paid the
+ * floor is never charged a debit it did not earn; only the gap leg is capped
+ * by subsidy_n, and require/consume derive it identically.
  */
 void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
                                      asset_id_type fee_asset,
                                      uint32_t n_blind_outputs,
                                      share_type parity_core,
-                                     share_type core_fee_paid );
+                                     share_type core_fee_paid,
+                                     uint32_t subsidy_n );
 
 /**
  * Fee-share routing (called from database::pay_market_fees, the single

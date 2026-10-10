@@ -21,6 +21,7 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
  * THE SOFTWARE.
  */
+#include <algorithm>
 #include <graphene/chain/exceptions.hpp>
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/chain/confidential_evaluator.hpp>
@@ -59,10 +60,13 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
                  "No new V1 blind balances past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
       // G1c parity float rule (BSIP-2 §2): same skip guard as the schedule
-      // check — no fee paid, no subsidy consumed.
+      // check — no fee paid, no subsidy consumed. Rule R: a deposit is the
+      // only net source of blind-set value, so min(n, classifier) == n here.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                                  o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                 calculate_fee_for_operation( operation( o ) ) );
+                                 calculate_fee_for_operation( operation( o ) ),
+                                 std::min( (uint32_t)o.outputs.size(),
+                                    stealth_subsidy_output_count( operation( o ) ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -98,7 +102,9 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
    // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                   std::min( (uint32_t)o.outputs.size(),
+                                      stealth_subsidy_output_count( operation( o ) ) ) );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );
@@ -145,9 +151,12 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       // G1c parity float rule: withdrawals carry no blind outputs (n = 0).
+      // Rule R: op41 is an EXIT (ΔD_a = -1) and has no outputs member, so
+      // the classifier returns 0 and the literal `0` is preserved verbatim.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                                  o.fee.asset_id, 0,
-                                 calculate_fee_for_operation( operation( o ) ) );
+                                 calculate_fee_for_operation( operation( o ) ),
+                                 std::min( 0u, stealth_subsidy_output_count( operation( o ) ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -177,7 +186,8 @@ void_result transfer_from_blind_evaluator::do_apply( const transfer_from_blind_o
    // G1c: parity subsidy settlement (withdrawals carry no new outputs).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, 0,
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                   std::min( 0u, stealth_subsidy_output_count( operation( o ) ) ) );
    stealth_count_blind_op( db() );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -228,10 +238,14 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
-      // G1c parity float rule (same skip guard).
+      // G1c parity float rule (same skip guard). Rule R: blind_transfer is
+      // circulation (net 0 at 1-1-1) so the per-output component is not
+      // subsidized; only net-positive splits keep their full component.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
                                  o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                 calculate_fee_for_operation( operation( o ) ) );
+                                 calculate_fee_for_operation( operation( o ) ),
+                                 std::min( (uint32_t)o.outputs.size(),
+                                    stealth_subsidy_output_count( operation( o ) ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -275,7 +289,9 @@ void_result blind_transfer_evaluator::do_apply( const blind_transfer_operation& 
    // G1c: parity subsidy settlement + skew histogram.
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid );
+                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                   std::min( (uint32_t)o.outputs.size(),
+                                      stealth_subsidy_output_count( operation( o ) ) ) );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );

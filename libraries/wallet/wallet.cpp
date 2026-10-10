@@ -2109,17 +2109,33 @@ signed_transaction wallet_api::transfer_default( const string& from,
       FC_ASSERT( to_key != public_key_type(),
                  "unknown blind recipient '${r}': register the blind key/label first, "
                  "or pass transparent_opt_out=true", ("r", to_key_or_account) );
-      // The blind leg below broadcasts through transfer_to_blind, which
-      // invokes the Task-6 delay choke point (maybe_delay_blind_broadcast)
-      // when broadcast=true — this path never bypasses the timing defense,
-      // and never double-delays (the choke lives in transfer_to_blind only).
-      blind_confirmation conf = transfer_to_blind( from, asset_symbol,
-                                                   {{ to_key_or_account, amount }},
-                                                   broadcast );
-      return conf.trx;
-   }
-   return transfer( from, to_key_or_account, amount, asset_symbol, memo, broadcast );
+       // The blind leg below broadcasts through transfer_to_blind, which
+       // invokes the Task-6 delay choke point (maybe_delay_blind_broadcast)
+       // when broadcast=true — this path never bypasses the timing defense,
+       // and never double-delays (the choke lives in transfer_to_blind only).
+       blind_confirmation conf = transfer_to_blind( from, asset_symbol,
+                                                    {{ to_key_or_account, amount }},
+                                                    broadcast );
+       return conf.trx;
+    }
+    return transfer( from, to_key_or_account, amount, asset_symbol, memo, broadcast );
 } FC_CAPTURE_AND_RETHROW( (from)(to_key_or_account)(amount)(asset_symbol)(transparent_opt_out)(broadcast) ) }
+
+signed_transaction wallet_api::stealth_pool_swap(
+   const stealth_pool_exchange_operation& op, bool broadcast )const
+{ try {
+   // Fail-closed shape check BEFORE any timing defense: a malformed op
+   // throws here and never reaches the delay choke (nor the network).
+   op.validate();
+   signed_transaction tx;
+   tx.operations = { operation( op ) };
+   // Task-6 delay choke point (BSIP-2 §1), now covering op109: sleeps
+   // exactly when broadcast=true (a 0 delay setting is an explicit off).
+   maybe_delay_blind_broadcast( broadcast );
+   // Fee payer is TEMP (threshold-0): no signing key is required for the
+   // op itself; sign_transaction envelopes (+ broadcasts) the tx.
+   return sign_transaction( tx, broadcast );
+} FC_CAPTURE_AND_RETHROW( (op)(broadcast) ) }
 
 // custom operations
 signed_transaction wallet_api::account_store_map( const string& account, const string& catalog, bool is_to_remove,

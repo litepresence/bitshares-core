@@ -46,6 +46,12 @@
 #include <graphene/app/database_api.hpp>
 #include <graphene/wallet/wallet.hpp>
 
+#include <graphene/chain/stealth_prover.hpp>
+#include <graphene/chain/stealth_pool_builder.hpp>
+
+#include <operation_printer.hpp>
+#include <wallet_api_impl.hpp>
+
 #include <fc/crypto/digest.hpp>
 #include <fc/io/raw.hpp>
 #include <fc/reflect/variant.hpp>
@@ -9919,6 +9925,840 @@ BOOST_AUTO_TEST_CASE( poolswap_wrong_fee_fails )
    // Nothing moved: both refusals leave pool reserves and blind supply intact.
    BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- G2-3 wallet prover (Step 1, TDD RED): production dual-version pool-ring
+// prover. Fixture style mirrors T_prove_ring:199 (deterministic 16-ring with
+// known openings); PROVING goes through the production API in
+// libraries/chain/stealth_prover.{hpp,cpp} (wallet-side, evaluators must never
+// call it). RED = this TU fails to compile (no such header/symbol).
+BOOST_AUTO_TEST_CASE( wallet_prover_pool_ring_dual )
+{ try {
+   const uint8_t V = GRAPHENE_STEALTH_PROOF_V2;
+   const uint8_t VA = GRAPHENE_STEALTH_PROOF_V1;
+   const size_t N = 16, S = 5;
+   const uint64_t VVAL = 1000;
+   // Deterministic 16-ring with known openings (distinct values keep every
+   // member point distinct).
+   std::vector<fc::ecc::commitment_type> Q;
+   std::vector<fc::sha256> blinds;
+   for( size_t i = 0; i < N; ++i )
+   {
+      auto B = T_blind_secret( "g2w-ring-b|" + std::to_string( i ) );
+      blinds.push_back( B );
+      BIGNUM* bb = T_bn( B );
+      Q.push_back( T_commitment( T_commit( bb, VVAL + i ) ) );
+      BN_free( bb );
+   }
+   // Fresh pseudo blind from the PRODUCTION sampler (fails to compile pre-G2-3).
+   const fc::sha256 bP = graphene::chain::stealth_sample_blind();
+   // Dry run under dummy messages to learn both images (+ shared pseudo),
+   // mirroring the g2_build_swap/T_dual_dry_run pattern: G2RM binds the
+   // images, so the real messages can only be built after this step.
+   graphene::chain::stealth_pool_ring_proof dry;
+   std::string err;
+   const std::string dummy( 32, '\0' );
+   BOOST_REQUIRE_MESSAGE(
+      graphene::chain::stealth_prove_pool_ring(
+         V, VA, Q, S, blinds[S], VVAL + S, bP, dummy, dummy, dry, err ),
+      "production dry-run prove failed: " << err );
+   BOOST_REQUIRE_EQUAL( dry.key_image.size(), 33u );
+   BOOST_REQUIRE_EQUAL( dry.alt_key_image.size(), 33u );
+   BOOST_REQUIRE_EQUAL( dry.ring_sig.size(), 32u + 96u * N );
+   BOOST_REQUIRE_EQUAL( dry.alt_ring_sig.size(), 32u + 96u * N );
+   // Independent G2RM messages over the dry-run images (built here from the
+   // consensus helper, never trusted from the prover).
+   const asset_id_type asset_a;
+   const uint64_t pool = 7;
+   const int64_t amount = (int64_t)( VVAL + S ), minv = amount - 50, F = 10;
+   BIGNUM* bo = T_bn( T_blind_secret( "g2w-ring-out-b" ) );
+   fc::ecc::commitment_type Cout = T_commitment( T_commit( bo, (uint64_t)( amount - F ) ) );
+   BN_free( bo );
+   std::vector<fc::ecc::commitment_type> outs = { Cout };
+   fc::sha256 mh = stealth_pool_message( V, asset_a, pool, amount, minv,
+      dry.key_image, Q, dry.pseudo_output, outs, F );
+   fc::sha256 ma = stealth_pool_message( VA, asset_a, pool, amount, minv,
+      dry.alt_key_image, Q, dry.pseudo_output, outs, F );
+   const std::string msg( (const char*)mh.data(), 32 );
+   const std::string msga( (const char*)ma.data(), 32 );
+   // Real prove under the bound messages (same b_P: pseudo must be stable).
+   graphene::chain::stealth_pool_ring_proof proof;
+   BOOST_REQUIRE_MESSAGE(
+      graphene::chain::stealth_prove_pool_ring(
+         V, VA, Q, S, blinds[S], VVAL + S, bP, msg, msga, proof, err ),
+      "production prove failed: " << err );
+   BOOST_CHECK( proof.pseudo_output == dry.pseudo_output );
+   BOOST_CHECK( proof.key_image == dry.key_image );
+   BOOST_CHECK( proof.alt_key_image == dry.alt_key_image );
+   // Main leg verifies under the consensus verifier.
+   {
+      stealth_ring_input in_main;
+      in_main.ring = Q;
+      in_main.key_image = proof.key_image;
+      in_main.ring_sig = proof.ring_sig;
+      in_main.pseudo_output = proof.pseudo_output;
+      BOOST_CHECK_MESSAGE( stealth_verify_ring( V, in_main, msg, err ), err );
+   }
+   // Alt leg verifies under the other version (evaluator's alt_in pattern).
+   {
+      stealth_ring_input in_alt;
+      in_alt.ring = Q;
+      in_alt.key_image = proof.alt_key_image;
+      in_alt.ring_sig = proof.alt_ring_sig;
+      in_alt.pseudo_output = proof.pseudo_output;
+      BOOST_CHECK_MESSAGE( stealth_verify_ring( VA, in_alt, msga, err ), err );
+   }
+   // Zeroization discipline: the hook image is the post-cleanse copy of the
+   // prover's secret buffer — 32 zero bytes iff cleansing ran on it.
+   {
+      std::vector<unsigned char> cleansed =
+         graphene::chain::stealth_prover_test_last_cleansed();
+      BOOST_REQUIRE_EQUAL( cleansed.size(), 32u );
+      BOOST_CHECK_MESSAGE( std::all_of( cleansed.begin(), cleansed.end(),
+         []( unsigned char c ) { return c == 0; } ),
+         "prover secret buffer was not cleansed" );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- G2-3 wallet prover (Step 2, TDD RED): BP+ m=1 + kernel scalar +
+// Schnorr pin provers in stealth_prover.cpp. The test-side fold mirrors
+// T_bp_prove:764 for the 592B blob; excess = b_P − b_out; Schnorr (T,s)
+// for (P, amount, pool). RED = the Step-1 stubs refuse (false/empty) so
+// every leg below fails; GREEN = the triple passes all three verifiers.
+BOOST_AUTO_TEST_CASE( wallet_prover_pool_value_triple )
+{ try {
+   const int64_t amount = 5000;
+   const uint64_t pool = 7;
+   const int64_t F = 100;
+   const uint64_t v_out = (uint64_t)( amount - F );
+   // Openings from the production sampler (fresh per run, always < n).
+   const fc::sha256 bP = graphene::chain::stealth_sample_blind();
+   const fc::sha256 bOut = graphene::chain::stealth_sample_blind();
+   BIGNUM* bpn = T_bn( bP );
+   BIGNUM* bon = T_bn( bOut );
+   const fc::ecc::commitment_type P =
+      T_commitment( T_commit( bpn, (uint64_t)amount ) );
+   const fc::ecc::commitment_type Cout =
+      T_commitment( T_commit( bon, v_out ) );
+   BN_free( bpn ); BN_free( bon );
+
+   // (a) Schnorr pin (T, s) for (P, amount, pool) via the production prover.
+   std::vector<char> T33;
+   std::string s32;
+   std::string err;
+   BOOST_REQUIRE_MESSAGE(
+      graphene::chain::stealth_prove_value_pin(
+         P, amount, pool, bP, T33, s32, err ),
+      "production pin prove failed: " << err );
+   BOOST_REQUIRE_EQUAL( T33.size(), 33u );
+   BOOST_REQUIRE_EQUAL( s32.size(), 32u );
+   BOOST_CHECK_MESSAGE(
+      stealth_verify_value_pin( P, amount, pool, T33, s32, err ), err );
+
+   // (b) BP+ m=1 (exactly 592 bytes) for the output commitment.
+   std::vector<char> bp;
+   BOOST_REQUIRE_MESSAGE(
+      graphene::chain::stealth_prove_bp_plus_m1( Cout, bOut, v_out, bp, err ),
+      "production BP+ prove failed: " << err );
+   BOOST_REQUIRE_EQUAL( bp.size(), 592u );
+   BOOST_CHECK_MESSAGE(
+      stealth_verify_bp_plus( 1, bp, { Cout }, err ), err );
+
+   // (c) Kernel scalar binds the two blinds with the composite fee.
+   const fc::sha256 excess =
+      graphene::chain::stealth_compute_pool_excess( bP, bOut );
+   BOOST_CHECK_MESSAGE(
+      stealth_verify_excess( { P }, { Cout }, F, excess, err ), err );
+
+   // Zeroization ran on the last prover's secret buffer too.
+   {
+      std::vector<unsigned char> cleansed =
+         graphene::chain::stealth_prover_test_last_cleansed();
+      BOOST_REQUIRE_EQUAL( cleansed.size(), 32u );
+      BOOST_CHECK_MESSAGE( std::all_of( cleansed.begin(), cleansed.end(),
+         []( unsigned char c ) { return c == 0; } ),
+         "prover secret buffer was not cleansed" );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- G2-3 wallet (Step 3, TDD RED): database_api::get_stealth_outputs
+// enumeration + sampler. RED = both symbols are undeclared (compile fail).
+BOOST_AUTO_TEST_CASE( wallet_stealth_outputs_enumeration )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2ENUM", 0 );
+   generate_block();
+   set_expiration( db, trx );
+   graphene::app::database_api api( db );
+   // Sold asset: exactly the 16 seeded blinds, all unspent, all carrying
+   // post-fork creation metadata (created_block + created_time set).
+   {
+      std::vector<blinded_balance_object> outs =
+         api.get_stealth_outputs( p.asset_a, true );
+      BOOST_REQUIRE_EQUAL( outs.size(), 16u );
+      for( const auto& o : outs )
+      {
+         BOOST_CHECK( o.asset_id == p.asset_a );
+         BOOST_CHECK( !o.spent );
+         BOOST_CHECK_NE( o.created_block, 0u );
+      }
+      std::vector<blinded_balance_object> all =
+         api.get_stealth_outputs( p.asset_a, false );
+      BOOST_CHECK_EQUAL( all.size(), outs.size() );
+   }
+   // Counter asset holds no blinds yet (outputs appear only via swaps).
+   {
+      std::vector<blinded_balance_object> outs =
+         api.get_stealth_outputs( p.asset_b, true );
+      BOOST_CHECK_EQUAL( outs.size(), 0u );
+   }
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// Sampler output must satisfy the exact checks the evaluator membership
+// loop applies (asset, metadata-bearing, decoy policy at live depth).
+BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2SAMP", 0 );
+   generate_block();
+   set_expiration( db, trx );
+   // The only possible 16-ring here is the full set (pool holds exactly
+   // 16 aged blinds of A): sampler must return all of them, real included.
+   graphene::chain::stealth_sampled_ring smp =
+      graphene::chain::stealth_sample_pool_ring(
+         db, p.asset_a, p.commits[3] );
+   BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
+   BOOST_REQUIRE( smp.real_index < smp.ring.size() );
+   BOOST_CHECK( smp.ring[smp.real_index] == p.commits[3] );
+   // Distinct members (evaluator refuses duplicates).
+   {
+      std::vector<fc::ecc::commitment_type> sorted = smp.ring;
+      std::sort( sorted.begin(), sorted.end() );
+      BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
+                   == sorted.end() );
+   }
+   // Evaluator membership loop, replicated: every member indexed, asset
+   // match, metadata-bearing; then the decoy-policy call at live depth.
+   {
+      const auto& bbi =
+         db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      std::vector<uint32_t> heights;
+      std::vector<fc::time_point_sec> times;
+      for( const auto& c : smp.ring )
+      {
+         auto itr = bbi.find( c );
+         BOOST_REQUIRE_MESSAGE( itr != bbi.end(),
+            "sampled member is not a live blinded balance" );
+         BOOST_CHECK( itr->asset_id == p.asset_a );
+         BOOST_CHECK_NE( itr->created_block, 0u );
+         heights.push_back( itr->created_block );
+         times.push_back( itr->created_time );
+      }
+      std::string err;
+      BOOST_CHECK_MESSAGE(
+         stealth_check_decoy_policy( heights, times, db.head_block_time(),
+            db.head_block_num(), err, stealth_pool_depth( db, p.asset_a ) ),
+         err );
+   }
+   // An unsatisfiable mix hold fails closed (nothing is that old).
+   BOOST_CHECK_THROW(
+      graphene::chain::stealth_sample_pool_ring(
+         db, p.asset_a, p.commits[3],
+         db.head_block_num() + 1000000 ),
+      fc::exception );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- G2-3 wallet (Step 4a, TDD RED): production op builder.
+// stealth_prove_pool_exchange is declared (stealth_pool_builder.hpp) but
+// NOT defined anywhere: RED = link failure (undefined reference).
+// Seed helper: fund parity_pool[UIA] through the real Task-7 funding path
+// (opt-in + pay_market_fees routing at the 5% share, mirroring
+// g1c_seed_pool) so the builder's parity leg can clear the float rule.
+static void T_seed_pool_uia( database_fixture& f, const account_object& payer,
+                             const asset_object& uia, int64_t need )
+{
+   database& db = f.db;
+   g1c_opt_in_parity( db, uia.get_id() );
+   const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+   auto itr = st.parity_pool.find( uia.get_id() );
+   share_type have = ( itr == st.parity_pool.end() ) ? share_type( 0 ) : itr->second;
+   if( have.value >= need )
+      return;
+   int64_t fee = ( need - have.value ) * 20; // 5% routes to the pool, exact
+   f.issue_uia( payer, uia.amount( fee + 1000 ) );
+   db.adjust_balance( payer.get_id(), uia.amount( -fee ) );
+   db.pay_market_fees( nullptr, uia, uia.amount( fee ), true, uia.amount( fee ) );
+}
+
+// Round trip: fund → seed parity → build via the PRODUCTION builder →
+// validate → push → exact reserve/supply/nullifier deltas.
+BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_roundtrip )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2BLD", 0 );
+   generate_block(); // seal the fixture: later direct modifies (fee cap,
+   // parity seeding) live in the pending session the build/push reads —
+   // a generate_block AFTER them would reset pending and wipe them
+   // (db_block.cpp:423 discipline).
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   // Float-rule floor for the 1-output fee leg, computed through the same
+   // production functions the builder uses (parity level ~0 here, anchor
+   // pinned): seed the UIA parity pool so the parity leg clears.
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core )
+         ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need =
+         stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
+
+   const liquidity_pool_object& pool0 = p.pool( db );
+   const int64_t bal_a0 = pool0.balance_a.value, bal_b0 = pool0.balance_b.value;
+   const size_t nul_before =
+      db.get_index_type<stealth_nullifier_index>().indices().size();
+   const int64_t conf_a0 =
+      p.asset_a( db ).dynamic_asset_data_id( db ).confidential_supply.value;
+   const int64_t conf_b0 =
+      p.asset_b( db ).dynamic_asset_data_id( db ).confidential_supply.value;
+
+   const asset sell( p.each, p.asset_a );
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts(
+      db, p.pool( db ), sell, asset( 1, p.asset_b ) );
+   const int64_t v = probe.account_receives.amount.value;
+   const asset minv( v - 50, p.asset_b );
+
+   auto rk = fc::ecc::private_key::generate();
+   graphene::chain::stealth_pool_swap_opening opening;
+   opening.commitment = p.commits[5];
+   opening.blind = p.blinds[5];
+   opening.value = (uint64_t)p.each;
+   opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+
+   // PRODUCTION builder (undefined pre-Step-4: link RED).
+   stealth_pool_exchange_operation op =
+      graphene::chain::stealth_prove_pool_exchange(
+         db, p.pool( db ), sell, minv, opening );
+   BOOST_CHECK_NO_THROW( op.validate() );
+   // Exact-cover fee (link-4 binding): fee == a − f_maker − pool_pays.
+   pool_exchange_amounts ex = calculate_pool_exchange_amounts(
+      db, p.pool( db ), sell, minv );
+   BOOST_CHECK_EQUAL( op.fee.amount.value,
+      p.each - ex.maker_market_fee.amount.value - ex.pool_pays.amount.value );
+   BOOST_CHECK( op.fee.asset_id == p.asset_a );
+   BOOST_CHECK_EQUAL( op.value_pin.size(), 65u );
+   BOOST_CHECK_EQUAL( op.output.range_proof.size(), 592u );
+
+   trx.operations = { op };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value,
+                      bal_a0 + ex.pool_receives.amount.value );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value,
+                      bal_b0 - ex.pool_pays.amount.value );
+   {
+      const auto& bbi =
+         db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      BOOST_CHECK( bbi.find( op.output.commitment ) != bbi.end() );
+   }
+   BOOST_CHECK_EQUAL(
+      db.get_index_type<stealth_nullifier_index>().indices().size(),
+      nul_before + 2u );
+   BOOST_CHECK_EQUAL(
+      p.asset_a( db ).dynamic_asset_data_id( db ).confidential_supply.value,
+      conf_a0 - p.each - op.fee.amount.value );
+   BOOST_CHECK_EQUAL(
+      p.asset_b( db ).dynamic_asset_data_id( db ).confidential_supply.value,
+      conf_b0 + ex.account_receives.amount.value );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// Floor abort: no parity seeding → the anchor leg prices the 1-output fee
+// above the slippage cover → the builder aborts client-side (nothing moves).
+BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_floor_abort )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2FLOOR", 0 );
+   generate_block();
+   set_expiration( db, trx );
+   const asset sell( p.each, p.asset_a );
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts(
+      db, p.pool( db ), sell, asset( 1, p.asset_b ) );
+   const int64_t v = probe.account_receives.amount.value;
+   auto rk = fc::ecc::private_key::generate();
+   graphene::chain::stealth_pool_swap_opening opening;
+   opening.commitment = p.commits[5];
+   opening.blind = p.blinds[5];
+   opening.value = (uint64_t)p.each;
+   opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+   // Parity pool for A is empty (only CORE was seeded): cover (1 sat-scale)
+   // sits below the anchor-priced floor → abort, never a refused op.
+   BOOST_CHECK_THROW(
+      graphene::chain::stealth_prove_pool_exchange(
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening ),
+      fc::exception );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// Min abort: a floor-passing build with an unmeetable slippage floor
+// aborts inside the shared helper (propagated, never a refused op).
+BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_min_abort )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2MINB", 0 );
+   generate_block(); // seal first (db_block.cpp:423 pending-reset discipline)
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core )
+         ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need =
+         stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
+   const asset sell( p.each, p.asset_a );
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts(
+      db, p.pool( db ), sell, asset( 1, p.asset_b ) );
+   const int64_t v = probe.account_receives.amount.value;
+   auto rk = fc::ecc::private_key::generate();
+   graphene::chain::stealth_pool_swap_opening opening;
+   opening.commitment = p.commits[5];
+   opening.blind = p.blinds[5];
+   opening.value = (uint64_t)p.each;
+   opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+   // The floor leg is cleared here (same pending state): a good floor builds
+   // fine, so the throw below can only be the unmeetable min — this pins the
+   // abort to the min leg, not the floor leg (cf. floor_abort's geometry).
+   BOOST_CHECK_NO_THROW(
+      graphene::chain::stealth_prove_pool_exchange(
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening ) );
+   BOOST_CHECK_THROW(
+      graphene::chain::stealth_prove_pool_exchange(
+         db, p.pool( db ), sell, asset( v + 1000, p.asset_b ), opening ),
+      fc::exception );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// Tamper: one flipped bit of P post-build fails closed at push (pin/ring
+// binding); the untouched copy then still succeeds (refusal was pre-apply,
+// no nullifier was written).
+BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_tamper_fails )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2TAMP", 0 );
+   generate_block(); // seal first (db_block.cpp:423 pending-reset discipline)
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core )
+         ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need =
+         stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
+   const asset sell( p.each, p.asset_a );
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts(
+      db, p.pool( db ), sell, asset( 1, p.asset_b ) );
+   const int64_t v = probe.account_receives.amount.value;
+   auto rk = fc::ecc::private_key::generate();
+   graphene::chain::stealth_pool_swap_opening opening;
+   opening.commitment = p.commits[5];
+   opening.blind = p.blinds[5];
+   opening.value = (uint64_t)p.each;
+   opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+   stealth_pool_exchange_operation honest =
+      graphene::chain::stealth_prove_pool_exchange(
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening );
+   stealth_pool_exchange_operation tampered = honest;
+   tampered.input.pseudo_output.data()[0] ^= 0x01;
+   trx.operations = { tampered };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "tampered-P poolswap was ACCEPTED" );
+   }
+   catch( const fc::exception& e ) { BOOST_CHECK( true ); (void)e; }
+   trx.clear();
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   // Pre-apply refusal: the honest copy still spends the same input.
+   trx.operations = { honest };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   BOOST_CHECK_NE( p.pool( db ).balance_a.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- G2-3 wallet (Step 4b, TDD RED): printer entries + delay coverage.
+// RED = the overloads do not exist (generic fallback prints the raw op
+// name — none of the substrings below match) and wallet_api has no
+// stealth_pool_swap member (compile fail).
+BOOST_AUTO_TEST_CASE( wallet_stealth_printer_entries )
+{ try {
+   // Offline wallet (null remote api): the new stealth entries perform no
+   // remote lookups, so every leg below must print without a node.
+   graphene::wallet::wallet_data wdata;
+   graphene::wallet::wallet_api w( wdata, fc::api<graphene::app::login_api>() );
+   graphene::wallet::detail::wallet_api_impl impl(
+      w, wdata, fc::api<graphene::app::login_api>() );
+   auto print = [&]( const operation& o ) {
+      graphene::chain::operation_history_object hist;
+      std::ostringstream ss;
+      graphene::wallet::detail::operation_printer pr( ss, impl, hist );
+      o.visit( pr );
+      return ss.str();
+   };
+   {
+      stealth_transfer_operation op;
+      op.asset_id = asset_id_type();
+      std::string s = print( operation( op ) );
+      BOOST_CHECK_MESSAGE( s.find( "Stealth transfer" ) != std::string::npos, s );
+   }
+   {
+      turnstile_reproof_operation op;
+      std::string s = print( operation( op ) );
+      BOOST_CHECK_MESSAGE( s.find( "Turnstile" ) != std::string::npos, s );
+   }
+   {
+      stealth_explicit_spend_operation op;
+      std::string s = print( operation( op ) );
+      BOOST_CHECK_MESSAGE( s.find( "Stealth explicit spend" ) != std::string::npos, s );
+   }
+   {
+      stealth_pool_exchange_operation op;
+      op.amount_to_sell = asset( 1000 );
+      op.min_to_receive = asset( 900, asset_id_type( 1 ) );
+      std::string s = print( operation( op ) );
+      BOOST_CHECK_MESSAGE( s.find( "Stealth pool swap" ) != std::string::npos, s );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+// Delay coverage: the op109 wallet path (stealth_pool_swap) validates
+// shape BEFORE the delay choke (malformed ops never sleep) and invokes
+// the choke exactly when broadcast=true (offline the later sign step
+// throws for want of keys — the hook assertions still pin the ordering).
+BOOST_AUTO_TEST_CASE( wallet_stealth_pool_swap_delay )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2DELAY", 0 );
+   generate_block(); // seal first (db_block.cpp:423 pending-reset discipline)
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core )
+         ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need =
+         stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
+   const asset sell( p.each, p.asset_a );
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts(
+      db, p.pool( db ), sell, asset( 1, p.asset_b ) );
+   const int64_t v = probe.account_receives.amount.value;
+   auto rk = fc::ecc::private_key::generate();
+   graphene::chain::stealth_pool_swap_opening opening;
+   opening.commitment = p.commits[5];
+   opening.blind = p.blinds[5];
+   opening.value = (uint64_t)p.each;
+   opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+   stealth_pool_exchange_operation honest =
+      graphene::chain::stealth_prove_pool_exchange(
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening );
+
+   graphene::wallet::wallet_data wdata;
+   graphene::wallet::wallet_api w( wdata, fc::api<graphene::app::login_api>() );
+   w.set_unlocked_for_tests();
+   int calls = 0;
+   uint32_t slept = 0;
+   w.set_blind_sleep_hook( [&]( uint32_t s ) { ++calls; slept = s; } );
+   // Malformed op: validate throws BEFORE the choke (hook silent).
+   {
+      stealth_pool_exchange_operation bad;
+      BOOST_CHECK_THROW( w.stealth_pool_swap( bad, true ), fc::exception );
+      BOOST_CHECK_EQUAL( calls, 0 );
+   }
+   // Honest op, sign-only: no delay (hook silent; sign throws offline).
+   {
+      BOOST_CHECK_THROW( w.stealth_pool_swap( honest, false ), fc::exception );
+      BOOST_CHECK_EQUAL( calls, 0 );
+   }
+   // Honest op, broadcast: choke fires once before the offline sign throw.
+   {
+      BOOST_CHECK_THROW( w.stealth_pool_swap( honest, true ), fc::exception );
+      BOOST_CHECK_EQUAL( calls, 1 );
+      BOOST_CHECK_EQUAL( slept, 3u );
+   }
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- G2-3 wallet (Step 5, TDD RED): malleability suite.
+// Same ring re-targeted at a different pool / amount / counter-asset /
+// output commitment must fail (all four refuse; reserves pinned). These
+// run against PRODUCTION builder output, so they pin the builder's
+// bindings end to end. RED = suite fails (builder output allegedly
+// malleable); GREEN = all four refuse.
+// Shared funded context: pool + seeded UIA parity fund + probe payout.
+struct g2_wallet_ctx
+{
+   g2_pool pool;
+   int64_t v_out = 0;
+};
+static g2_wallet_ctx T_wallet_funded_pool( database_fixture& f,
+      const account_object& funder,
+      const fc::ecc::private_key& funder_key, const std::string& tag )
+{
+   database& db = f.db;
+   signed_transaction& trx = f.trx;
+   g2_wallet_ctx c;
+   c.pool = g2_fund_pool( f, funder, funder_key, tag, 0 );
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   f.generate_block(); // seal first (db_block.cpp:423 pending-reset discipline)
+   {
+      share_type parity_core =
+         db.current_fee_schedule().calculate_fee(
+            operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core )
+         ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need =
+         stealth_gap_to_asset( db, c.pool.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( f, funder, c.pool.asset_a( db ), need.value );
+   }
+   set_expiration( db, trx );
+   const asset sell( c.pool.each, c.pool.asset_a );
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts(
+      db, c.pool.pool( db ), sell, asset( 1, c.pool.asset_b ) );
+   c.v_out = probe.account_receives.amount.value;
+   return c;
+}
+
+static stealth_pool_exchange_operation T_wallet_honest_swap(
+      database& db, const g2_wallet_ctx& c, size_t input_idx,
+      const std::string& tag, int64_t min_discount )
+{
+   auto rk = fc::ecc::private_key::generate();
+   graphene::chain::stealth_pool_swap_opening opening;
+   opening.commitment = c.pool.commits[input_idx];
+   opening.blind = c.pool.blinds[input_idx];
+   opening.value = (uint64_t)c.pool.each;
+   opening.output_owner =
+      authority( 1, public_key_type( rk.get_public_key() ), 1 );
+   return graphene::chain::stealth_prove_pool_exchange(
+      db, c.pool.pool( db ),
+      asset( c.pool.each, c.pool.asset_a ),
+      asset( c.v_out - min_discount, c.pool.asset_b ),
+      opening );
+}
+
+BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_pool )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 800000000 ) );
+   generate_block();
+   // Second pool FIRST (pending txs — sealed by the helper's blocks and
+   // surviving them; the helper's parity seeding is a direct modify and
+   // must come last, since any later generate_block would reset pending
+   // and wipe it per db_block.cpp:423).
+   const price cer2 = price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) );
+   const asset_id_type sid2 = create_user_issued_asset(
+      "G2RPS2", dan, charge_market_fee, cer2, 2, 0 ).get_id();
+   g2_wallet_ctx c = T_wallet_funded_pool( *this, dan, dan_private_key, "G2RP" );
+   const liquidity_pool_id_type pool2_id = create_liquidity_pool(
+      dan.get_id(), c.pool.asset_a, c.pool.asset_b, sid2, 0, 0 ).get_id();
+   issue_uia( dan, asset( 3000000, c.pool.asset_a ) );
+   issue_uia( dan, asset( 3000000, c.pool.asset_b ) );
+   deposit_to_liquidity_pool( dan.get_id(), pool2_id,
+      asset( 1000000, c.pool.asset_a ), asset( 1000000, c.pool.asset_b ) );
+   set_expiration( db, trx );
+   stealth_pool_exchange_operation op =
+      T_wallet_honest_swap( db, c, 5, "g2-rp-sp", 50 );
+   op.pool = pool2_id; // re-target at the sibling pool (pin binds pool1)
+   trx.operations = { op };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "pool-retargeted swap was ACCEPTED" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE(
+         e.to_detail_string().find( "value-pin" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_b.value, 1000000 );
+   BOOST_CHECK_EQUAL( pool2_id( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( pool2_id( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_amount )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_wallet_ctx c = T_wallet_funded_pool( *this, dan, dan_private_key, "G2RA" );
+   stealth_pool_exchange_operation op =
+      T_wallet_honest_swap( db, c, 5, "g2-ra-sp", 50 );
+   // Claim one unit more than proven (pin binds the true 1000).
+   op.amount_to_sell.amount = c.pool.each + 1;
+   trx.operations = { op };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "amount-retargeted swap was ACCEPTED" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE(
+         e.to_detail_string().find( "value-pin" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_counterasset )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   // Third asset FIRST (pending tx; the helper's seeding must stay last —
+   // any later generate_block would wipe it per db_block.cpp:423).
+   const price cer3 = price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) );
+   const asset_id_type aid_c = create_user_issued_asset(
+      "G2RCC", dan, charge_market_fee, cer3, 2, 0 ).get_id();
+   g2_wallet_ctx c = T_wallet_funded_pool( *this, dan, dan_private_key, "G2RC" );
+   set_expiration( db, trx );
+   stealth_pool_exchange_operation op =
+      T_wallet_honest_swap( db, c, 5, "g2-rc-sp", 50 );
+   // Pay out to a third asset (pair gate binds the pool's B leg).
+   op.min_to_receive = asset( op.min_to_receive.amount.value, aid_c );
+   trx.operations = { op };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "counter-asset-retargeted swap was ACCEPTED" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE(
+         e.to_detail_string().find( "Asset type mismatch" ) != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_output )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_wallet_ctx c = T_wallet_funded_pool( *this, dan, dan_private_key, "G2RO" );
+   stealth_pool_exchange_operation op =
+      T_wallet_honest_swap( db, c, 5, "g2-ro-sp", 50 );
+   // Re-target the output commitment (ring message binds the outputs).
+   op.output.commitment.data()[0] ^= 0x01;
+   trx.operations = { op };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "output-retargeted swap was ACCEPTED" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE(
+         e.to_detail_string().find( "Ring signature does not verify" )
+            != std::string::npos,
+         e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( c.pool.pool( db ).balance_b.value, 1000000 );
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 

@@ -356,6 +356,61 @@ std::string operation_printer::operator()(const parity_review_operation& op) con
    return "";
 }
 
+// G2-3 stealth entries (remote-free by design: raw ids + raw blind-hidden
+// counts/amounts, so offline wallets render them; see the header comment).
+std::string operation_printer::operator()(const stealth_transfer_operation& op) const
+{
+   out << "Stealth transfer " << op.inputs.size()
+       << " inputs -> " << op.outputs.size()
+       << " outputs of " << std::string( static_cast<object_id_type>( op.asset_id ) )
+       << " (blind amounts)"
+       << "   (Fee: " << op.fee.amount.value
+       << " " << std::string( static_cast<object_id_type>( op.fee.asset_id ) ) << ")";
+   print_result();
+   return "";
+}
+
+std::string operation_printer::operator()(const turnstile_reproof_operation& op) const
+{
+   out << "Turnstile reproof of " << std::string( static_cast<object_id_type>( op.asset_id ) )
+       << " to V" << (unsigned)op.new_proof_version
+       << "   (Fee: " << op.fee.amount.value
+       << " " << std::string( static_cast<object_id_type>( op.fee.asset_id ) ) << ")";
+   print_result();
+   return "";
+}
+
+std::string operation_printer::operator()(const stealth_explicit_spend_operation& op) const
+{
+   out << "Stealth explicit spend " << op.inputs.size() << " inputs";
+   if( op.outputs.empty() )
+      out << " -> transparent exit " << op.amount.amount.value
+          << " " << std::string( static_cast<object_id_type>( op.amount.asset_id ) )
+          << " to " << std::string( static_cast<object_id_type>( op.to ) );
+   else
+      out << " -> " << op.outputs.size() << " blind outputs";
+   out << " of " << std::string( static_cast<object_id_type>( op.asset_id ) )
+       << "   (Fee: " << op.fee.amount.value
+       << " " << std::string( static_cast<object_id_type>( op.fee.asset_id ) ) << ")";
+   print_result();
+   return "";
+}
+
+std::string operation_printer::operator()(const stealth_pool_exchange_operation& op) const
+{
+   out << "Stealth pool swap " << op.amount_to_sell.amount.value
+       << " " << std::string( static_cast<object_id_type>( op.amount_to_sell.asset_id ) )
+       << " for at least " << op.min_to_receive.amount.value
+       << " " << std::string( static_cast<object_id_type>( op.min_to_receive.asset_id ) )
+       << " via " << std::string( static_cast<object_id_type>( op.pool ) )
+       << " (ring " << op.input.ring.size()
+       << ", V" << (unsigned)op.proof_version << ")"
+       << "   (Fee: " << op.fee.amount.value
+       << " " << std::string( static_cast<object_id_type>( op.fee.asset_id ) ) << ")";
+   print_result();
+   return "";
+}
+
 std::string operation_printer::operator()(const htlc_create_operation& op) const
 {
    static htlc_hash_to_string_visitor vtor;

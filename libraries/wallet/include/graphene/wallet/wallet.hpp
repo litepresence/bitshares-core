@@ -1043,13 +1043,31 @@ class wallet_api
        * @param transparent_opt_out one-tap transparent path (compliance,
        * exchange deposits)
        */
-      signed_transaction transfer_default( const string& from,
-                                           const string& to_key_or_account,
-                                           const string& amount,
-                                           const string& asset_symbol,
-                                           const string& memo,
-                                           bool transparent_opt_out,
-                                           bool broadcast = false )const;
+       signed_transaction transfer_default( const string& from,
+                                            const string& to_key_or_account,
+                                            const string& amount,
+                                            const string& asset_symbol,
+                                            const string& memo,
+                                            bool transparent_opt_out,
+                                            bool broadcast = false )const;
+
+       /**
+        * Submit a prebuilt op109 stealth pool swap (G2, BSIP-2).
+        *
+        * The op itself is built (proven) by the caller's tooling — e.g. the
+        * chain-side stealth_prove_pool_exchange builder, which enforces the
+        * exact-cover fee — because proving needs the spent output's opening
+        * (wallet secret state the node never sees). This method is the
+        * broadcast path: it fail-closed validates the op shape FIRST (a
+        * malformed op throws before any timing defense), routes through the
+        * Task-6 blind-broadcast delay choke (maybe_delay_blind_broadcast —
+        * the same choke every legacy blind-sending leg calls, now covering
+        * op109), then signs (+ broadcasts when broadcast=true; fee_payer is
+        * TEMP so no key is required for the op itself).
+        */
+       signed_transaction stealth_pool_swap(
+          const stealth_pool_exchange_operation& op,
+          bool broadcast = false )const;
 
       /** Place a limit order attempting to sell one asset for another.
        *
@@ -2148,6 +2166,7 @@ FC_API( graphene::wallet::wallet_api,
         (set_blind_by_default)
         (set_blind_defaults)
         (transfer_default)
+        (stealth_pool_swap)
         (blind_history)
         (receive_blind_transfer)
         (get_order_book)

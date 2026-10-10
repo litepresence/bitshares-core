@@ -1412,7 +1412,24 @@ class database_api
        * Empty pre-activation (or when no asset holds blind balances).
        * @return map from asset id to fresh-decoy count
        */
-      flat_map<asset_id_type, uint32_t> get_stealth_effective_set()const;
+       flat_map<asset_id_type, uint32_t> get_stealth_effective_set()const;
+
+       /**
+        * @brief enumerate stealth outputs of one asset for decoy selection
+        * (G2 wallets, BSIP-2)
+        *
+        * Index-backed enumeration over blinded_balance_index (no chain
+        * scan): every entry with asset_id match carrying post-fork
+        * creation metadata (created_block != 0 — grandfathered outputs are
+        * never decoy-eligible). With unspent_only=true (the sampler's view)
+        * entries flagged spent are excluded; false includes them (they stay
+        * consensus-decoy-eligible under nullifier semantics, but wallets
+        * should prefer live handles). Returns full objects (commitment for
+        * the ring, created_block/created_time for the decoy-policy check).
+        * Read-only; empty when the asset holds no (matching) blinds.
+        */
+       vector<blinded_balance_object> get_stealth_outputs(
+          asset_id_type asset_id, bool unspent_only )const;
 
       /////////////////
       // Withdrawals //
@@ -1684,9 +1701,10 @@ FC_API(graphene::app::database_api,
    // Proposed transactions
    (get_proposed_transactions)
 
-   // Blinded balances
-   (get_blinded_balances)
-   (get_stealth_effective_set)
+    // Blinded balances
+    (get_blinded_balances)
+    (get_stealth_effective_set)
+    (get_stealth_outputs)
 
    // Withdrawals
    (get_withdraw_permissions_by_giver)

@@ -59,8 +59,10 @@ add_library( graphene_chain
              worker_evaluator.cpp
              htlc_evaluator.cpp
              confidential_evaluator.cpp
-             stealth_evaluator.cpp
-             stealth_proof.cpp
+              stealth_evaluator.cpp
+              stealth_proof.cpp
+              stealth_prover.cpp
+              stealth_pool_builder.cpp
              special_authority_evaluation.cpp
              custom_authority_evaluator.cpp
              buyback.cpp

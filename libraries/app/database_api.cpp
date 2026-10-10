@@ -2924,6 +2924,32 @@ flat_map<asset_id_type, uint32_t> database_api_impl::get_stealth_effective_set()
    return idx.begin()->unspent_blind_count;
 }
 
+vector<blinded_balance_object> database_api::get_stealth_outputs(
+   asset_id_type asset_id, bool unspent_only )const
+{
+   return my->get_stealth_outputs( asset_id, unspent_only );
+}
+
+vector<blinded_balance_object> database_api_impl::get_stealth_outputs(
+   asset_id_type asset_id, bool unspent_only )const
+{
+   // Index-backed enumeration (no chain scan): asset match + post-fork
+   // creation metadata; spent excluded on the unspent_only view. Read-only.
+   vector<blinded_balance_object> result;
+   const auto& idx = _db.get_index_type<blinded_balance_index>().indices();
+   for( const auto& o : idx )
+   {
+      if( o.asset_id != asset_id )
+         continue;
+      if( o.created_block == 0 )
+         continue;
+      if( unspent_only && o.spent )
+         continue;
+      result.push_back( o );
+   }
+   return result;
+}
+
 //////////////////////////////////////////////////////////////////////
 //                                                                  //
 //  Withdrawals                                                     //

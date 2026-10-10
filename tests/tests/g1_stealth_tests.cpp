@@ -7969,4 +7969,56 @@ BOOST_AUTO_TEST_CASE( r15_new_output_owner_divergence_pins_migrated_owner )
    BOOST_CHECK( ntr->owner != p.owners[s] );
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---- op108 wire validation (Task 1) -------------------------------
+// Pure wire-layer test: validate() never touches the database, so no
+// fixture setup is needed. Use hardcoded account_ids — validate() only
+// checks non-default `to`, never resolves accounts.
+BOOST_AUTO_TEST_CASE( op108_validate_rejects_bad_shapes )
+{
+   stealth_explicit_spend_operation o;
+   o.fee      = asset( 10*GRAPHENE_BLOCKCHAIN_PRECISION, asset_id_type() );
+   o.asset_id = asset_id_type();           // core
+   o.to       = account_id_type( 1 );      // non-default; not resolved in validate()
+   o.amount   = asset( 1000, asset_id_type() );   // exit leg: amount is mandatory
+
+   stealth_spend_input in;
+   in.commitment    = T_commitment( T_commit( T_bn( T_blind_secret( "op108a" ) ), 1000 ) );
+   in.owner         = authority( 1, account_id_type( 2 ), 1 );
+   in.key_image_v1  = in.commitment;
+   in.key_image_v2  = in.commitment;
+   in.recovery_proof = stealth_recovery_proof( std::vector<char>( 163, 0 ) );
+   o.inputs.push_back( in );
+   o.outputs.clear();          // blind -> transparent leg
+
+   // baseline: the shape itself is legal, so any throw below is the specific gate
+   BOOST_REQUIRE_NO_THROW( o.validate() );
+
+   o.amount.amount = 0;                    // exit with no value fails
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );
+   o.amount.amount = 1000;
+
+   o.amount.asset_id = asset_id_type( 1 );  // exit amount asset mismatch (core is 0)
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );
+   o.amount.asset_id = asset_id_type();
+
+   o.fee.amount = -1;
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );
+   o.fee.amount = 10*GRAPHENE_BLOCKCHAIN_PRECISION;
+
+   o.fee.asset_id = asset_id_type( 1 );   // mismatch vs asset_id (core is 0)
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );
+   o.fee.asset_id = asset_id_type();
+
+   o.inputs[0].recovery_proof = stealth_recovery_proof( std::vector<char>( 162, 0 ) );
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );   // proof != 163B
+   o.inputs[0].recovery_proof = stealth_recovery_proof( std::vector<char>( 163, 0 ) );
+
+   o.proof_version = 3;                   // unknown version fails closed
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );
+   o.proof_version = GRAPHENE_STEALTH_PROOF_V2;
+
+   o.inputs.clear();
+   BOOST_REQUIRE_THROW( o.validate(), fc::assert_exception );   // >= 1 input
+}
+
 BOOST_AUTO_TEST_SUITE_END()

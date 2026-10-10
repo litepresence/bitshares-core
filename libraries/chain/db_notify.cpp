@@ -512,6 +512,14 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // voter
    }
+   void operator()( const stealth_explicit_spend_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // GRAPHENE_TEMP_ACCOUNT
+      for( const auto& in : op.inputs )
+         add_authority_accounts( _impacted, in.owner );
+      for( const auto& out : op.outputs )
+         add_authority_accounts( _impacted, out.owner );
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

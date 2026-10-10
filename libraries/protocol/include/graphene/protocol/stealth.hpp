@@ -511,6 +511,62 @@ struct parity_review_operation : public base_operation
    void            validate()const;
 };
 
+/**
+ * @brief One input to a stealth explicit spend.
+ *
+ * The two key images are the per-proof-version images of this commitment's
+ * opening: I_v = b*J1_v + v*J2_v. `recovery_proof` is NOT optional — it is the
+ * 3-equation Sigma representation proof binding (b,v) to commitment, I1 and
+ * I2 simultaneously (stealth_verify_recovery_proof). Without it the evaluator
+ * cannot distinguish the true images from two fabricated points and the
+ * operation is a double spend; see design spec §3.2a.
+ */
+struct stealth_spend_input
+{
+   commitment_type       commitment;
+   authority             owner;
+   commitment_type       key_image_v1;  ///< bound by recovery_proof, then nullifier-checked
+   commitment_type       key_image_v2;
+   stealth_recovery_proof recovery_proof;
+};
+
+/**
+ * @brief Explicitly spend stealth blind balances (BSIP-2 §4).
+ *
+ * One operation, two legs. `outputs` non-empty => blind->blind, mirroring
+ * blind_transfer (op40). `outputs` empty => blind->transparent exit, mirroring
+ * transfer_from_blind (op41). Appended at tag 108; ops 39/40/41 keep their
+ * wire format so mainnet replay is unaffected.
+ */
+struct stealth_explicit_spend_operation : public base_operation
+{
+   struct fee_params_t {
+      uint64_t fee              = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+      uint32_t price_per_output = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
+   };
+
+   asset                          fee;
+   asset_id_type                  asset_id;   ///< visible asset type
+   vector<stealth_spend_input>    inputs;     ///< 1..8, each with a recovery proof
+   vector<stealth_blind_output>   outputs;    ///< non-empty => blind->blind leg
+   asset                          amount;     ///< PUBLIC; exit leg only (outputs empty)
+   account_id_type                to;         ///< exit leg only (outputs empty)
+   uint8_t                        proof_version = GRAPHENE_STEALTH_PROOF_V2;
+   blind_factor_type              excess;     ///< sum(in blinds) - sum(out blinds), mod n
+   extensions_type                extensions; ///< appended-last; plain extensions_type
+                                              ///< (base.hpp:156), NOT a custom static_variant
+
+   account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
+   void            validate()const;
+   share_type      calculate_fee( const fee_params_t& k )const;
+
+   void            get_required_authorities( vector<authority>& a )const
+   {
+      for( const auto& in : inputs )
+         a.push_back( in.owner );
+   }
+};
+
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::stealth_ring_input,
@@ -529,16 +585,24 @@ FC_REFLECT( graphene::protocol::stealth_recovery_proof, (proof_bytes) )
 FC_REFLECT( graphene::protocol::turnstile_recovery_v2_extension, (key_image_v1)(key_image_v2)(recovery_proof) )
 FC_REFLECT( graphene::protocol::parity_review_operation,
             (fee)(voter)(kind)(note)(extensions) )
+FC_REFLECT( graphene::protocol::stealth_spend_input,
+            (commitment)(owner)(key_image_v1)(key_image_v2)(recovery_proof) )
+FC_REFLECT( graphene::protocol::stealth_explicit_spend_operation,
+            (fee)(asset_id)(inputs)(outputs)(amount)(to)(proof_version)(excess)(extensions) )
+FC_REFLECT( graphene::protocol::stealth_explicit_spend_operation::fee_params_t,
+            (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation::fee_params_t, (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation::fee_params_t, (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::parity_review_operation::fee_params_t, (fee) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation )

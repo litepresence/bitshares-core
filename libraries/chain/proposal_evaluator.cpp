@@ -505,6 +505,9 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::parity_review_operation&) const {
       FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
    }
+   void operator()(const graphene::chain::stealth_explicit_spend_operation&) const {
+      FC_ASSERT( HARDFORK_STEALTH_PASSED(block_time), "Not allowed until the stealth hardfork" );
+   }
 
    // loop and self visit in proposals
    void operator()(const graphene::chain::proposal_create_operation &v) const {

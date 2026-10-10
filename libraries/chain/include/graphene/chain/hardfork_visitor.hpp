@@ -98,7 +98,8 @@ struct hardfork_visitor {
    using stealth_ops = fc::typelist::list< protocol::stealth_transfer_operation,
                                            protocol::freeze_blind_operation,
                                            protocol::turnstile_reproof_operation,
-                                           protocol::parity_review_operation >;
+                                           protocol::parity_review_operation,
+                                           protocol::stealth_explicit_spend_operation >;
 
    fc::time_point_sec now;
 

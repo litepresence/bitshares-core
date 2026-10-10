@@ -163,13 +163,65 @@ void parity_review_operation::validate()const
    FC_ASSERT( note.size() <= 256, "note too long" );
 }
 
+void stealth_explicit_spend_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0 );
+   FC_ASSERT( fee.asset_id == asset_id, "fee asset must match asset_id" );
+   FC_ASSERT( !inputs.empty(), "explicit spend needs at least one input" );
+   FC_ASSERT( inputs.size() <= 8, "explicit spend input count out of bounds" );
+   // No !outputs.empty() — the exit leg has zero outputs by design.
+   // The ring pins the same bound (stealth.cpp:52); consensus law
+   // bounds state per op.
+   FC_ASSERT( outputs.size() <= 8, "explicit spend output count out of bounds" );
+   FC_ASSERT( proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
+              proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              "unknown proof version" );
+   for( const auto& in : inputs )
+   {
+      // Proof size is enforced by the verifier too (stealth_proof.cpp:655);
+      // gate here so malformed input gets a clean message at validate().
+      FC_ASSERT( in.recovery_proof.proof_bytes.size() == 163,
+                 "Explicit spend recovery proof must be 163 bytes" );
+      FC_ASSERT( !in.owner.is_impossible(), "explicit spend input owner is impossible" );
+      // commitment_type is zero_initialized_array<unsigned char,33> and has
+      // NO is_negative() (that lives on fc::bigint, not on the array).
+      // Point validity is enforced later by the evaluator's point conversion
+      // and the recovery-proof verification — no wire-layer check needed.
+   }
+   for( const auto& out : outputs )
+   {
+      FC_ASSERT( !out.range_proof.empty(), "range proof required" );
+      FC_ASSERT( out.range_proof.size() <= 8192, "range proof too large" );
+      FC_ASSERT( !out.owner.is_impossible(), "output owner is impossible" );
+   }
+   // Transparent exit (outputs empty) requires a destination AND a positive
+   // public amount; the amount is necessarily revealed — adjust_balance writes
+   // a public balance. Mirrors op41's validate() (confidential.cpp:72, `amount.amount > 0`).
+   FC_ASSERT( !( outputs.empty() && to == account_id_type() ),
+              "transparent exit requires a destination account" );
+   if( outputs.empty() )
+   {
+      FC_ASSERT( amount.amount > 0, "transparent exit requires a positive amount" );
+      FC_ASSERT( amount.asset_id == asset_id, "exit amount asset must match asset_id" );
+   }
+   // Blind->blind and blind->transparent are mutually exclusive by
+   // construction; `to` and `amount` are ignored when outputs is non-empty.
+}
+
+share_type stealth_explicit_spend_operation::calculate_fee( const fee_params_t& k )const
+{
+   return k.fee + k.price_per_output * (uint64_t)outputs.size();
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_transfer_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::freeze_blind_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::turnstile_reproof_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::stealth_explicit_spend_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::parity_review_operation )

@@ -2015,6 +2015,13 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
       _F = (int64_t)F128;
    }
 
+    // Link 4 (design §3): the kernel pins v_out = a − F; the helper pins
+    // account_receives = pool_pays − f_taker. Nothing equates them unless we do.
+    // 128-bit, FC_ASSERT (never GRAPHENE_ASSERT).
+    fc::uint128_t link4_lhs( (uint64_t)( o.amount_to_sell.amount.value - _F ) ); // F ≤ amount already asserted
+    fc::uint128_t link4_rhs( (uint64_t)( _amounts.pool_pays.amount.value - _amounts.taker_market_fee.amount.value ) );
+    FC_ASSERT( link4_lhs == link4_rhs, "Fee must exactly cover slippage: amount − F == pool_pays − taker_fee" );
+
    // (10) Ring signature + alt leg over G2RM (binds version, input asset,
    // pool, claimed value, slippage floor, image, ring, pseudo, outputs, F).
    const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )

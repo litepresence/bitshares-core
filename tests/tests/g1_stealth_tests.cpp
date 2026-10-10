@@ -9727,4 +9727,199 @@ BOOST_AUTO_TEST_CASE( poolswap_pre_fork_refused )
    }
 } FC_CAPTURE_AND_RETHROW() }
 
+// Link-4 adversarial builder (design §3 link 4; proof Lemma 4): mirrors
+// g2_build_swap exactly, except the tx fee is FORCED to fee_override instead
+// of the computed slippage cover (f_tx = a − f_maker − pool_pays). F' and v'
+// are rebuilt consistently (output commitment + range proof for v' = a − F',
+// ring messages binding F', excess binding F'), so every pre-link-4 guard —
+// pin, F-bounds, ring, BP+, kernel — still verifies. Only the equality
+// a − F == pool_pays − f_taker is broken. Without the link-4 assert the push
+// is ACCEPTED (invisible mint on understatement); with it, it refuses.
+static g2_swap g2_build_swap_with_fee( database& db, const g2_pool& p, size_t s,
+      uint8_t version, const std::string& tag, int64_t min_discount,
+      int64_t fee_override )
+{
+   const uint8_t alt_v = ( version == GRAPHENE_STEALTH_PROOF_V1 )
+                         ? GRAPHENE_STEALTH_PROOF_V2
+                         : GRAPHENE_STEALTH_PROOF_V1;
+   const liquidity_pool_object& pool = p.pool( db );
+   const asset sell( p.each, p.asset_a );
+   // Probe with a dust floor to learn the min-independent payout, then build
+   // the real floor below it.
+   pool_exchange_amounts probe = calculate_pool_exchange_amounts( db, pool,
+      sell, asset( 1, p.asset_b ) );
+   const int64_t v = probe.account_receives.amount.value;
+   const int64_t minv = v - min_discount;
+   BOOST_REQUIRE( minv > 0 );
+   pool_exchange_amounts ex = calculate_pool_exchange_amounts( db, pool,
+      sell, asset( minv, p.asset_b ) );
+   BOOST_REQUIRE_EQUAL( ex.account_receives.amount.value, v ); // min is a floor only
+   const int64_t f_maker = ex.maker_market_fee.amount.value;
+   const int64_t f_taker = ex.taker_market_fee.amount.value;
+   const int64_t pool_pays = ex.pool_pays.amount.value;
+   const int64_t f_tx = p.each - f_maker - pool_pays;
+   BOOST_REQUIRE_MESSAGE( f_tx >= 0, "slippage exceeds input (pool too thin for fees)" );
+   BOOST_REQUIRE_MESSAGE( fee_override != f_tx,
+      "fee override must differ from the honest slippage cover" );
+   BOOST_REQUIRE_MESSAGE( fee_override >= 0, "fee override must be non-negative" );
+   const int64_t F = f_maker + f_taker + fee_override;
+   BOOST_REQUIRE( F >= 0 );
+   BOOST_REQUIRE( F <= p.each ); // F-bounds pass: only link 4 may fire
+   const int64_t v_out = p.each - F;
+   BOOST_REQUIRE( v_out > 0 );
+   BOOST_REQUIRE_MESSAGE( v_out != v,
+      "wrong-fee output must diverge from the helper payout (else no gap)" );
+
+   BIGNUM* bs = T_bn( p.blinds[s] );
+   BIGNUM* bprime = T_bn( T_blind_secret( tag + "-pseudo" ) );
+   auto Bout = T_blind_secret( tag + "-o" );
+   fc::ecc::commitment_type Cout;
+   {
+      BIGNUM* bo = T_bn( Bout );
+      auto Cv = T_commit( bo, (uint64_t)v_out );
+      BN_free( bo );
+      std::copy( Cv.begin(), Cv.end(), Cout.begin() );
+   }
+   stealth_blind_output sout;
+   sout.commitment = Cout;
+   sout.range_proof = T_bp_prove( Cout, Bout, (uint64_t)v_out );
+   BOOST_REQUIRE_EQUAL( sout.range_proof.size(), 592u );
+   auto rk = fc::ecc::private_key::generate();
+   sout.owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
+
+   fc::ecc::commitment_type P;
+   {
+      auto Pv = T_commit( bprime, (uint64_t)p.each );
+      std::copy( Pv.begin(), Pv.end(), P.begin() );
+   }
+   std::vector<char> T33;
+   std::string s32;
+   T_prove_value_pin( P, p.each, p.pool.instance.value, bprime, T33, s32 );
+   BOOST_REQUIRE_EQUAL( T33.size(), 33u );
+   BOOST_REQUIRE_EQUAL( s32.size(), 32u );
+
+   std::vector<std::vector<unsigned char>> Q;
+   for( const auto& c : p.commits )
+      Q.push_back( std::vector<unsigned char>( c.begin(), c.end() ) );
+   auto dry = T_dual_dry_run( version, alt_v, Q, s, bs, (uint64_t)p.each, bprime );
+   {
+      auto Pv = T_commit( bprime, (uint64_t)p.each );
+      BOOST_REQUIRE( dry.pseudo == Pv );
+   }
+   std::vector<char> img_c( dry.img_main.begin(), dry.img_main.end() );
+   std::vector<char> img_a( dry.img_alt.begin(), dry.img_alt.end() );
+   std::vector<fc::ecc::commitment_type> out_cs = { Cout };
+   fc::ecc::commitment_type Pc = T_commitment( dry.pseudo );
+   fc::sha256 m = stealth_pool_message( version, p.asset_a, p.pool.instance.value,
+      p.each, minv, img_c, p.commits, Pc, out_cs, F );
+   fc::sha256 ma = stealth_pool_message( alt_v, p.asset_a, p.pool.instance.value,
+      p.each, minv, img_a, p.commits, Pc, out_cs, F );
+   std::string ms( (const char*)m.data(), 32 );
+   std::string msa( (const char*)ma.data(), 32 );
+   stealth_ring_input rin = T_make_dual_ring_input( version, alt_v, Q, s, bs,
+      (uint64_t)p.each, bprime, ms, msa );
+
+   g2_swap sw;
+   sw.op.fee = asset( fee_override, p.asset_a );
+   sw.op.pool = p.pool;
+   sw.op.amount_to_sell = sell;
+   sw.op.min_to_receive = asset( minv, p.asset_b );
+   sw.op.proof_version = version;
+   {
+      BIGNUM* e = BN_new();
+      BIGNUM* bo = T_bn( Bout );
+      BN_copy( e, bprime );
+      BN_mod_sub( e, e, bo, T_order(), T_ctx() );
+      unsigned char eb[32]; BN_bn2binpad( e, eb, 32 );
+      std::copy( eb, eb + 32, (char*)sw.op.excess.data() );
+      BN_free( e ); BN_free( bo );
+   }
+   sw.op.input = rin;
+   sw.op.output = sout;
+   sw.op.value_pin.assign( T33.begin(), T33.end() );
+   sw.op.value_pin.insert( sw.op.value_pin.end(), s32.begin(), s32.end() );
+   BOOST_REQUIRE_EQUAL( sw.op.value_pin.size(), 65u );
+   sw.expect = ex;
+   sw.f_tx = fee_override;
+   sw.F = F;
+   sw.v_out = v_out;
+   BN_free( bs ); BN_free( bprime );
+   return sw;
+}
+
+// Link-4 equality (design §3 link 4; proof Lemma 4): the kernel pins
+// v_out = a − F while the helper pins account_receives = pool_pays − f_taker;
+// without an explicit equality assert an understated fee mints invisible
+// counter-asset value (v_out > account_receives, pool debited only the helper
+// leg) and an overstated fee burns. Both MUST refuse at the link-4 assert —
+// every earlier guard still verifies by construction (F-bounds and the helper
+// min-check both pass for these parameters).
+BOOST_AUTO_TEST_CASE( poolswap_wrong_fee_fails )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2L4", 0 );
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   // Understated fee (0): below the honest slippage cover, so v_out exceeds
+   // the helper payout and the mint gap is exercised.
+   {
+      const liquidity_pool_object& pool = p.pool( db );
+      pool_exchange_amounts ex = calculate_pool_exchange_amounts( db, pool,
+         asset( p.each, p.asset_a ), asset( 1, p.asset_b ) );
+      const int64_t f_tx_honest =
+         p.each - ex.maker_market_fee.amount.value - ex.pool_pays.amount.value;
+      BOOST_REQUIRE_MESSAGE( f_tx_honest > 0,
+         "honest cover must be positive (else 0 is not an understatement)" );
+      g2_swap sw = g2_build_swap_with_fee( db, p, 5, GRAPHENE_STEALTH_PROOF_V2,
+         "G2L4-under-sp", 50, 0 );
+      trx.operations = { sw.op };
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "understated-fee poolswap was ACCEPTED (link-4 gap open)" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Fee must exactly cover slippage" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // Overstated fee (+10 over cover; the helper min-check still passes since
+   // pool math is min-independent, so only link 4 can refuse). Re-probed on
+   // current state so the variant is self-consistent either way.
+   {
+      const liquidity_pool_object& pool = p.pool( db );
+      pool_exchange_amounts ex = calculate_pool_exchange_amounts( db, pool,
+         asset( p.each, p.asset_a ), asset( 1, p.asset_b ) );
+      const int64_t f_tx_honest =
+         p.each - ex.maker_market_fee.amount.value - ex.pool_pays.amount.value;
+      BOOST_REQUIRE_MESSAGE( f_tx_honest >= 0, "slippage exceeds input" );
+      g2_swap sw = g2_build_swap_with_fee( db, p, 6, GRAPHENE_STEALTH_PROOF_V2,
+         "G2L4-over-sp", 50, f_tx_honest + 10 );
+      trx.operations = { sw.op };
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "overstated-fee poolswap was ACCEPTED (link-4 gap open)" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Fee must exactly cover slippage" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // Nothing moved: both refusals leave pool reserves and blind supply intact.
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

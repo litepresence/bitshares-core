@@ -401,6 +401,12 @@ uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend
 /// transfer for equal ring sizes (design §7). Called from do_evaluate
 /// (gate) and do_apply (accounting) by the G2 evaluator (G2-2).
 uint32_t stealth_work_for_pool_exchange( uint32_t ring_size );
+/// Work-model units consumed by one op106 turnstile migration (Task 4): one
+/// BP+ output + conservation kernel + recovery-proof kernel, always charged
+/// (the R15 extension is mandatory on every path). Pure, constant. Called
+/// from do_evaluate (gate) and do_apply (accounting) — one definition so the
+/// two cannot drift.
+uint32_t stealth_work_for_turnstile();
 /// Nullifier identity: sha256 over the 33-byte key image (single definition
 /// in stealth_evaluator.cpp; moved out of the anonymous namespace in Task 3
 /// so the test suite links the exact production identity — never duplicated).

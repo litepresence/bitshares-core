@@ -388,6 +388,18 @@ uint32_t stealth_work_for_pool_exchange( uint32_t ring_size )
    return (uint32_t)w;
 }
 
+uint32_t stealth_work_for_turnstile()
+{
+   // Task 4 (nullifier migration): one BP+ output + the conservation kernel
+   // + the recovery-proof kernel, always. The recovery unit was conditional
+   // on !o.extensions.empty() while the extension was optional; with the
+   // turnstile proving on every path it is unconditionally charged. Fixed
+   // shape (1-in/1-out), so the sum is constant — no saturation logic needed.
+   return stealth_work_for_range_proofs( 1 )
+        + GRAPHENE_STEALTH_WORK_US_PER_KERNEL
+        + GRAPHENE_STEALTH_WORK_US_PER_KERNEL; // R15 recovery proof (mandatory)
+}
+
 uint32_t stealth_blind_work_this_block( const database& db )
 {
    const auto* s = find_stealth_status( db );
@@ -854,15 +866,12 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
     // verifier as a spend, charged the flat kernel allowance).
     // R15 (Step 2): recovery verification adds two batched multiexps
     // (~kernel-class work: measured kernel 471us vs 2048us allowance, so the
-    // base allowance's headroom is borderline). Charge one extra kernel unit
-    // on the recovery path so the per-block work MODEL stays >= measurement
-    // (fail-closed direction; no new constant, no wire change). do_apply
-    // charges the identical expression below — the two must stay in sync.
-    uint32_t turnstile_work_us = stealth_work_for_range_proofs( 1 )
-                               + GRAPHENE_STEALTH_WORK_US_PER_KERNEL;
-    if( !o.extensions.empty() )
-       turnstile_work_us += GRAPHENE_STEALTH_WORK_US_PER_KERNEL; // R15 recovery proof
-    stealth_check_blind_work_gate( d, turnstile_work_us );
+    // base allowance's headroom is borderline). Task 4: the R15 extension is
+    // mandatory on every path, so the recovery kernel unit is always charged
+    // via the single shared definition below — the do_evaluate gate and the
+    // do_apply accounting call the same function and cannot drift (fail-closed
+    // direction; no new constant, no wire change).
+    stealth_check_blind_work_gate( d, stealth_work_for_turnstile() );
    stealth_check_asset_gate( d, o.asset_id );
 
    FC_ASSERT( o.fee.asset_id == o.asset_id, "Turnstile fee must be paid in the migrated asset" );
@@ -897,36 +906,34 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
     // recovery-proof verification (message identical; refusal order only).
     FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
                 "Turnstile new commitment already exists" );
-    // R15: two-branch spent gate. No extension = unchanged fail-closed refusal.
-    // Extension = representation proof binds (I1,I2) to old_commitment's opening
+    // Task 4 (nullifier migration): the R15 extension is mandatory on every
+    // path. The deleted no-extension branch's only guard was the retired
+    // whole-ring spent flag (Task 3 stopped writing it), so a really-spent
+    // output could re-migrate with no proof. op106 is new on this branch
+    // (operations.hpp:170), so requiring the extension is replay-safe.
+    // The representation proof binds (I1,I2) to old_commitment's opening
     // (F08B-01 class: nothing submitter-supplied is trusted), then the BOUND
     // images are nullifier-checked fail-closed (either present -> refuse).
-    if( o.extensions.empty() )
-    {
-       // Task 5 (M04/V-04): cross-path double-spend guard — unchanged.
-       FC_ASSERT( !itr->spent, "Turnstile old commitment already spent (stealth transfer)" );
-    }
-    else
-    {
-       FC_ASSERT( o.extensions.size() == 1, "Turnstile recovery takes one extension" );
-       const auto& ext = o.extensions.begin()->get<protocol::turnstile_recovery_v2_extension>();
-       // Task-2 note: 163B layout A_C(33)||A_1(33)||A_2(33)||s_b(32)||s_v(32).
-       // The verifier re-checks this; the gate pins it for a clean error.
-       FC_ASSERT( ext.recovery_proof.proof_bytes.size() == 163,
-                  "Turnstile recovery proof must be 163 bytes" );
-       std::string perr;
-       FC_ASSERT( stealth_verify_recovery_proof( o.old_commitment, ext.key_image_v1,
-                  ext.key_image_v2, ext.recovery_proof.proof_bytes,
-                  o.asset_id.instance.value, perr ),
-                  "Turnstile recovery proof does not verify: ${e}", ("e", perr) );
-       const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
-       const std::vector<char> r15_i1( ext.key_image_v1.begin(), ext.key_image_v1.end() );
-       const std::vector<char> r15_i2( ext.key_image_v2.begin(), ext.key_image_v2.end() );
-       FC_ASSERT( nul.find( nullifier_key( r15_i1 ) ) == nul.end(),
-                  "Turnstile recovery refused: V1 image nullified (really spent)" );
-        FC_ASSERT( nul.find( nullifier_key( r15_i2 ) ) == nul.end(),
-                   "Turnstile recovery refused: V2 image nullified (really spent)" );
-     }
+    // The size assert below is the guard: an extension-less turnstile refuses
+    // here with the same text validate() pins (stealth.cpp:132).
+    FC_ASSERT( o.extensions.size() == 1, "Turnstile recovery takes one extension" );
+    const auto& ext = o.extensions.begin()->get<protocol::turnstile_recovery_v2_extension>();
+    // Task-2 note: 163B layout A_C(33)||A_1(33)||A_2(33)||s_b(32)||s_v(32).
+    // The verifier re-checks this; the gate pins it for a clean error.
+    FC_ASSERT( ext.recovery_proof.proof_bytes.size() == 163,
+               "Turnstile recovery proof must be 163 bytes" );
+    std::string perr;
+    FC_ASSERT( stealth_verify_recovery_proof( o.old_commitment, ext.key_image_v1,
+               ext.key_image_v2, ext.recovery_proof.proof_bytes,
+               o.asset_id.instance.value, perr ),
+               "Turnstile recovery proof does not verify: ${e}", ("e", perr) );
+    const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
+    const std::vector<char> r15_i1( ext.key_image_v1.begin(), ext.key_image_v1.end() );
+    const std::vector<char> r15_i2( ext.key_image_v2.begin(), ext.key_image_v2.end() );
+    FC_ASSERT( nul.find( nullifier_key( r15_i1 ) ) == nul.end(),
+               "Turnstile recovery refused: V1 image nullified (really spent)" );
+    FC_ASSERT( nul.find( nullifier_key( r15_i2 ) ) == nul.end(),
+               "Turnstile recovery refused: V2 image nullified (really spent)" );
    // (R15B-01: the new-commitment uniqueness check now runs above, before
    // the recovery-proof verification.)
 
@@ -1059,13 +1066,10 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid );
     stealth_window_count_add( db(), 1 );
     stealth_count_blind_op( db() );
-    // R15: mirror the do_evaluate work gate exactly (base + one kernel unit
-    // on the recovery path) — gate and accounting must stay in sync.
-    uint32_t turnstile_work_us = stealth_work_for_range_proofs( 1 )
-                               + GRAPHENE_STEALTH_WORK_US_PER_KERNEL;
-    if( !o.extensions.empty() )
-       turnstile_work_us += GRAPHENE_STEALTH_WORK_US_PER_KERNEL; // R15 recovery proof
-    stealth_count_blind_work( db(), turnstile_work_us );
+    // Task 4: mirror the do_evaluate work gate exactly — one shared
+    // definition (stealth_work_for_turnstile) so gate and accounting stay
+    // in sync.
+    stealth_count_blind_work( db(), stealth_work_for_turnstile() );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 

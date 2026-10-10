@@ -2235,6 +2235,14 @@ static void T_r15_prove_true( const t5_pool& p, size_t s, asset_id_type asset,
                               fc::ecc::commitment_type& I1,
                               fc::ecc::commitment_type& I2,
                               std::vector<char>& proof );
+// Task 4: turnstile_migration attaches the true recovery proof (defined with
+// the R15 suite below); the turnstile proves on every path now.
+static void T_prove_recovery( const std::vector<unsigned char>& C_bytes,
+                              const BIGNUM* b, uint64_t v,
+                              asset_id_type asset,
+                              fc::ecc::commitment_type& I1_out,
+                              fc::ecc::commitment_type& I2_out,
+                              std::vector<char>& proof_out );
 
 // M04/V-04: a stealth-spent commitment re-spent via turnstile_reproof.
 BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_turnstile )
@@ -2274,7 +2282,7 @@ BOOST_AUTO_TEST_CASE( cross_path_respend_rejected_via_turnstile )
    t.old_blind = p.blinds[s];
    t.new_blind = Bn;
    // Task 3: the retired flag no longer refuses this (the no-extension hole,
-   // pinned by r15_no_extension_unchanged, closes in Task 4) — submit WITH
+   // pinned by op106_turnstile_without_extension_refuses, closed in Task 4) — submit WITH
    // the true extension so the production nullifier guard decides, exactly
    // as a wallet-driven recovery of a really-spent output would.
    {
@@ -3210,6 +3218,17 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
       t.fee = core.amount( 10 );
       t.old_blind = T_blind_secret( "g1b-turn-b|0" );
       t.new_blind = Bn;
+      // Task 4: the R15 extension is mandatory on every path — attach the
+      // true recovery proof over the migrated opening (blind "g1b-turn-b|0",
+      // value 100) so the migration succeeds under the always-prove rule.
+      {
+         fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+         BIGNUM* bb = T_bn( T_blind_secret( "g1b-turn-b|0" ) );
+         std::vector<unsigned char> Cvec( target_c.begin(), target_c.end() );
+         T_prove_recovery( Cvec, bb, 100, core.get_id(), I1, I2, proof );
+         BN_free( bb );
+         T_set_recovery_v2( t, I1, I2, proof );
+      }
       trx.operations = { t };
       sign( trx, k );
       BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
@@ -6564,10 +6583,13 @@ BOOST_AUTO_TEST_CASE( r15_recovery_replay_fails )
    trx.clear_signatures(); trx.operations.clear();
 } FC_CAPTURE_AND_RETHROW() }
 
-// Spec §7.6 (Task 3 interim): the no-extension branch still reads the
-// retired flag and nothing else — a nullified output migrates without proof
-// (the hole Task 4 closes), while an unspent output still migrates normally.
-BOOST_AUTO_TEST_CASE( r15_no_extension_unchanged )
+// Task 4 (turnstile always proves): the no-extension branch's only guard was
+// the retired whole-ring spent flag (Task 3 stopped writing it), so a
+// really-spent output could re-migrate with no proof. The R15 extension is
+// now mandatory on every path; op106 is new on this branch
+// (operations.hpp:170), so requiring the extension is replay-safe. Both a
+// nullified and a live output refuse without the extension, moving nothing.
+BOOST_AUTO_TEST_CASE( op106_turnstile_without_extension_refuses )
 { try {
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
@@ -6575,12 +6597,10 @@ BOOST_AUTO_TEST_CASE( r15_no_extension_unchanged )
    ACTORS( (dan) );
    const asset_object& core = asset_id_type()( db );
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-f", 16, true );
+   const int64_t live = t5_supply( db, core );
 
-   // (a) nullified + no extension: INTERIM HOLE (Task 3 only). The retired
-   // flag is never written, so the no-extension branch (which still reads
-   // it until Task 4) passes and the migration succeeds — a really-spent
-   // output re-migrates with no proof. Task 4 closes this by requiring the
-   // extension on every path; this leg pins the hole it closes.
+   // (a) nullified + no extension: the hole Task 4 closes — a really-spent
+   // output re-migrated with no proof while the retired flag stood unwritten.
    {
       const size_t s = 7;
       fc::ecc::commitment_type I1, I2; std::vector<char> proof;
@@ -6591,10 +6611,17 @@ BOOST_AUTO_TEST_CASE( r15_no_extension_unchanged )
       set_expiration( db, trx );
       trx.operations = { t };
       sign( trx, p.keys[s] );
-      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      try {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "nullified plain turnstile must be refused" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+            "Turnstile recovery takes one extension" ) != std::string::npos,
+            e.to_detail_string() );
+      }
       trx.clear_signatures(); trx.operations.clear();
    }
-   // (b) unspent + no extension: normal migration still works.
+   // (b) live + no extension: still refused — every migration proves.
    {
       const size_t s = 2;
       turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-f-bn-b" );
@@ -6602,9 +6629,53 @@ BOOST_AUTO_TEST_CASE( r15_no_extension_unchanged )
       set_expiration( db, trx );
       trx.operations = { t };
       sign( trx, p.keys[s] );
-      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      try {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "live plain turnstile must be refused" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+            "Turnstile recovery takes one extension" ) != std::string::npos,
+            e.to_detail_string() );
+      }
       trx.clear_signatures(); trx.operations.clear();
    }
+   BOOST_CHECK_EQUAL( t5_supply( db, core ), live ); // refusals moved nothing
+} FC_CAPTURE_AND_RETHROW() }
+
+// Task 4 (turnstile always proves): the recovery kernel is charged on every
+// path, and the do_evaluate gate and do_apply accounting share one definition
+// (stealth_work_for_turnstile), so the two charge expressions are identical by
+// construction and cannot drift. This pins the shared value arithmetically
+// AND end-to-end: a real extension-carrying migration must accumulate exactly
+// that many work units into the pending block's counter.
+BOOST_AUTO_TEST_CASE( op106_turnstile_work_gate_matches_apply_accounting )
+{ try {
+   BOOST_REQUIRE_EQUAL( stealth_work_for_turnstile(),
+      stealth_work_for_range_proofs( 1 )
+      + 2u * GRAPHENE_STEALTH_WORK_US_PER_KERNEL );
+   BOOST_REQUIRE_EQUAL( stealth_work_for_turnstile(), 10418u ); // 6322 + 2x2048
+
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "r15-wg", 16, true );
+   const size_t s = 1;
+
+   turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-wg-bn" );
+   fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+   T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+   T_set_recovery_v2( t, I1, I2, proof );
+
+   const uint32_t before = stealth_blind_work_this_block( db );
+   set_expiration( db, trx );
+   trx.operations = { t };
+   sign( trx, p.keys[s] );
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+   trx.clear_signatures(); trx.operations.clear();
+   BOOST_CHECK_EQUAL( stealth_blind_work_this_block( db ) - before,
+                      stealth_work_for_turnstile() );
 } FC_CAPTURE_AND_RETHROW() }
 
 // Spec §7.7: recovery requires owner authority; a stranger with the valid
@@ -7913,8 +7984,14 @@ BOOST_AUTO_TEST_CASE( r15_recover_then_ring_spend_old_refuses )
    stealth_transfer_operation stop = t5_build_spend( core, p, s,
       GRAPHENE_STEALTH_PROOF_V2, "r15-b5b-sp", 600, 390, 10 );
 
-   // Plain migration of the old commitment (valid: unspent, owner-signed).
+   // Migration of the old commitment (valid: unspent, owner-signed).
+   // Task 4: the turnstile proves on every path — attach the true extension.
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-b5b-bn" );
+   {
+      fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+      T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+      T_set_recovery_v2( t, I1, I2, proof );
+   }
    set_expiration( db, trx );
    trx.operations = { t };
    sign( trx, p.keys[s] );
@@ -8101,6 +8178,14 @@ BOOST_AUTO_TEST_CASE( r15_new_output_owner_divergence_pins_migrated_owner )
    turnstile_reproof_operation t = T_r15_turnstile( core, p, s, "r15-b6-bn" );
    authority eve_owner( 1, public_key_type( eve_private_key.get_public_key() ), 1 );
    t.new_output.owner = eve_owner;
+   // Task 4: the turnstile proves on every path — attach the true extension.
+   // The proof is over the OLD commitment's opening, so the re-keyed
+   // new_output.owner does not affect it.
+   {
+      fc::ecc::commitment_type I1, I2; std::vector<char> proof;
+      T_r15_prove_true( p, s, core.get_id(), I1, I2, proof );
+      T_set_recovery_v2( t, I1, I2, proof );
+   }
    BOOST_REQUIRE( t.owner == p.owners[s] );        // OLD authority on the op
    BOOST_REQUIRE( t.new_output.owner == eve_owner ); // NEW authority on output
    BOOST_REQUIRE( t.owner != t.new_output.owner );  // divergence, by construction

@@ -652,8 +652,8 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
          FC_ASSERT( itr->asset_id == o.asset_id, "Ring member asset mismatch" );
          FC_ASSERT( itr->created_block != 0, "Grandfathered outputs are not decoy-eligible" );
          // DELETED (Task 3, nullifier migration). The spent flag is retired;
-         // nullified outputs are decoy-eligible again so the anonymity set
-         // grows with usage instead of draining.
+         // nullified outputs are decoy-eligible again — the set grows with
+         // use (Task 6: C-02's rationale evaporated; images unlinkable; §8.2).
          heights.push_back( itr->created_block );
          times.push_back( itr->created_time );
       }

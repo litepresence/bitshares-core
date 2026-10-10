@@ -5538,7 +5538,10 @@ BOOST_AUTO_TEST_CASE( pool_floor_halts_thin_pool_not_ring_activity )
    // Live-set counter: 16 funded, the ring removes nothing, 2 outputs
    // created -> 18. Ring activity GREW the pool; under the retired flag
    // this same spend would have left it at 15, draining toward the floor.
-   BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
+   // Task 6: REQUIRE, not CHECK — phase (b2) below must never run on a
+   // failed precondition (a silent 15/16 here would flip the (b2) verdict
+   // from "not floor-halted" to a false RED at the floor).
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
    // ...and a follow-up spend is NOT floor-halted: the dummy clears the
    // floor (18 >= 11) and rejects downstream instead. If a future refactor
    // re-shrinks the counter on ring spends, this goes RED at the floor.

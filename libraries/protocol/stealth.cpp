@@ -127,8 +127,8 @@ void turnstile_reproof_operation::validate()const
    // recovery-path checks (stealth_evaluator.cpp:917-922) so malformed
    // extensions are refused at validate() with identical pinned messages
    // instead of being type-dispatched further down the path. Size 0 stays
-   // legal (plain turnstile; recovery is only required once the old
-   // commitment is unknown at evaluation time).
+   // legal HERE (validate() is relay-side only); the Task-4 mandatory-
+   // extension rule is enforced in do_evaluate, never in validate().
    FC_ASSERT( extensions.size() <= 1, "Turnstile recovery takes one extension" );
    if( extensions.size() == 1 )
    {

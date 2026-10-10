@@ -57,11 +57,11 @@ using stealth_nullifier_index = generic_index<stealth_nullifier_object, stealth_
  */
 struct stealth_alarm_snapshot
 {
-   /// Known-spend-adjusted effective set per asset: unspent decoy-candidate
-   /// blinded balances. Spent-but-retained outputs are EXCLUDED (Task 6:
-   /// the counter decrements on every !spent -> spent ring transition, so
-   /// this is the honest fresh set the floor gate measures — exposed to
-   /// wallets/UIs via database_api::get_stealth_effective_set).
+   /// Live-set effective depth per asset: metadata-bearing blinded balances
+   /// currently indexed. Ring spends remove nothing (Task 3, nullifier
+   /// migration: nullified outputs stay indexed and decoy-eligible), so only
+   /// consuming spends leave the set — the live pool the floor gate measures,
+   /// exposed to wallets/UIs via database_api::get_stealth_effective_set.
    flat_map<asset_id_type, uint32_t> effective_set;
    /// Worst per-asset interval grant/route ratio, percent (100 when grants
    /// exist with no routed inflow; 0 when neither moved).
@@ -71,14 +71,14 @@ struct stealth_alarm_snapshot
    /// True when the youngest 100-block creation window holds more than 40%
    /// of the retained decoy-eligible pool: new rings WILL skew young, so
    /// availability (the pool floor) is about to bind harder. Heuristic over
-   /// the bounded creation histogram (spent outputs stay retained but
-   /// flagged, so the histogram counts created-eligible, not unspent —
-   /// documented approximation; the floor gate, not this flag, enforces).
+   /// the bounded creation histogram (nullified outputs stay indexed and
+   /// decoy-eligible, so the histogram counts created-eligible live balances
+   /// — documented approximation; the floor gate, not this flag, enforces).
    bool                  decoy_skew_warn = false;
    /// True while any fresh committee freeze vote is live or blind ops are
    /// halted: exits through the transparent legs may crowd (BSIP-2 §1).
    bool                  mass_exit_warn = false;
-   /// True while any asset's unspent decoy-candidate pool sits below
+   /// True while any asset's live decoy-candidate pool sits below
    /// GRAPHENE_STEALTH_POOL_WARN_DEPTH (22): availability is degrading
    /// toward the floor halt. ALARM ONLY — no consensus path asserts on it
    /// (never FC_ASSERT in any market, fee, or blind evaluation path).

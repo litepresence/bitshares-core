@@ -117,6 +117,41 @@ struct stealth_parity_vote
 };
 
 /**
+ * @brief One deposit event (spec 2026-10-11 §8): WHO deposited HOW MANY.
+ * @ingroup object
+ *
+ * One op39 pushes exactly one event regardless of its output count, so the
+ * window is bounded by events, never by outputs. Appended-last discipline
+ * applies to the member order.
+ */
+struct stealth_deposit_event
+{
+   account_id_type       account;
+   uint32_t              n = 0;
+};
+
+/**
+ * @brief Bounded deposit-event window (spec 2026-10-11 §8).
+ * @ingroup object
+ *
+ * The last W deposit events for one asset, as a ring buffer: each op39
+ * writes position `head`, then `head = (head + 1) % W`, overwriting the
+ * oldest when full (`count` saturates at W). `total_ever` is monotonic
+ * telemetry only — never a concentration input. E_dep is computed on read
+ * by exact aggregation over ≤1024 pairs (integers only); readers, never
+ * `do_evaluate`, pay the O(W) scan (Phase 1 gates nothing on it).
+ * Ring-created outputs are unattributable by construction and never enter
+ * here — only op39 deposits (transparent `o.from`) do. flat_map ORDERED.
+ */
+struct stealth_depositor_window
+{
+   uint64_t                                total_ever = 0;
+   uint32_t                                head = 0;
+   uint32_t                                count = 0;
+   flat_map<uint32_t, stealth_deposit_event> events; ///< positions 0..W-1
+};
+
+/**
  * @brief Singleton consensus state for the stealth subsystem.
  * @ingroup object
  *
@@ -229,6 +264,12 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// reset on block rollover exactly like blind_block_num/count above.
       uint32_t              blind_work_block_num = 0;
       uint32_t              blind_work_used_us = 0;
+      /// Phase-1 instrumentation (spec 2026-10-11 §8): per-asset deposit
+      /// concentration. STATE ONLY — nothing reads it to permit or refuse.
+      /// Appended-last; zero-initialized, so history reconciles by default.
+      /// Sparse: entries exist only for assets with post-STEALTH deposits.
+      /// flat_map is ORDERED.
+      flat_map<asset_id_type, stealth_depositor_window> deposit_windows;
 };
 
 using stealth_status_multi_idx = multi_index_container<
@@ -252,6 +293,8 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::stealth_status_object 
 
 FC_REFLECT( graphene::chain::stealth_freeze_vote, (voter)(freeze)(voted_at) )
 FC_REFLECT( graphene::chain::stealth_parity_vote, (voter)(kind)(voted_at) )
+FC_REFLECT( graphene::chain::stealth_deposit_event, (account)(n) )
+FC_REFLECT( graphene::chain::stealth_depositor_window, (total_ever)(head)(count)(events) )
 FC_REFLECT( graphene::chain::stealth_alarm_snapshot,
             (effective_set)(burn_rate_pct)(burn_warn)(burn_critical)
             (decoy_skew_warn)(mass_exit_warn)(joint_cap_breach)

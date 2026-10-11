@@ -139,6 +139,11 @@ constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
 /// tightens the skew ceiling, not the size.
 /// Auditors may raise any of these; the pre-G1 audit owns the final values.
 constexpr uint32_t GRAPHENE_STEALTH_THIN_POOL_DEPTH = 64;
+/// Phase-1 effective-N instrumentation (spec 2026-10-11 §8): per-asset
+/// deposit-event window width. 64x ring target; a fixed event count (not a
+/// time window) keeps replay determinism free of clock questions.
+/// Consensus constant, NOT a tunable.
+constexpr uint32_t GRAPHENE_STEALTH_DEPOSITOR_WINDOW = 1024;
 constexpr uint32_t GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT = 25;
 /// Pool-depth warning level: per-asset LIVE depth below this raises the
 /// thin_pool_warn alarm. ALARM ONLY — never a consensus gate

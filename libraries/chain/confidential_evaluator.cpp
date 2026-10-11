@@ -59,11 +59,20 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "No new V1 blind balances past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
+      // Phase-2 A3 (spec 2026-10-11-phase2 §1): pre-floor cold-start discount.
+      // Reads live depth; terminates itself at depth 11. Refusal precedes the
+      // fee rule so an oversize cold deposit fails closed, never subsidized.
+      const bool cold_start = stealth_pool_depth( d, o.amount.asset_id )
+                              < protocol::GRAPHENE_STEALTH_BLIND_POOL_FLOOR;
+      if( cold_start )
+         FC_ASSERT( o.outputs.size() <= protocol::GRAPHENE_STEALTH_RING_TARGET,
+                    "Pre-floor deposits carry at most one ring target of outputs" );
+      const uint32_t cold_n = cold_start ? 0u : (uint32_t)o.outputs.size();
       // G1c parity float rule (BSIP-2 §2): same skip guard as the schedule
       // check — no fee paid, no subsidy consumed. Rule R: a deposit is the
       // only net source of blind-set value, so min(n, classifier) == n here.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
-                                 o.fee.asset_id, (uint32_t)o.outputs.size(),
+                                 o.fee.asset_id, cold_n,
                                  calculate_fee_for_operation( operation( o ) ),
                                  std::min( (uint32_t)o.outputs.size(),
                                     stealth_subsidy_output_count( operation( o ) ) ) );
@@ -96,6 +105,12 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
           }
       });
    }
+   // Phase-2 A3 (spec 2026-10-11-phase2 §1): pre-add depth — matches
+   // do_evaluate's read (evaluate runs before this deposit's count-add), so
+   // require/consume agree exactly and the base-only fee clears in consume.
+   const uint32_t cold_n = stealth_pool_depth( db(), o.amount.asset_id )
+                           < protocol::GRAPHENE_STEALTH_BLIND_POOL_FLOOR
+                           ? 0u : (uint32_t)o.outputs.size();
    // Pool floor counter: post-STEALTH creates carry metadata (counted);
    // pre-fork creates are grandfathered (helper no-ops pre-fork anyway).
    stealth_pool_count_add( db(), o.amount.asset_id, (int32_t)o.outputs.size() );
@@ -105,10 +120,10 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
                                   (uint32_t)o.outputs.size() );
    // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
-                                   o.fee.asset_id, (uint32_t)o.outputs.size(),
-                                   calculate_fee_for_operation( operation( o ) ), core_fee_paid,
-                                   std::min( (uint32_t)o.outputs.size(),
-                                      stealth_subsidy_output_count( operation( o ) ) ) );
+                                    o.fee.asset_id, cold_n,
+                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid,
+                                    std::min( (uint32_t)o.outputs.size(),
+                                       stealth_subsidy_output_count( operation( o ) ) ) );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );

@@ -1925,6 +1925,89 @@ BOOST_AUTO_TEST_CASE( deposit_histogram_detects_sybil_share )
    BOOST_REQUIRE_EQUAL( stealth_effective_depositor_count( db, core.get_id() ), 3u );
 }
 
+// C1 forward declaration (compile-necessitated): ee_bal + T_ee_deposit are
+// defined later in this suite (~:12152); declared here so these tests can sit
+// with the other pool-depth tests per the brief. Bodies below are verbatim.
+struct ee_bal;
+static std::vector<ee_bal> T_ee_deposit( database_fixture& f, account_id_type from,
+      const fc::ecc::private_key& from_key, const authority& owner,
+      const std::string& tag, const std::vector<int64_t>& values, int64_t fee );
+
+BOOST_AUTO_TEST_CASE( cold_start_refuses_oversize_deposit )
+{
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (alice) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), alice, core.amount( 200000000 ) );
+   generate_block();
+   // EE-test pattern (cf. subsidy_exit_cap_enforced): multi-output stealth
+   // txs exceed the default max-transaction-size; raise it so the fee/refusal
+   // guards decide, not the size gate.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   // 17 outputs x 500 = 8500; fee anchor(17) = 9,000,000 covers the full
+   // pre-change cost, so RED (pre-change) SUCCEEDS and GREEN refuses.
+   std::vector<int64_t> seventeen( 17, 500 );
+   BOOST_CHECK_THROW(
+      T_ee_deposit( *this, alice_id, alice_private_key, own,
+                    "c1-big", seventeen, 9000000 ),
+      fc::exception );
+   trx.clear_signatures(); trx.operations.clear();
+}
+
+BOOST_AUTO_TEST_CASE( cold_start_base_only_cost )
+{
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (alice) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), alice, core.amount( 200000000 ) );
+   generate_block();
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   // 4 outputs x 500 = 2000; fee anchor(0) = 500,000. Pre-change cost is
+   // anchor(4) = 2,500,000 so RED throws; post-change cost is anchor(0).
+   auto chk = T_ee_deposit( *this, alice_id, alice_private_key, own,
+                                                 "c1-four", { 500, 500, 500, 500 }, 500000 );
+   BOOST_REQUIRE_EQUAL( chk.size(), 4u );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 4u );
+}
+
+BOOST_AUTO_TEST_CASE( cold_start_terminates_at_floor )
+{
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (alice) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), alice, core.amount( 200000000 ) );
+   generate_block();
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   // 11 singles at anchor(1) = 1,000,000 each (unseeded pool, exact cost).
+   // Funding check: 11*1M + 9M + (11*500 + 8500) amounts << 200M. ✓
+   for( int i = 0; i < 11; ++i )
+      T_ee_deposit( *this, alice_id, alice_private_key, own,
+                    "c1-seed-" + std::to_string(i), { 500 }, 1000000 );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 11u );
+   // Cap lifted at depth 11: green-green by design (documents self-termination).
+   std::vector<int64_t> seventeen( 17, 500 );
+   T_ee_deposit( *this, alice_id, alice_private_key, own, "c1-big", seventeen, 9000000 );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 28u );
+}
+
 BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
 { try {
    // Finding 1 (Critical) end-to-end proof: the conservation kernel

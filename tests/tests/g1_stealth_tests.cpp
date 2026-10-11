@@ -43,6 +43,7 @@
 #include <graphene/chain/liquidity_pool_evaluator.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/transaction_evaluation_state.hpp>
+#include <graphene/chain/impacted.hpp>
 #include <graphene/app/database_api.hpp>
 #include <graphene/wallet/wallet.hpp>
 
@@ -10479,6 +10480,487 @@ BOOST_AUTO_TEST_CASE( poolswap_wrong_fee_fails )
    // Nothing moved: both refusals leave pool reserves and blind supply intact.
    BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- EE-5: the four Note refusal vectors (G2-5 §1 rows 3a/3b/3c/6) and the
+// three V1 vectors (G2-2 Note-3) for op109.
+//
+// Every case below pushes through the real PUSH_TX path and asserts the
+// EXPECTED message, so a refusal raised by an EARLIER guard fails the case
+// instead of silently satisfying it.
+
+// EE-5 shared preamble = poolswap_happy_path's exactly (sealed pool + parity
+// seeded + fee cap). Parity seeding is REQUIRED by the late-guard cases: op109's
+// float rule (stealth_evaluator.cpp:2209) sits between the composite-F asserts
+// and the ring/BP+ legs, so an unseeded pool refuses every late-guard case at
+// the float rule and the case would prove nothing about its own guard.
+static g2_pool T_g2_ready_pool( database_fixture& f, const account_object& funder,
+      const fc::ecc::private_key& funder_key, const std::string& tag )
+{
+   database& db = f.db;
+   g2_pool p = g2_fund_pool( f, funder, funder_key, tag, 0 );
+   // Fixture discipline (db_block.cpp:423): SEAL the pool setup with a block
+   // first, then make the direct modifies into the fresh pending session.
+   f.generate_block();
+   db.modify( db.get_global_properties(), []( global_property_object& gp ) {
+      gp.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   share_type parity_core = db.current_fee_schedule().calculate_fee(
+      operation( stealth_pool_exchange_operation() ) ).amount;
+   share_type anchor = stealth_cost_anchor_core( db, 1 );
+   share_type gap = ( anchor > parity_core ) ? ( anchor - parity_core ) : share_type( 0 );
+   share_type need = stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+   T_seed_pool_uia( f, funder, p.asset_a( db ), need.value );
+   return p;
+}
+
+// EE-5 / G2-5 §1 row 3a — the composite-F REFUSAL legs. The positive legs of the
+// evaluator's (9) block (per-term >= 0, F <= MAX_SUPPLY, F <= amount_to_sell)
+// execute green in every existing poolswap test; only the refusal legs were
+// unpinned. F = maker_market_fee + taker_market_fee + o.fee.amount.
+//
+// (a) NEGATIVE FEE TERM. The earliest guard is the RELAY validator, not the
+//     evaluator: stealth_pool_exchange_operation::validate()
+//     (protocol/stealth.cpp:218, `FC_ASSERT( fee.amount >= 0 )` — no message)
+//     runs before do_evaluate, so the evaluator's own "Stealth pool swap fee
+//     cannot be negative" (stealth_evaluator.cpp:2077) is unreachable through
+//     PUSH_TX: a negative wire fee never reaches the evaluator at all. Pinned
+//     here deliberately, at the guard that actually refuses.
+// (b) OVERFLOWING FEE TERM — and the finding that the evaluator's 128-bit cap
+//     assert is NOT reachable from a pushable op. F > GRAPHENE_MAX_SHARE_SUPPLY
+//     needs a fee above ~4.6e18, and such a fee is refused EARLIER by the
+//     framework's own UIA->CORE conversion in prepare_fee (the fee-pool balance
+//     bound), which runs before do_evaluate. So
+//     stealth_evaluator.cpp:2187-2188 ("composite fee exceeds max supply") is
+//     defense-in-depth BEHIND that bound and unreachable from any pushable op109.
+//     Pinned at the guard that actually refuses, and recorded so a later audit
+//     does not re-open it as an unpinned leg. (The sibling cap
+//     F <= amount_to_sell IS reachable and is pinned by
+//     poolswap_f_over_amount_rejected below.)
+//
+// The maker/taker market-fee legs (stealth_evaluator.cpp:2179-2180) are not
+// constructible: calculate_pool_exchange_amounts derives both from
+// calculate_market_fee over a uint16_t market_fee_percent, so neither term can
+// be negative from any pool state, and the helper itself asserts
+// `maker_market_fee < amount_to_sell` and `taker_market_fee <= pool_pays`.
+BOOST_AUTO_TEST_CASE( poolswap_composite_f_rejected )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2CF" );
+   set_expiration( db, trx );
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-cf", 50 );
+   BOOST_REQUIRE_NO_THROW( sw.op.validate() );
+
+   // Leg (a): negative tx-fee term.
+   {
+      stealth_pool_exchange_operation bad = sw.op;
+      bad.fee.amount = -1;
+      trx.operations = { bad };
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "negative-fee-term poolswap was ACCEPTED" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "fee.amount >= 0" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // Leg (b): a fee large enough to overflow the composite-F cap. Refused by
+   // prepare_fee's fee-pool conversion bound, before the evaluator runs.
+   {
+      stealth_pool_exchange_operation bad = sw.op;
+      bad.fee.amount = GRAPHENE_MAX_SHARE_SUPPLY;
+      trx.operations = { bad };
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "max-supply-overflowing composite F was ACCEPTED" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Fee pool balance" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // Nothing moved: both refusals leave pool reserves and blind supply intact.
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// EE-5 / G2-5 §1 row 3b — non-592-byte BP+ blob and m != 1, pinned at BOTH
+// layers as the row requires.
+//   (a) VERIFIER: stealth_verify_bp_plus refuses m != 1 before any m-sized
+//       indexing (stealth_proof.cpp:989 "only m=1 is wired"), and refuses a
+//       wrong-size blob (:991 "blob size"). Both are reachable directly.
+//   (b) CONSENSUS/RELAY: op109 pins the output blob at exactly 592 bytes, so a
+//       non-592 blob is refused on the wire before the verifier ever sees it.
+//       The relay bound is protocol/stealth.cpp:246 and the evaluator repeats
+//       it at stealth_evaluator.cpp:2084-2085; both carry the same message
+//       tail, so the assertion below is layer-agnostic by construction.
+BOOST_AUTO_TEST_CASE( poolswap_non_m1_blob_rejected )
+{ try {
+   // (a) Verifier layer.
+   {
+      std::string err;
+      std::vector<char> none;
+      BOOST_CHECK( !stealth_verify_bp_plus( 2, none, {}, err ) );
+      BOOST_CHECK_EQUAL( err, std::string( "only m=1 is wired" ) );
+      err.clear();
+      BOOST_CHECK( !stealth_verify_bp_plus( 0, none, {}, err ) );
+      BOOST_CHECK_EQUAL( err, std::string( "m out of range" ) );
+      err.clear();
+      BOOST_CHECK( !stealth_verify_bp_plus( 1, none, {}, err ) );
+      BOOST_CHECK_EQUAL( err, std::string( "commit count != m" ) );
+   }
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2M1" );
+   set_expiration( db, trx );
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-m1", 50 );
+   BOOST_REQUIRE_EQUAL( sw.op.output.range_proof.size(), 592u );
+
+   // (b) Wire layer, short blob: 591 bytes.
+   {
+      stealth_pool_exchange_operation bad = sw.op;
+      bad.output.range_proof.resize( 591 );
+      trx.operations = { bad };
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "591-byte BP+ blob was ACCEPTED" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "must be 592 bytes (BP+ m=1)" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   // Wire layer, long blob: two m=1 proofs concatenated (1184 bytes) — the shape
+   // an "m=2 by concatenation" prover would emit.
+   {
+      stealth_pool_exchange_operation bad = sw.op;
+      bad.output.range_proof.insert( bad.output.range_proof.end(),
+                                     sw.op.output.range_proof.begin(),
+                                     sw.op.output.range_proof.end() );
+      BOOST_REQUIRE_EQUAL( bad.output.range_proof.size(), 1184u );
+      trx.operations = { bad };
+      try
+      {
+         PUSH_TX( db, trx );
+         BOOST_FAIL( "1184-byte BP+ blob was ACCEPTED" );
+      }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find( "must be 592 bytes (BP+ m=1)" )
+                              != std::string::npos, e.to_detail_string() );
+      }
+      trx.clear();
+   }
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// EE-5 / G2-5 §1 row 3c — the dedicated F > amount_to_sell vector, DISTINCT from
+// poolswap_wrong_fee_fails (which keeps F in bounds by construction and so can
+// only ever reach the link-4 equality assert). Here the honest swap is built and
+// the tx fee is then raised until F exceeds the sold amount, so the evaluator's
+// F <= amount_to_sell bound (stealth_evaluator.cpp:2189-2190) refuses. That
+// assert runs BEFORE link-4 (:2197-2199) and before the ring/BP+ legs, so the
+// raise cannot be masked by a later guard.
+BOOST_AUTO_TEST_CASE( poolswap_f_over_amount_rejected )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2FOA" );
+   set_expiration( db, trx );
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-foa", 50 );
+   BOOST_REQUIRE_NO_THROW( sw.op.validate() );
+   BOOST_REQUIRE_EQUAL( sw.F, p.each - sw.v_out ); // honest: F + v_out == amount
+
+   const liquidity_pool_object& pool = p.pool( db );
+   pool_exchange_amounts ex = calculate_pool_exchange_amounts( db, pool,
+      asset( p.each, p.asset_a ), sw.op.min_to_receive );
+   const int64_t helper_fees = ex.maker_market_fee.amount.value
+                             + ex.taker_market_fee.amount.value;
+   // Smallest fee that pushes F strictly past the sold amount.
+   const int64_t fee_over = ( p.each - helper_fees ) + 1;
+   BOOST_REQUIRE_MESSAGE( fee_over > sw.f_tx, "override must exceed the honest cover" );
+   BOOST_REQUIRE_MESSAGE( helper_fees + fee_over > p.each, "override must exceed the bound" );
+
+   stealth_pool_exchange_operation bad = sw.op;
+   bad.fee.amount = fee_over;
+   trx.operations = { bad };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "F > amount_to_sell poolswap was ACCEPTED (F-bounds leg unproven)" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "composite fee exceeds sell amount" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// EE-5 / G2-5 §1 row 6 — the structural claim G2 rests on: a successful op109
+// writes NO real account balance. The only account the op touches is
+// GRAPHENE_TEMP_ACCOUNT (the fee leg, db_notify.cpp:523-526); everything else
+// is pool reserves, the parity singleton, nullifiers, the blinded output and
+// supply counters. Until now this was supported only by reading the code.
+//
+// Anti-vacuity: the case asserts the swap SUCCEEDED first (reserves moved,
+// output created, both nullifiers recorded). A snapshot-and-compare that never
+// pushes anything would pass forever without testing the property.
+BOOST_AUTO_TEST_CASE( poolswap_no_real_account_writes )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS((dan)(bob));
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   transfer( account_id_type()( db ), bob, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2NOW" );
+   set_expiration( db, trx );
+
+   const asset_id_type core = asset_id_type();
+   // Snapshot every balance any real account holds in any asset the swap could
+   // conceivably move: CORE, both pool legs, and the fee/side asset.
+   std::vector<account_id_type> actors;
+   actors.push_back( dan.get_id() );
+   actors.push_back( bob.get_id() );
+   std::vector<asset_id_type> watched;
+   watched.push_back( core );
+   watched.push_back( p.asset_a );
+   watched.push_back( p.asset_b );
+   std::vector<std::vector<int64_t>> before;
+   for( const auto& a : actors )
+   {
+      std::vector<int64_t> row;
+      for( const auto& aid : watched ) row.push_back( db.get_balance( a, aid ).amount.value );
+      before.push_back( row );
+   }
+   const int64_t bal_a0 = p.pool( db ).balance_a.value;
+   const size_t nul_before = db.get_index_type<stealth_nullifier_index>().indices().size();
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-now", 50 );
+   BOOST_CHECK_NO_THROW( sw.op.validate() );
+   trx.operations = { sw.op };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+
+   // --- anti-vacuity: the swap really happened. ---
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value,
+                      bal_a0 + sw.expect.pool_receives.amount.value );
+   BOOST_CHECK_EQUAL(
+      db.get_index_type<stealth_nullifier_index>().indices().size() - nul_before, 2u );
+   {
+      const auto& bbi = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      BOOST_CHECK( bbi.find( sw.op.output.commitment ) != bbi.end() );
+   }
+   // --- the property under test: no real account balance moved. ---
+   for( size_t i = 0; i < actors.size(); ++i )
+      for( size_t j = 0; j < watched.size(); ++j )
+         BOOST_CHECK_EQUAL( db.get_balance( actors[i], watched[j] ).amount.value,
+                            before[i][j] );
+   // --- and the only impacted account is the temp fee payer (the output owner
+   //     is a fresh key authority, so it contributes no account id). ---
+   {
+      flat_set<account_id_type> impacted;
+      operation_get_impacted_accounts( operation( sw.op ), impacted, true );
+      BOOST_CHECK_EQUAL( impacted.size(), (size_t)1 );
+      BOOST_CHECK( impacted.count( GRAPHENE_TEMP_ACCOUNT ) == 1 );
+   }
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- EE-5 Part D: the three V1 vectors (G2-2 Note-3). op109's BP+ OUTPUT path
+// is V2-only (exact 592 bytes, "G2 wires no V1 Borromean leg"), and its V1 RING
+// leg is frozen past sunset — none of which was pinned.
+
+// D5: a V1 (Borromean) range-proof blob on the op109 output path is refused.
+// The blob is produced by the same fc::ecc::range_proof_sign call the op39
+// fixture uses for its V1 outputs, so it is a genuine V1 proof and not a
+// malformed 592-byte blob in disguise. It is refused on the exact-size bound,
+// which is the guard that keeps the V1 Borromean wire format off op109.
+BOOST_AUTO_TEST_CASE( poolswap_v1_blob_refused )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2V1B" );
+   set_expiration( db, trx );
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-v1b", 50 );
+   auto v1_blob = fc::ecc::range_proof_sign( 0, sw.op.output.commitment,
+      T_blind_secret( "g2-v1b-o" ), T_secret( "g2-v1b-n" ), 0, 0, sw.v_out );
+   BOOST_REQUIRE( v1_blob.size() != 592u );
+
+   stealth_pool_exchange_operation bad = sw.op;
+   bad.output.range_proof = v1_blob;
+   trx.operations = { bad };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "V1 Borromean range proof was ACCEPTED on the op109 output path" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "must be 592 bytes (BP+ m=1)" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// D6: op109 past stealth_v1_sunset_time is refused by the sunset gate
+// (stealth_evaluator.cpp:2088-2090). Without it a V1 op109 past sunset would
+// mint fresh V1-domain-nullified outputs, defeating the sunset for the swap
+// path. The gate sits BEFORE the float rule and before every crypto leg, so the
+// rest of the op need not be valid — only its proof_version and its bounds.
+BOOST_AUTO_TEST_CASE( poolswap_v1_sunset_refused )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2SUN" );
+   set_expiration( db, trx );
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-sun", 50 );
+   sw.op.proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   BOOST_REQUIRE_NO_THROW( sw.op.validate() ); // V1 is a legal version pre-sunset
+
+   // Cross the sunset.
+   generate_blocks( stealth_v1_sunset_time( db ) + 10 );
+   set_expiration( db, trx );
+   BOOST_REQUIRE( db.head_block_time() >= stealth_v1_sunset_time( db ) );
+
+   trx.operations = { sw.op };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "V1 pool swap past sunset was ACCEPTED" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "frozen past sunset" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// D7: a V1-PROVING ring input on op109 is refused. op109's ring leg is
+// version-bound through G2RM (stealth_proof.cpp:519 `pre.push_back(version)`),
+// so a ring signature produced under the V1 generators cannot satisfy the V2
+// leg — even though it authorizes the same opening over the same ring and the
+// same 32-byte G2RM message. Built with T_make_ring_input over the V2 message,
+// so the ONLY thing wrong is the proving version.
+//
+// ALT-LEG DISCIPLINE (learned the hard way): a key image depends only on the
+// opening and the version, NOT on the signed message. op109's alt leg is already
+// the V1 leg (alt_version flips V2->V1), so a naive V1 main leg carries the
+// SAME image as the untouched alt leg and is refused one guard earlier, by
+// `in.key_image != in.alt_key_image` (stealth_evaluator.cpp:2118) — a true but
+// unhelpful refusal that proves nothing about the ring verify. The alt leg is
+// therefore swapped to the ORIGINAL V2 main pair (a distinct image), which
+// clears :2118 and lets the push reach the V2 verify at :2227.
+BOOST_AUTO_TEST_CASE( poolswap_v1_ring_refused )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2V1R" );
+   set_expiration( db, trx );
+
+   // Tag is reused to recover the same pseudo-output opening the swap was built
+   // against, so the V1 ring provably authorizes the same value.
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-v1r", 50 );
+   BOOST_REQUIRE_NO_THROW( sw.op.validate() );
+
+   std::vector<fc::ecc::commitment_type> ring_cs( sw.op.input.ring.begin(),
+                                                  sw.op.input.ring.end() );
+   std::vector<fc::ecc::commitment_type> out_cs = { sw.op.output.commitment };
+   fc::sha256 m2 = stealth_pool_message( sw.op.proof_version,
+      sw.op.amount_to_sell.asset_id, sw.op.pool.instance.value,
+      sw.op.amount_to_sell.amount.value, sw.op.min_to_receive.amount.value,
+      sw.op.input.key_image, ring_cs, sw.op.input.pseudo_output, out_cs, sw.F );
+   std::string ms2( (const char*)m2.data(), 32 );
+
+   std::vector<std::vector<unsigned char>> Q;
+   for( const auto& c : sw.op.input.ring )
+      Q.push_back( std::vector<unsigned char>( c.begin(), c.end() ) );
+   BIGNUM* bs5 = T_bn( p.blinds[5] );
+   BIGNUM* bp5 = T_bn( T_blind_secret( "g2-v1r-pseudo" ) );
+   stealth_ring_input v1rin = T_make_ring_input( GRAPHENE_STEALTH_PROOF_V1, Q, 5,
+                                                 bs5, (uint64_t)p.each, bp5, ms2 );
+   BN_free( bs5 ); BN_free( bp5 );
+   // Same opening, same ring, same message — only the proving version differs.
+   BOOST_REQUIRE( v1rin.pseudo_output == sw.op.input.pseudo_output );
+   BOOST_REQUIRE( v1rin.key_image.size() == 33u );
+   BOOST_REQUIRE_EQUAL( v1rin.ring_sig.size(), 32 + 96 * sw.op.input.ring.size() );
+   BOOST_REQUIRE( v1rin.key_image != sw.op.input.key_image );
+
+   stealth_pool_exchange_operation bad = sw.op;
+   bad.input.key_image = v1rin.key_image;            // V1-proving main leg
+   bad.input.ring_sig = v1rin.ring_sig;
+   bad.input.alt_key_image = sw.op.input.key_image;  // V2 pair moved to the alt slot
+   bad.input.alt_ring_sig = sw.op.input.ring_sig;
+   BOOST_REQUIRE( bad.input.key_image != bad.input.alt_key_image );
+   BOOST_REQUIRE_NO_THROW( bad.validate() ); // shape is legal; only the proof fails
+
+   trx.operations = { bad };
+   try
+   {
+      PUSH_TX( db, trx );
+      BOOST_FAIL( "V1-proving ring was ACCEPTED on the op109 V2 path (G2RM version unbound)" );
+   }
+   catch( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_detail_string().find( "Ring signature does not verify" )
+                           != std::string::npos, e.to_detail_string() );
+   }
+   trx.clear();
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 

@@ -264,6 +264,17 @@ void stealth_maybe_record_activation( database& db );
  */
 uint32_t stealth_subsidy_output_count( const protocol::operation& op );
 
+/// Phase-2 A4 (spec 2026-10-11-phase2 §2): true iff the window is full and
+/// acct's share of the windowed base strictly exceeds 1/ring_target.
+/// Integer only, no db access (unit-testable without chain state).
+bool stealth_window_dominant( const stealth_depositor_window& w,
+                              account_id_type acct, uint32_t ring_target );
+/// Discount output count for op39: 1 when dominant past a full window, else
+/// the Rule R classifier result. Both op39 call sites use min(n, this).
+uint32_t stealth_op39_subsidy_count( const database& db, asset_id_type asset,
+                                     account_id_type depositor,
+                                     const protocol::operation& op );
+
 /**
  * Cost anchor for one blind op in CORE units: max(activation snapshot of the
  * transfer_to_blind schedule, pinned upstream defaults, current schedule),

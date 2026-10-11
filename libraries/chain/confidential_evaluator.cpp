@@ -75,7 +75,7 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
                                  o.fee.asset_id, cold_n,
                                  calculate_fee_for_operation( operation( o ) ),
                                  std::min( (uint32_t)o.outputs.size(),
-                                    stealth_subsidy_output_count( operation( o ) ) ) );
+                                    stealth_op39_subsidy_count( d, o.amount.asset_id, o.from, operation( o ) ) ) );
    }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
@@ -123,7 +123,7 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
                                     o.fee.asset_id, cold_n,
                                     calculate_fee_for_operation( operation( o ) ), core_fee_paid,
                                     std::min( (uint32_t)o.outputs.size(),
-                                       stealth_subsidy_output_count( operation( o ) ) ) );
+                                       stealth_op39_subsidy_count( db(), o.amount.asset_id, o.from, operation( o ) ) ) );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );

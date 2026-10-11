@@ -1318,6 +1318,39 @@ uint32_t stealth_subsidy_output_count( const protocol::operation& op )
    return op.visit( v );
 }
 
+bool stealth_window_dominant( const stealth_depositor_window& w,
+                              account_id_type acct, uint32_t ring_target )
+{
+   if( w.count < protocol::GRAPHENE_STEALTH_DEPOSITOR_WINDOW )
+      return false; // cold window: inclusion beats discipline (spec §9)
+   flat_map<account_id_type, uint64_t> acc; // ORDERED, deterministic
+   for( const auto& kv : w.events )
+      acc[ kv.second.account ] += kv.second.n;
+   uint64_t base = 0;
+   for( const auto& kv : acc )
+      base += kv.second;
+   const auto it = acc.find( acct );
+   const uint64_t mine = ( it == acc.end() ) ? 0 : it->second;
+   return fc::uint128_t( mine ) * ring_target > base; // strict: exactly 1/16 → false
+}
+
+uint32_t stealth_op39_subsidy_count( const database& db, asset_id_type asset,
+                                     account_id_type depositor,
+                                     const protocol::operation& op )
+{
+   const uint32_t cls = stealth_subsidy_output_count( op );
+   const auto* s = find_stealth_status( db );
+   if( !s )
+      return cls;
+   const auto it = s->deposit_windows.find( asset );
+   if( it == s->deposit_windows.end() )
+      return cls;
+   if( stealth_window_dominant( it->second, depositor,
+                                protocol::GRAPHENE_STEALTH_RING_TARGET ) )
+      return 1u;
+   return cls;
+}
+
 share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs )
 {
    // G3-01: the current-schedule leg is derived through

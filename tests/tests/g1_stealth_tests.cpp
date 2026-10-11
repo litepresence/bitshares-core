@@ -2040,6 +2040,30 @@ BOOST_AUTO_TEST_CASE( cold_start_crossing_agrees_on_cold )
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
 }
 
+BOOST_AUTO_TEST_CASE( window_dominant_classifier )
+{
+   // Empty window: never dominant (cold inclusion beats discipline).
+   stealth_depositor_window w0;
+   BOOST_CHECK( !stealth_window_dominant( w0, account_id_type(7), 16 ) );
+   // Full window, 900x acct7 + 124 distinct singles: 900*16 = 14400 > 1024.
+   stealth_depositor_window w;
+   for( uint32_t i = 0; i < 900; ++i )
+      w.events[i] = stealth_deposit_event{ account_id_type(7), 1u };
+   for( uint32_t i = 900; i < 1024; ++i )
+      w.events[i] = stealth_deposit_event{ account_id_type(1000 + i), 1u };
+   w.count = 1024;
+   BOOST_CHECK( stealth_window_dominant( w, account_id_type(7), 16 ) );
+   BOOST_CHECK( !stealth_window_dominant( w, account_id_type(1000), 16 ) );
+   // Exact 1/16 boundary is NOT dominant (strict >): 64*16 = 1024, not > 1024.
+   stealth_depositor_window w2;
+   for( uint32_t i = 0; i < 64; ++i )
+      w2.events[i] = stealth_deposit_event{ account_id_type(9), 1u };
+   for( uint32_t i = 64; i < 1024; ++i )
+      w2.events[i] = stealth_deposit_event{ account_id_type(2000 + i), 1u };
+   w2.count = 1024;
+   BOOST_CHECK( !stealth_window_dominant( w2, account_id_type(9), 16 ) );
+}
+
 BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
 { try {
    // Finding 1 (Critical) end-to-end proof: the conservation kernel

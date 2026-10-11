@@ -6344,6 +6344,39 @@ BOOST_AUTO_TEST_CASE( parity_dust_and_scale )
    generate_block();
 } FC_CAPTURE_AND_RETHROW() }
 
+BOOST_AUTO_TEST_CASE( anchor_split_decouples_floor )
+{
+   // Pin scale (test genesis zeroes it) + inflate op39 ppo 10x, mirroring
+   // the :4774 pattern. Fee base stays 5P; ppo 5P -> 50P.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fees = p.parameters.get_mutable_fees();
+      fees.scale = GRAPHENE_100_PERCENT;
+      auto& fee_params = fees.parameters;
+      auto itr = fee_params.find( transfer_to_blind_operation::fee_params_t() );
+      // Test genesis zero_all_fees() wipes fee too (not just scale/ppo),
+      // so restore the 5P base the live schedule assumes below.
+      itr->get<transfer_to_blind_operation::fee_params_t>().fee =
+         5 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      itr->get<transfer_to_blind_operation::fee_params_t>().price_per_output =
+         50 * GRAPHENE_BLOCKCHAIN_PRECISION;
+   } );
+   // Gap leg still tracks the live schedule: current(1) = 5P + 50P = 55P.
+   BOOST_REQUIRE_EQUAL( stealth_cost_anchor_core( db, 1 ).value,
+                        (int64_t)( 55 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+   const auto f1 = stealth_cost_floor_core( db, 1 ).value;
+   // Floor ignores the live schedule (max of pinned + snapshot only).
+   BOOST_CHECK( f1 <= (int64_t)( 10 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+   // Inflate again (100P/output): floor immobile, anchor still tracks.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fee_params = p.parameters.get_mutable_fees().parameters;
+      auto itr = fee_params.find( transfer_to_blind_operation::fee_params_t() );
+      itr->get<transfer_to_blind_operation::fee_params_t>().price_per_output =
+         100 * GRAPHENE_BLOCKCHAIN_PRECISION;
+   } );
+   BOOST_REQUIRE_EQUAL( stealth_cost_floor_core( db, 1 ).value, f1 );
+   BOOST_CHECK( stealth_cost_anchor_core( db, 1 ).value > f1 );
+}
+
 BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
 { try {
    // G3-04/E-07 genesis coverage: every new G1 op (104-107) has a registered

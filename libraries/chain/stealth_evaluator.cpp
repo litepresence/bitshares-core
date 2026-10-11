@@ -1389,6 +1389,25 @@ share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_output
    return share_type( static_cast<int64_t>( anchored ) );
 }
 
+share_type stealth_cost_floor_core( const database& db, uint32_t n_blind_outputs )
+{
+   // Pinned constant leg (historical floor, unmoved by any fee vote).
+   fc::uint128_t floored( protocol::GRAPHENE_STEALTH_ANCHOR_BASE_FEE );
+   floored += fc::uint128_t( protocol::GRAPHENE_STEALTH_ANCHOR_PRICE_PER_OUTPUT )
+              * n_blind_outputs;
+   // Activation snapshot leg (history, not live politics).
+   const auto* s = find_stealth_status( db );
+   if( s != nullptr )
+   {
+      fc::uint128_t snap( s->activation_k39_fee );
+      snap += fc::uint128_t( s->activation_k39_ppo ) * n_blind_outputs;
+      if( snap > floored )
+         floored = snap;
+   }
+   FC_ASSERT( floored <= GRAPHENE_MAX_SHARE_SUPPLY, "Stealth cost floor overflow" );
+   return share_type( static_cast<int64_t>( floored ) );
+}
+
 share_type stealth_parity_gap_core( const database& db, uint32_t n_blind_outputs,
                                     share_type parity_core, uint32_t subsidy_n )
 {

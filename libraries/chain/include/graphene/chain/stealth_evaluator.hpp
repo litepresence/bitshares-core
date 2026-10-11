@@ -290,6 +290,15 @@ uint32_t stealth_op39_subsidy_count( const database& db, asset_id_type asset,
  */
 share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_outputs );
 
+/// Phase-2b EE3-G01 (spec 2026-10-11-anchor-split §2): committee-independent
+/// fee floor = max(pinned, snapshot). Identical to stealth_cost_anchor_core
+/// minus the live-schedule current leg, so no committee fee vote can raise
+/// what any user must pay (or accelerate pool drain through the floor).
+/// The gap leg keeps the three-leg anchor (scale-together G3-01). This is
+/// capture-surface removal (governance hardening), never economics: at
+/// default schedules all legs coincide and nothing observable changes.
+share_type stealth_cost_floor_core( const database& db, uint32_t n_blind_outputs );
+
 /**
  * Discount actually granted, CORE units: max(0, anchor(min(n_blind_outputs,
  * subsidy_n)) - parity), where parity is the op's own scheduled fee. Zero

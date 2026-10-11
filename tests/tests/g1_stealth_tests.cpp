@@ -1866,6 +1866,65 @@ BOOST_AUTO_TEST_CASE( deposit_histogram_tracks_depositor )
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 19u );
 }
 
+BOOST_AUTO_TEST_CASE( deposit_histogram_detects_sybil_share )
+{
+   // Detection, not scale: 9+1 shape carries the same 90% share as P2's 90+10.
+   // Preamble (fork jump + seeded pool — REQUIRED, found by B2's implementer:
+   // fixture genesis predates HARDFORK_STEALTH_TIME so the helper no-ops
+   // without the jump; test-genesis zero fees open the full pinned-anchor gap
+   // without a seeded pool. Same pattern as decoy_rules_enforced and B2's
+   // deposit_histogram_tracks_depositor).
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (sybil)(u1)(u2)(u3)(u4)(u5)(u6)(u7)(u8)(u9)(u10) );
+   const asset_object& core = asset_id_type()(db);
+   const std::vector<const account_object*> fund =
+      { &sybil, &u1, &u2, &u3, &u4, &u5, &u6, &u7, &u8, &u9, &u10 };
+   for( const account_object* who : fund )
+      transfer( account_id_type()(db), *who, core.amount( 200000000 ) );
+   transfer( account_id_type()(db), sybil, core.amount( 400000000 ) ); // seed-payer top-up
+   generate_block(); // seal: seed does direct writes
+   g1c_seed_pool( db, sybil_id, core, 24000000 ); // 19 deposits x 1M need; 24M mirrors B2
+   auto do_deposit = [&]( const account_object& who, const fc::ecc::private_key& key,
+                          const std::string& tag )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 500 );
+      ttb.from = who.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_secret( (tag + "-b").c_str() );
+      auto N = T_secret( (tag + "-n").c_str() );
+      o.commitment = fc::ecc::blind( B, 500 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 500 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      trx.operations = { ttb };
+      sign( trx, key );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      trx.clear();
+   };
+   for( int i = 0; i < 9; ++i )
+      do_deposit( sybil, sybil_private_key, "s-sybil-" + std::to_string(i) );
+   do_deposit( u1, u1_private_key, "s-u1-0" );
+   // counts {9,1}: N=10, sumsq=81+1=82, E=100/82=1. Nominal says 10, E says 1.
+   BOOST_REQUIRE_EQUAL( stealth_deposited_outputs( db, core.get_id() ), 10u );
+   BOOST_REQUIRE_EQUAL( stealth_effective_depositor_count( db, core.get_id() ), 1u );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 10u );
+   const std::vector<std::pair<const account_object*, const fc::ecc::private_key*>> rest =
+      { {&u2,&u2_private_key}, {&u3,&u3_private_key}, {&u4,&u4_private_key},
+        {&u5,&u5_private_key}, {&u6,&u6_private_key}, {&u7,&u7_private_key},
+        {&u8,&u8_private_key}, {&u9,&u9_private_key}, {&u10,&u10_private_key} };
+   int j = 0;
+   for( const auto& p : rest )
+      do_deposit( *p.first, *p.second, "s-rest-" + std::to_string(j++) );
+   // counts {9,1x10}: N=19, sumsq=81+10=91, E=361/91=3 (3*91=273<=361<364).
+   BOOST_REQUIRE_EQUAL( stealth_deposited_outputs( db, core.get_id() ), 19u );
+   BOOST_REQUIRE_EQUAL( stealth_effective_depositor_count( db, core.get_id() ), 3u );
+}
+
 BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
 { try {
    // Finding 1 (Critical) end-to-end proof: the conservation kernel

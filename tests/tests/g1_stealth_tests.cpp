@@ -12617,12 +12617,23 @@ BOOST_AUTO_TEST_CASE( subsidy_prefork_inert )
       BOOST_CHECK_EQUAL( T_ee_pool( db, core_id ), 0 );
    }
 
-   // --- contrast: the IDENTICAL deposit POST-fork with an empty pool floats
-   // --- to cost. This is what makes the pre-fork acceptance above load-bearing.
-   generate_blocks( HARDFORK_STEALTH_TIME );
-   generate_block();
-   set_expiration( db, trx );
-   BOOST_CHECK_THROW(
+    // --- contrast: the IDENTICAL deposit POST-fork with an empty pool floats
+    // --- to cost. This is what makes the pre-fork acceptance above load-bearing.
+    generate_blocks( HARDFORK_STEALTH_TIME );
+    generate_block();
+    set_expiration( db, trx );
+    // C1-followup (cold-start A3): the pre-fork deposit above was never counted
+    // (stealth_pool_count_add no-ops pre-fork), so depth here is 0 and every
+    // deposit below would read cold (cold_n = 0, floor anchor(0)) — the
+    // anchor1-1 leg would CLEAR instead of refusing. Seed to the floor first:
+    // 11 singles at the exact anchor(1) cost, so the contrast pins the REAL-n
+    // floor verbatim and the pool stays empty (cost path throughout).
+    for( int i = 0; i < 11; ++i )
+       BOOST_REQUIRE_EQUAL(
+          T_ee_deposit( *this, payer, dan_private_key, own,
+                        "ee9-seed|" + std::to_string( i ), { 500 }, anchor1 ).size(), 1u );
+    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 11u );
+    BOOST_CHECK_THROW(
       T_ee_deposit( *this, payer, dan_private_key, own, "ee9-post", { 1000 }, 0 ),
       fc::exception );
    BOOST_REQUIRE_EQUAL(
@@ -12719,8 +12730,24 @@ BOOST_AUTO_TEST_CASE( subsidy_never_raises_fee )
       transfer_from_blind_operation exitop; exitop.inputs.resize( 2 );
       check( operation( exitop ), 0u );
    }
-   // --- (b) op level: the floor is anchor(REAL n) --------------------------
-   for( uint32_t n : { 1u, 2u, 8u } )
+    // --- (b) op level: the floor is anchor(REAL n) --------------------------
+    // C1-followup (cold-start A3): levels (a) and monotonicity above are pure
+    // function calls, so depth here is still 0 and every deposit below would
+    // read cold (floor anchor(0), so anchor(n)-1 would CLEAR instead of
+    // refusing). Seed to the floor first: 11 singles at the exact anchor(1)
+    // cost, so the loop pins the REAL-n floor verbatim and the pool stays
+    // empty (cost path throughout). Level (a) is untouched.
+    {
+       const share_type seed_anchor = stealth_cost_anchor_core( db, 1 );
+       BOOST_REQUIRE_EQUAL( seed_anchor.value, 1000000 );
+       for( int i = 0; i < 11; ++i )
+          BOOST_REQUIRE_EQUAL(
+             T_ee_deposit( *this, dan_id, dan_private_key, own,
+                           "ee10-seed|" + std::to_string( i ), { 100 },
+                           seed_anchor.value ).size(), 1u );
+       BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 11u );
+    }
+    for( uint32_t n : { 1u, 2u, 8u } )
    {
       const share_type anchor = stealth_cost_anchor_core( db, n );
       const std::vector<int64_t> vals( n, 100 );
@@ -13054,11 +13081,14 @@ BOOST_AUTO_TEST_CASE( subsidy_growth_preserved )
    const asset_id_type core_id = core.get_id();
    t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "ee3", 16, true );
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 16u );
-   // t5_fund_pool seeded n_out*1 CORE + 5 CORE and each of its 16 zero-fee
-   // deposits drew its own anchor(1), leaving exactly 5 CORE — enough for the
-   // 4.5 CORE eight-output grant without seeding anything else.
-   const int64_t pool0 = T_ee_pool( db, core_id );
-   BOOST_REQUIRE_EQUAL( pool0, 5 * 1000000 );
+    // C1-followup (cold-start A3): t5_fund_pool seeded n_out*1 CORE + 5 CORE =
+    // 21 CORE, but its 16 zero-fee deposits no longer all draw anchor(1). The
+    // first 11 land at depth < 11, so cold_n = 0 and each draws anchor(0) =
+    // 0.5 CORE; only the last 5 draw anchor(1). Pool: 21 - (11*0.5 + 5*1) =
+    // 10.5 CORE (pre-cold: 21 - 16*1 = 5 CORE) — still enough for the 4.5 CORE
+    // eight-output grant without seeding anything else.
+    const int64_t pool0 = T_ee_pool( db, core_id );
+    BOOST_REQUIRE_EQUAL( pool0, 10500000 );
    const int64_t acc0 = core.dynamic_asset_data_id( db ).accumulated_fees.value;
    const int64_t anchor8 = stealth_cost_anchor_core( db, 8 ).value;
    BOOST_REQUIRE_EQUAL( anchor8, 4500000 );

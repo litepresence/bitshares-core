@@ -2008,6 +2008,38 @@ BOOST_AUTO_TEST_CASE( cold_start_terminates_at_floor )
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 28u );
 }
 
+BOOST_AUTO_TEST_CASE( cold_start_crossing_agrees_on_cold )
+{
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (alice) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()(db), alice, core.amount( 200000000 ) );
+   generate_block();
+   // EE-test pattern (cf. cold_start_refuses_oversize_deposit): multi-output
+   // stealth txs exceed the default max-transaction-size; raise it so the
+   // agreement guards decide, not the size gate.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   // Seed to depth 8 with singles at anchor(1) = 1,000,000 (cold: cost is
+   // anchor(0) = 500,000; unseeded pool, exact-or-better fees throughout).
+   for( int i = 0; i < 8; ++i )
+      T_ee_deposit( *this, alice_id, alice_private_key, own,
+                    "c1x-seed-" + std::to_string(i), { 500 }, 1000000 );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 8u );
+   // One 8-output deposit (8x500 = 4000) at base-only fee 500,000 straddles
+   // the floor (8 -> 16): require reads cold (8 < 11), and only the pre-add
+   // consume placement agrees. Without it, consume would read warm (16) and
+   // throw on the empty pool. GREEN iff the refinement holds.
+   std::vector<int64_t> eight( 8, 500 );
+   T_ee_deposit( *this, alice_id, alice_private_key, own, "c1x-cross", eight, 500000 );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 16u );
+}
+
 BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
 { try {
    // Finding 1 (Critical) end-to-end proof: the conservation kernel

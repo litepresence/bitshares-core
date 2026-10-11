@@ -509,6 +509,64 @@ void stealth_pool_count_add( database& db, asset_id_type asset, int32_t delta )
    } );
 }
 
+/// Phase-1 instrumentation (spec 2026-10-11 §8): ring-buffer push of one
+/// deposit event. Post-STEALTH only (same guard posture as the adjacent
+/// count-add); grandfathered pre-fork creates never count.
+void stealth_deposit_histogram_add( database& db, asset_id_type asset,
+                                    account_id_type depositor, uint32_t n )
+{
+   if( !HARDFORK_STEALTH_PASSED( db.head_block_time() ) )
+      return; // grandfathered pre-fork creates never count
+   FC_ASSERT( n >= 1, "Deposit window needs a positive output count" );
+   const auto& s = get_or_create_stealth_status( db );
+   db.modify( s, [&]( stealth_status_object& o ) {
+      auto& w = o.deposit_windows[ asset ];
+      w.total_ever += n;
+      FC_ASSERT( w.total_ever <= (uint64_t)GRAPHENE_MAX_SHARE_SUPPLY,
+                 "Deposit window total overflow" );
+      stealth_deposit_event ev;
+      ev.account = depositor;
+      ev.n = n;
+      w.events[ w.head ] = ev;
+      w.head = ( w.head + 1 ) % protocol::GRAPHENE_STEALTH_DEPOSITOR_WINDOW;
+      if( w.count < protocol::GRAPHENE_STEALTH_DEPOSITOR_WINDOW )
+         ++w.count;
+   } );
+}
+
+uint64_t stealth_deposited_outputs( const database& db, asset_id_type asset )
+{
+   const auto* s = find_stealth_status( db );
+   if( !s )
+      return 0;
+   auto it = s->deposit_windows.find( asset );
+   return ( it == s->deposit_windows.end() ) ? 0 : it->second.total_ever;
+}
+
+uint64_t stealth_effective_depositor_count( const database& db, asset_id_type asset )
+{
+   const auto* s = find_stealth_status( db );
+   if( !s )
+      return 0;
+   auto it = s->deposit_windows.find( asset );
+   if( it == s->deposit_windows.end() || it->second.count == 0 )
+      return 0;
+   // Exact aggregation over the window. Local flat_map (ORDERED, deterministic);
+   // O(W) scan is acceptable: Phase 1 gates nothing on this path (tests, wallet, API).
+   flat_map<account_id_type, uint64_t> acc;
+   for( const auto& kv : it->second.events )
+      acc[ kv.second.account ] += kv.second.n;
+   // fc::uint128_t per this file's discipline (cf. stealth_parity_maintenance
+   // :1575-1578); same arithmetic as the brief's __uint128_t form.
+   fc::uint128_t base = 0, sumsq = 0;
+   for( const auto& kv : acc )
+   {
+      base += kv.second;
+      sumsq += fc::uint128_t( kv.second ) * kv.second;
+   }
+   return (uint64_t)( ( base * base ) / sumsq ); // sumsq > 0: counts >= 1
+}
+
 // ---------------------------------------------------------------------------
 // stealth_transfer
 // ---------------------------------------------------------------------------

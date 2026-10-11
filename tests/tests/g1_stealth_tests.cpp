@@ -1784,8 +1784,87 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
       // 2 outputs created -> 18 decoy candidates. Each ring spend grows the
       // set; the floor gate (not this counter) enforces thin-pool halts.
       BOOST_CHECK_EQUAL( stealth_pool_depth( db, core.get_id() ), 18u );
-    BN_free( bs ); BN_free( bprime );
+     BN_free( bs ); BN_free( bprime );
 } FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( deposit_histogram_tracks_depositor )
+{
+   // TDD RED first: helper + getters do not exist yet; this case must fail
+   // to compile until Steps 3-5 land.
+   //
+   // B2 DEVIATION (documented, load-bearing): preamble the brief omitted,
+   // without which GREEN is unreachable —
+   //  (a) the STEALTH fork jump: stealth_deposit_histogram_add is specified
+   //      (Step 4) to no-op pre-STEALTH, and the fixture genesis is May-2015
+   //      vs HARDFORK_STEALTH_TIME 2030-01-01, so without the jump every
+   //      getter (and stealth_pool_depth) reads 0;
+   //  (b) the parity-pool seed: post-fork with the test-zeroed fee schedule
+   //      every fee-0 1-output deposit carries the 1M CORE pinned-anchor gap
+   //      (see the g1c note at :806-811), so an unseeded pool makes
+   //      stealth_require_blind_fee throw on the first deposit.
+   // Both follow sibling-case precedent (decoy_rules_enforced,
+   // stealth_transfer_happy_path) in form.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
+   ACTORS( (alice)(bob)(c1)(c2)(c3)(c4)(c5)(c6)(c7)(c8)(c9)(c10)(c11)(c12)(c13)(c14) );
+   const asset_object& core = asset_id_type()(db);
+   const std::vector<const account_object*> fund =
+      { &alice, &bob, &c1, &c2, &c3, &c4, &c5, &c6, &c7, &c8,
+        &c9, &c10, &c11, &c12, &c13, &c14 };
+   for( const account_object* who : fund )
+      transfer( account_id_type()(db), *who, core.amount( 200000000 ) );
+   generate_block();
+   // B2 DEVIATION (b): seed-payer top-up + seal + parity seed. 19 deposits x
+   // 1M gap need >= 19M in the pool; 24M mirrors stealth_transfer_happy_path.
+   // g1c_seed_pool debits 20x need (5% routing), so alice's 200M cannot cover
+   // it — top up first. Sealed state required (direct writes; see the
+   // g1c_seed_pool durability note).
+   transfer( account_id_type()(db), alice, core.amount( 400000000 ) );
+   generate_block();
+   g1c_seed_pool( db, alice_id, core, 24000000 );
+   auto do_deposit = [&]( const account_object& who, const fc::ecc::private_key& key,
+                          const std::string& tag )
+   {
+      transfer_to_blind_operation ttb;
+      ttb.amount = core.amount( 500 );
+      ttb.from = who.id;
+      auto k = fc::ecc::private_key::generate();
+      blind_output o;
+      o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+      auto B = T_secret( (tag + "-b").c_str() );
+      auto N = T_secret( (tag + "-n").c_str() );
+      o.commitment = fc::ecc::blind( B, 500 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B, N, 0, 0, 500 );
+      ttb.blinding_factor = B;
+      ttb.outputs = { o };
+      trx.operations = { ttb };
+      sign( trx, key );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) );
+      trx.clear();
+   };
+   for( int i = 0; i < 4; ++i )
+      do_deposit( alice, alice_private_key, "h-alice-" + std::to_string(i) );
+   BOOST_REQUIRE_EQUAL( stealth_deposited_outputs( db, core.get_id() ), 4u );
+   BOOST_REQUIRE_EQUAL( stealth_effective_depositor_count( db, core.get_id() ), 1u );
+   do_deposit( bob, bob_private_key, "h-bob-0" );
+   // counts {4,1}: N=5, sumsq=16+1=17, E=25/17=1.
+   BOOST_REQUIRE_EQUAL( stealth_deposited_outputs( db, core.get_id() ), 5u );
+   BOOST_REQUIRE_EQUAL( stealth_effective_depositor_count( db, core.get_id() ), 1u );
+   const std::vector<std::pair<const account_object*, const fc::ecc::private_key*>> rest =
+      { {&c1,&c1_private_key}, {&c2,&c2_private_key}, {&c3,&c3_private_key},
+        {&c4,&c4_private_key}, {&c5,&c5_private_key}, {&c6,&c6_private_key},
+        {&c7,&c7_private_key}, {&c8,&c8_private_key}, {&c9,&c9_private_key},
+        {&c10,&c10_private_key}, {&c11,&c11_private_key}, {&c12,&c12_private_key},
+        {&c13,&c13_private_key}, {&c14,&c14_private_key} };
+   int j = 0;
+   for( const auto& p : rest )
+      do_deposit( *p.first, *p.second, "h-rest-" + std::to_string(j++) );
+   // counts {4,1x15}: N=19, sumsq=16+15=31, E=361/31=11 (11*31=341<=361<372).
+   BOOST_REQUIRE_EQUAL( stealth_deposited_outputs( db, core.get_id() ), 19u );
+   BOOST_REQUIRE_EQUAL( stealth_effective_depositor_count( db, core.get_id() ), 11u );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 19u );
+}
 
 BOOST_AUTO_TEST_CASE( stealth_conservation_kernel_rejects_mint )
 { try {

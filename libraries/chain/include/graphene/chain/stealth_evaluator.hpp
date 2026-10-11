@@ -491,7 +491,15 @@ void stealth_shadow_add( database& db, asset_id_type asset, share_type delta );
  * from the index, so they add outputs.size() only — nullified outputs stay
  * indexed and decoy-eligible. Bounded: zero entries are removed.
  */
-void stealth_pool_count_add( database& db, asset_id_type asset, int32_t delta );
+ void stealth_pool_count_add( database& db, asset_id_type asset, int32_t delta );
+/// Phase-1 instrumentation (spec 2026-10-11 §8): ring-buffer push.
+/// No-op pre-STEALTH. n >= 1 (call sites pass outputs.size(), validated ≥ 1).
+void stealth_deposit_histogram_add( database& db, asset_id_type asset,
+                                    account_id_type depositor, uint32_t n );
+/// Total deposited outputs (monotonic telemetry). Never throws.
+uint64_t stealth_deposited_outputs( const database& db, asset_id_type asset );
+/// Effective depositor count E_dep = N_w^2/sumsq over the window, 0 when empty.
+uint64_t stealth_effective_depositor_count( const database& db, asset_id_type asset );
 /**
  * Post-STEALTH range soundness for legacy blind outputs (closes the live
  * gap uniformly): every output carrying a proof MUST verify, and every

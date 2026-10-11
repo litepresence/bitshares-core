@@ -99,6 +99,10 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
    // Pool floor counter: post-STEALTH creates carry metadata (counted);
    // pre-fork creates are grandfathered (helper no-ops pre-fork anyway).
    stealth_pool_count_add( db(), o.amount.asset_id, (int32_t)o.outputs.size() );
+   // Phase-1 instrumentation (spec 2026-10-11 §8): deposit-side attribution.
+   // State only — no behavior gate reads it. Same call posture as count-add.
+   stealth_deposit_histogram_add( db(), o.amount.asset_id, o.from,
+                                  (uint32_t)o.outputs.size() );
    // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),

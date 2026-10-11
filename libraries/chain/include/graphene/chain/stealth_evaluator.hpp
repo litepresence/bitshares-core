@@ -224,11 +224,11 @@ void stealth_maybe_record_activation( database& db );
  * spec §1 in which every op consumes its inputs (EE-1b, review F-1):
  *   - RING spends consume NOTHING — the whole-ring spent write and its coupled
  *     `stealth_pool_count_add(...,-1)` were both retired
- *     (stealth_evaluator.cpp:769-771), so ΔD_a = +n_out for op40/op104/op106/
+ *     (stealth_evaluator.cpp:770-772), so ΔD_a = +n_out for op40/op104/op106/
  *     op109 at any ring size. A consolidation-shaped m-in/m-out ring op grows
  *     the measured live set by m and keeps the full per-output component.
  *   - EXPLICIT spends DO consume (-spent_counted at
- *     confidential_evaluator.cpp:185 and stealth_evaluator.cpp:1924), so
+ *     confidential_evaluator.cpp:187 and stealth_evaluator.cpp:1968), so
  *     op41/op108 net n_out - n_in: net-positive keeps the full component,
  *     net <= 0 falls back to the base fee (n = 1), and op41 — which carries no
  *     outputs member at all — and op108's exit leg get 0.
@@ -236,8 +236,28 @@ void stealth_maybe_record_activation( database& db );
  *     into the blind set); an unknown op fails closed at 0.
  *
  * SCOPE — this NEVER governs the fee floor. The floor is
- * `stealth_cost_anchor_core(db, n_blind_outputs)`, which no user's fee is
- * computed against differently after this function exists. Callers MUST pass
+ * `stealth_cost_anchor_core(db, n_blind_outputs)` and this classifier cannot
+ * move it: callers hand that function the op's REAL n_blind_outputs, so Rule R
+ * can cap a DISCOUNT but never a floor.
+ *
+ * NARROWING (EE3-M1). This used to read "... which no user's fee is computed
+ * against differently after this function exists". True when written — op109
+ * then called neither `stealth_require_blind_fee` nor
+ * `stealth_consume_parity_subsidy` and had no float rule at all (`ee67fd75`) —
+ * but no longer a universal: `bed7c6ef` put op109 inside the mechanism, so an
+ * op109 fee is now computed against the anchor where before it was not. What
+ * survives is the weaker and load-bearing claim: this classifier never GOVERNS
+ * the floor. Callers hand `stealth_cost_anchor_core` the op's REAL
+ * n_blind_outputs, so Rule R can only shrink the gap, never move the floor;
+ * the anchor function itself is unmodified (byte-identical since `ee67fd75`,
+ * tooling/verify_stealth_cost_anchor_unchanged.py). op109's floor is
+ * `anchor(1)` — the same for every 1-in/1-out swap, because it passes the
+ * literal 1 (stealth_evaluator.cpp:2210) and a ring of any size cannot change
+ * it. That rule is intended, STEALTH-gated (:1401 skips pre-STEALTH), fails
+ * closed (:1411 asserts below the floor), and is pinned by
+ * poolswap_happy_path / poolswap_wrong_fee_fails.
+ *
+ * Callers MUST pass
  *     subsidy_n = min( n_blind_outputs, stealth_subsidy_output_count(op) )
  * so the cap can only SHRINK the gap; taking the classifier result directly
  * would let a call site's own (possibly larger) n leak back in.

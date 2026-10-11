@@ -361,7 +361,7 @@ uint32_t stealth_work_for_range_proofs( uint32_t n_outputs )
 uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o )
 {
    // 64-bit accumulation with saturation, mirroring
-   // stealth_work_for_stealth_transfer (:331-344): this gate runs BEFORE the
+   // stealth_work_for_stealth_transfer (:338-351): this gate runs BEFORE the
    // input/output-count asserts and a proposal-embedded op bypasses validate(),
    // so counts are unbounded at gate time — saturate, never wrap.
    uint64_t w = GRAPHENE_STEALTH_WORK_US_PER_KERNEL;            // conservation kernel
@@ -374,7 +374,7 @@ uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend
 uint32_t stealth_work_for_pool_exchange( uint32_t ring_size )
 {
    // 64-bit accumulation with saturation, mirroring
-   // stealth_work_for_stealth_transfer (:334-347): the gate runs before any
+   // stealth_work_for_stealth_transfer (:338-351): the gate runs before any
    // ring-size assert and a proposal-embedded op bypasses validate(), so
    // ring_size is unbounded at gate time — saturate, never wrap, and the
    // gate fails closed on the saturated value. Single 1-in/1-out G2 swap
@@ -1147,15 +1147,15 @@ namespace {
 ///
 ///   RING spends consume NOTHING. The Task-3 nullifier migration retired the
 ///   whole-ring spent write together with its coupled counter decrement
-///   (stealth_evaluator.cpp:769-771: "// DELETED: the coupled
+///   (stealth_evaluator.cpp:770-772: "// DELETED: the coupled
 ///   stealth_pool_count_add( db(), o.asset_id, -1 )."). Ring members therefore
 ///   stay decoy-eligible by design and ΔD_a = +n_out, whatever the ring size.
-///   op104 :791 is the coded witness — `pool_count_add(... outputs.size())` and
+///   op104 :792 is the coded witness — `pool_count_add(... outputs.size())` and
 ///   nothing else. A consolidation-shaped 8-in/8-out ring op therefore GROWS
 ///   the measured live set by 8, so it must not be capped at 1.
 ///
 ///   EXPLICIT spends really do consume: `-spent_counted` at
-///   confidential_evaluator.cpp:185 (op41) and stealth_evaluator.cpp:1924
+///   confidential_evaluator.cpp:187 (op41) and stealth_evaluator.cpp:1968
 ///   (op108), so ΔD_a = n_out - n_in there.
 ///
 /// Reading the counter — not the pre-Task-3 intent — is what keeps the money
@@ -2243,8 +2243,8 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
    }
 
    // (11) Nullifier absence, both legs (proof-before-nullifier, op108
-   // :1697-1712 discipline: the pin + ring proofs above established the
-   // images ARE this opening before the set is consulted).
+   // stealth_evaluator.cpp:1832-1846 discipline: the pin + ring proofs above
+   // established the images ARE this opening before the set is consulted).
    FC_ASSERT( nul.find( nullifier_key( in.key_image ) ) == nul.end(),
               "Key image already spent" );
    FC_ASSERT( nul.find( nullifier_key( in.alt_key_image ) ) == nul.end(),

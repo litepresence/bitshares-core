@@ -604,8 +604,8 @@ struct stealth_explicit_spend_operation : public base_operation
  * amount_to_sell) → conservation kernel (v_out = amount_to_sell − F) →
  * evaluator integer check (v_out == pool_pays − f_taker) → BP+ range
  * (v_out ∈ [0,2^64)) → nullifiers (proof-before-nullifier order, op108
- * :1697-1712 discipline). Amounts stay public (pool reserves reveal them);
- * only the input/output linkage is blind.
+ * stealth_evaluator.cpp:1832-1846 discipline). Amounts stay public (pool
+ * reserves reveal them); only the input/output linkage is blind.
  *
  * fee.asset_id MUST equal the input asset (G1 :495 discipline): a third-asset
  * tx fee would need its own generator term. All fee terms are

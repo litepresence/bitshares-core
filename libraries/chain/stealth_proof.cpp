@@ -518,7 +518,7 @@ fc::sha256 stealth_pool_message( uint8_t version,
 {
    std::string pre = "G2RM";
    pre.push_back( (char)version );
-   // F-03 count binding (same discipline as stealth_ring_message :467-479):
+   // F-03 count binding (same discipline as stealth_ring_message :475-507):
    // fixed-width LE64 counts hashed BEFORE the commitment run so no
    // (n,m) re-partitioning of ring[33n] || pseudo[33] || outputs[33m]
    // can share a preimage.

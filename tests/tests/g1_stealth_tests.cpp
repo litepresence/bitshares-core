@@ -12291,6 +12291,86 @@ static std::vector<ee_bal> T_ee_deposit( database_fixture& f, account_id_type fr
    return r;
 }
 
+// Stratified draw (spec 2026-10-11-wallet §1): 56+7+7 across three windows
+// gives exactly 5+5+5 decoys per 15 picks regardless of shuffle, so with the
+// real fixed in the majority window, outside-window decoy slots == 2000 of
+// 3000 EXACTLY. Pre-change the uniform draw conforms with P≈1e-5/attempt, so
+// sampling either throws (near-certain) or fails the exact count — both RED.
+// (Placed after T_ee_deposit: ee_bal is complete only here.)
+BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   // One pending block per batch (no window straddle); unseeded pool with
+   // exact-cost fees anchor(1) = 1M (cost path binds). Funding: 70*1M +
+   // 70*500 << 500M. ✓ Depth 70 = deep regime (≥64).
+   std::vector<fc::ecc::commitment_type> commitsA;
+   for( int i = 0; i < 56; ++i )
+   {
+      auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
+                             "wA-" + std::to_string(i), { 500 }, 1000000 );
+      BOOST_REQUIRE_EQUAL( r.size(), 1u );
+      if( i == 0 ) commitsA.push_back( r[0].commit );
+   }
+   generate_blocks( 110 ); // next 100-block window guaranteed (110 > 100)
+   for( int i = 0; i < 7; ++i )
+      T_ee_deposit( *this, dan_id, dan_private_key, own,
+                    "wB-" + std::to_string(i), { 500 }, 1000000 );
+   generate_blocks( 110 );
+   for( int i = 0; i < 7; ++i )
+      T_ee_deposit( *this, dan_id, dan_private_key, own,
+                    "wC-" + std::to_string(i), { 500 }, 1000000 );
+   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 70u );
+   // Real-window identity from live state (robust to any straddle).
+   const auto& bbi =
+      db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   auto win_of = [&]( const fc::ecc::commitment_type& c ) -> uint32_t
+   {
+      auto itr = bbi.find( c );
+      BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "member not indexed" );
+      return itr->created_block / 100;
+   };
+   const uint32_t realW = win_of( commitsA[0] );
+   // 200 rings around a majority-window real; count decoy slots OUTSIDE it.
+   uint32_t outside = 0, total = 0;
+   for( int s = 0; s < 200; ++s )
+   {
+      graphene::chain::stealth_sampled_ring smp =
+         graphene::chain::stealth_sample_pool_ring(
+            db, core.get_id(), commitsA[0] );
+      BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
+      BOOST_REQUIRE( smp.real_index < smp.ring.size() );
+      BOOST_CHECK( smp.ring[smp.real_index] == commitsA[0] );
+      { // distinct members (evaluator refuses duplicates)
+         std::vector<fc::ecc::commitment_type> sorted = smp.ring;
+         std::sort( sorted.begin(), sorted.end() );
+         BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
+                      == sorted.end() );
+      }
+      for( size_t m = 0; m < smp.ring.size(); ++m )
+      {
+         if( m == smp.real_index )
+            continue;
+         ++total;
+         if( win_of( smp.ring[m] ) != realW )
+            ++outside;
+      }
+   }
+   BOOST_REQUIRE_EQUAL( total, 3000u );
+   BOOST_REQUIRE_EQUAL( outside, 2000u );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
 // EE-2 test-only helper: generalized op104 (stealth_transfer) ring spend.
 // Spends pool outputs `ins` (p.each each) into `outs` new V2 BP+ outputs plus
 // `fee`. Mirrors t5_build_spend (1-in/2-out) with the SHAPE parameterised, so

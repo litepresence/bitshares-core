@@ -22,6 +22,8 @@
 
 #include <openssl/rand.h>
 
+#include <map>
+
 namespace graphene { namespace chain {
 
 namespace {
@@ -148,8 +150,34 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
       FC_ASSERT( shuffle_indices( order ), "Prover RNG failed" );
       std::vector<cand> picked;
       picked.reserve( ring_size );
-      for( uint32_t k = 0; k < ring_size - 1; ++k )
-         picked.push_back( others[order[k]] );
+      // Stratified draw (spec 2026-10-11-wallet §1): bucket the shuffled
+      // candidates by creation window (created_block / 100 — the same grid
+      // as blind_window_counts), then round-robin across non-empty buckets.
+      // A single-window dust dump earns one slot per pass, not an
+      // output-proportional share. Bucket order is shuffled-order (no
+      // signal); the real input's own bucket stays eligible (excluding it
+      // would shrink the set and mark which window lacks the real input).
+      std::map<uint32_t, std::vector<size_t>> buckets;
+      for( size_t k = 0; k < order.size(); ++k )
+         buckets[ others[ order[k] ].blk / 100 ].push_back( order[k] );
+      bool progress = true;
+      while( picked.size() < (size_t)( ring_size - 1 ) && progress )
+      {
+         progress = false;
+         for( auto& kv : buckets )
+         {
+            if( picked.size() >= (size_t)( ring_size - 1 ) )
+               break;
+            if( !kv.second.empty() )
+            {
+               picked.push_back( others[ kv.second.back() ] );
+               kv.second.pop_back();
+               progress = true;
+            }
+         }
+      }
+      FC_ASSERT( picked.size() == (size_t)( ring_size - 1 ),
+                 "Stratified draw exhausted candidates" );
       // Real input at a random position (order is consensus-significant;
       // a fixed position would tag the real member).
       bool ok = false;

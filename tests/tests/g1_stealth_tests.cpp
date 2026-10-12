@@ -6377,6 +6377,42 @@ BOOST_AUTO_TEST_CASE( anchor_split_decouples_floor )
    BOOST_CHECK( stealth_cost_anchor_core( db, 1 ).value > f1 );
 }
 
+BOOST_AUTO_TEST_CASE( floor_ignores_op39_schedule )
+{
+   // STEALTH must be passed or require() returns early (vacuous pass) —
+   // jump first. No deposits, no pool, no ops needed beyond this.
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   // Scale 100% + op39 fee base 50P (mirror :4774 pattern). ppo untouched.
+   // current(1) = 50P + 5P = 55P. Snapshot predates the raise (no maintenance
+   // crosses mid-case), so floor(1) = max(pinned 10P, snap) either way.
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fees = p.parameters.get_mutable_fees();
+      fees.scale = GRAPHENE_100_PERCENT;
+      auto& fee_params = fees.parameters;
+      auto itr = fee_params.find( transfer_to_blind_operation::fee_params_t() );
+      itr->get<transfer_to_blind_operation::fee_params_t>().fee =
+         50 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      // Genesis zeroes ppo too — restore 5P so current(1) = 55P, gap = 45P
+      // (ruling on NEEDS_CONTEXT: RED/GREEN cost semantics hold either way;
+      // only the gap assert needs the restore).
+      itr->get<transfer_to_blind_operation::fee_params_t>().price_per_output =
+         5 * GRAPHENE_BLOCKCHAIN_PRECISION;
+   } );
+   const int64_t P = GRAPHENE_BLOCKCHAIN_PRECISION;
+   // Op104-shaped parity at defaults (10P), fee paid 10P, 1 output.
+   // Pre-split cost anchor(1) = 55P → THROWS; post-split floor(1) ≤ 10P → passes.
+   // Unseeded pool + no status: availability false → cost path binds. RED = throw.
+   BOOST_CHECK_NO_THROW(
+      stealth_require_blind_fee( db, share_type( 10 * P ), true,
+                                 asset_id_type(), 1u, share_type( 10 * P ), 1u ) );
+   // Gap leg unchanged by design §3: gap = 55P − 10P = 45P (passes both revisions;
+   // guards the limitation, not the fix).
+   BOOST_REQUIRE_EQUAL(
+      stealth_parity_gap_core( db, 1u, share_type( 10 * P ), 1u ).value,
+      (int64_t)( 45 * P ) );
+}
+
 BOOST_AUTO_TEST_CASE( g1_genesis_evaluator_registration )
 { try {
    // G3-04/E-07 genesis coverage: every new G1 op (104-107) has a registered

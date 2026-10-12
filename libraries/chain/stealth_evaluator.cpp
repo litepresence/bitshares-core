@@ -1517,7 +1517,7 @@ void stealth_require_blind_fee( const database& db, share_type core_fee_paid,
    // Pool-empty / cap-hit / review-missed: blind fees float to cost.
    // Deterministic rule from the public schedule — no committee action here.
    // NOTE the REAL n_blind_outputs: Rule R caps the discount, never the floor.
-   share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
+   share_type cost = stealth_cost_floor_core( db, n_blind_outputs );
    FC_ASSERT( core_fee_paid >= cost,
               "Blind fee below cost level (parity pool cannot subsidize: "
               "pool empty, subsidy cap hit, or review/report missed)" );
@@ -1540,7 +1540,7 @@ void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
    if( gap.value <= 0 )
       return;
    // Real n_blind_outputs: an op that paid the full anchor is never debited.
-   share_type cost = stealth_cost_anchor_core( db, n_blind_outputs );
+   share_type cost = stealth_cost_floor_core( db, n_blind_outputs );
    if( core_fee_paid >= cost )
       return; // cost path: user paid the anchor level, no discount granted
    // Parity path: the discount MUST be covered now (fail-closed: a cap unit

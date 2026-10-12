@@ -294,7 +294,10 @@ share_type stealth_cost_anchor_core( const database& db, uint32_t n_blind_output
 /// fee floor = max(pinned, snapshot). Identical to stealth_cost_anchor_core
 /// minus the live-schedule current leg, so no committee fee vote can raise
 /// what any user must pay (or accelerate pool drain through the floor).
-/// The gap leg keeps the three-leg anchor (scale-together G3-01). This is
+/// The gap leg keeps the three-leg anchor (scale-together G3-01), so an
+/// inflated op39 still widens gaps and drains a funded pool faster — bounded
+/// by the 50-op/block cap, the 80% burn halt, and quarterly reviews, never
+/// silent. This is
 /// capture-surface removal (governance hardening), never economics: at
 /// default schedules all legs coincide and nothing observable changes.
 share_type stealth_cost_floor_core( const database& db, uint32_t n_blind_outputs );

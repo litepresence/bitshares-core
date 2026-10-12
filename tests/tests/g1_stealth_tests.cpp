@@ -6383,7 +6383,8 @@ BOOST_AUTO_TEST_CASE( floor_ignores_op39_schedule )
    // jump first. No deposits, no pool, no ops needed beyond this.
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();
-   // Scale 100% + op39 fee base 50P (mirror :4774 pattern). ppo untouched.
+   // Scale 100% + op39 fee base 50P (mirror :4774 pattern); ppo restored
+   // to 5P below (genesis zeroes it).
    // current(1) = 50P + 5P = 55P. Snapshot predates the raise (no maintenance
    // crosses mid-case), so floor(1) = max(pinned 10P, snap) either way.
    db.modify( db.get_global_properties(), []( global_property_object& p ) {

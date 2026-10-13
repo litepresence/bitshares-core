@@ -116,7 +116,8 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::stealth_status_object, (graphen
                                 (blind_window_counts)
                                 (activation_k39_fee)(activation_k39_ppo)(alarms)
                                 (diverged_assets)(pending_parity_votes)
-                                (blind_work_block_num)(blind_work_used_us)(deposit_windows) )
+                                (blind_work_block_num)(blind_work_used_us)(deposit_windows)
+                                (cumulative_routed)(cumulative_granted) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::dynamic_global_property_object, (graphene::db::object),
                     (head_block_number)

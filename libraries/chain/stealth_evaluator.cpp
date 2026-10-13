@@ -1690,6 +1690,30 @@ void stealth_parity_maintenance( database& db )
          if( pct > worst )
             worst = pct;
       }
+      // SUP-R-10 (round-9, CDR-10/CDR-11): append the per-interval flow to
+      // the cumulative counters BEFORE clearing. Never cleared: the flow
+      // series is now retrievable from chain state (get_objects), closing
+      // the E0-measurability gap. Zero entries are not written (sparse).
+      for( const auto& kv : o.interval_routed )
+      {
+         if( kv.second.value == 0 )
+            continue;
+         auto citr = o.cumulative_routed.find( kv.first );
+         if( citr == o.cumulative_routed.end() )
+            o.cumulative_routed[ kv.first ] = kv.second;
+         else
+            citr->second += kv.second;
+      }
+      for( const auto& kv : o.interval_granted )
+      {
+         if( kv.second.value == 0 )
+            continue;
+         auto citr = o.cumulative_granted.find( kv.first );
+         if( citr == o.cumulative_granted.end() )
+            o.cumulative_granted[ kv.first ] = kv.second;
+         else
+            citr->second += kv.second;
+      }
       o.interval_routed.clear();
       o.interval_granted.clear();
       o.alarms.burn_rate_pct = worst;

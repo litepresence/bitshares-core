@@ -14645,4 +14645,82 @@ BOOST_AUTO_TEST_CASE( ci01_op39_dominance_boundary_mirror )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
+// SUP-R-10 (round-9, CDR-10/CDR-11): cumulative_routed/cumulative_granted are
+// append-only per-asset counters written from interval_routed/interval_granted
+// at each stealth_parity_maintenance, never cleared. Makes the per-asset flow
+// series retrievable from chain state, closing the E0-measurability gap.
+BOOST_AUTO_TEST_CASE( sup_r10_cumulative_counters )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   // g1c_seed_pool debits 20x need (5% routing), so fund accordingly.
+   transfer( account_id_type()( db ), dan, core.amount( 400000000 ) );
+   generate_block();
+
+   // Route 5M nominal (pool +250k at 5%). g1c_seed_pool writes interval_routed
+   // via stealth_parity_route_fee.
+   g1c_seed_pool( db, dan_id, core, 5000000 );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE( !st.interval_routed.empty() );
+      BOOST_CHECK( st.cumulative_routed.empty() );
+      BOOST_CHECK( st.cumulative_granted.empty() );
+   }
+
+   // First maintenance: interval_* appended to cumulative_*, then cleared.
+   stealth_parity_maintenance( db );
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_CHECK( st.interval_routed.empty() );
+      BOOST_CHECK( st.interval_granted.empty() );
+      auto ritr = st.cumulative_routed.find( core_id );
+      BOOST_REQUIRE( ritr != st.cumulative_routed.end() );
+      BOOST_CHECK( ritr->second.value > 0 );
+      // First maintenance: cumulative_granted still empty (no subsidy yet).
+      BOOST_CHECK( st.cumulative_granted.empty() );
+   }
+
+   // Second cycle: route more, grant a subsidy via direct write (the consume
+   // path is tested elsewhere; this test covers the maintenance bookkeeping).
+   // cumulative counters must ACCUMULATE (not reset).
+   g1c_seed_pool( db, dan_id, core, 10000000 );
+   {
+      // Direct-write a grant to interval_granted (sealed state, no pending tx).
+      db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
+                 [&]( stealth_status_object& s ) {
+         s.interval_granted[ core_id ] = share_type( 500000 );
+      } );
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      BOOST_REQUIRE( !st.interval_routed.empty() );
+      BOOST_REQUIRE( !st.interval_granted.empty() );
+      auto ritr = st.cumulative_routed.find( core_id );
+      BOOST_REQUIRE( ritr != st.cumulative_routed.end() );
+      share_type cum_routed_before = ritr->second;
+      // cumulative_granted may be empty (no prior grant); snapshot 0.
+      auto gitr = st.cumulative_granted.find( core_id );
+      share_type cum_granted_before = ( gitr == st.cumulative_granted.end() )
+         ? share_type( 0 ) : gitr->second;
+
+      // Snapshot interval values before maintenance clears them.
+      share_type interval_routed_now = st.interval_routed.find( core_id )->second;
+      share_type interval_granted_now = st.interval_granted.find( core_id )->second;
+
+      stealth_parity_maintenance( db );
+
+      // interval_* cleared; cumulative_* = previous + interval.
+      BOOST_CHECK( st.interval_routed.empty() );
+      BOOST_CHECK( st.interval_granted.empty() );
+      auto ritr2 = st.cumulative_routed.find( core_id );
+      BOOST_REQUIRE( ritr2 != st.cumulative_routed.end() );
+      BOOST_CHECK_EQUAL( ritr2->second.value, ( cum_routed_before + interval_routed_now ).value );
+      auto gitr2 = st.cumulative_granted.find( core_id );
+      BOOST_REQUIRE( gitr2 != st.cumulative_granted.end() );
+      BOOST_CHECK_EQUAL( gitr2->second.value, ( cum_granted_before + interval_granted_now ).value );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

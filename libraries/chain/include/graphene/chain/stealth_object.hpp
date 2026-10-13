@@ -270,6 +270,16 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// Sparse: entries exist only for assets with post-STEALTH deposits.
       /// flat_map is ORDERED.
       flat_map<asset_id_type, stealth_depositor_window> deposit_windows;
+      /// SUP-R-10 (round-9, CDR-10/CDR-11): append-only per-asset grant/route
+      /// flow totals. Appended from interval_routed/interval_granted at each
+      /// stealth_parity_maintenance immediately before the interval_*.clear()
+      /// — NEVER cleared. Bounded by the number of opted-in assets that have
+      /// ever had parity flow (no open growth: entries only appear when a
+      /// non-zero flow is first recorded). Makes the per-asset flow series
+      /// retrievable from chain state (get_objects on 2.20.0), closing the
+      /// E0-measurability gap. Appended-last for wire-format stability.
+      flat_map<asset_id_type, share_type> cumulative_routed;
+      flat_map<asset_id_type, share_type> cumulative_granted;
 };
 
 using stealth_status_multi_idx = multi_index_container<

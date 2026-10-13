@@ -927,6 +927,12 @@ class wallet_api
        * that it exists in the blockchain.  If it exists then it will report the amount received and
        * who sent it.
        *
+       * RP4 (spec §7): receipts built by post-RP4 senders carry the derived
+       * AuthKey in `to` (never the address key); legacy receipts naming the
+       * address key still work via the direct-hit branch, otherwise the
+       * address set is scanned (derive child per OTK, compare, decrypt).
+       * Both paths re-derive the opening before trusting the memo.
+       *
        * @param confirmation_receipt a base58 encoded stealth confirmation
        * @param opt_from if not empty and the sender is a unknown public key,
        *                 then the unknown public key will be given the label \c opt_from

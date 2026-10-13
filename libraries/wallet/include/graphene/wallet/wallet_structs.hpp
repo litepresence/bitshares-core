@@ -109,6 +109,13 @@ struct blind_receipt
    /// (fail-closed; 0 with min_mix_blocks == 0 (default off) behaves as
    /// before). Appended-last: old wallet files load with 0.
    uint32_t                        received_block = 0;
+   /// RP4: the wallet address key this output was addressed to. Equals to_key
+   /// for legacy receipts (address-key `to`); the scanned address key for
+   /// AuthKey receipts. Balance/spend/history queries match to_key OR
+   /// address_key, so AuthKey outputs stay visible under the address label
+   /// (and survive label renames). Appended-last: old files load empty, and
+   /// empty matches nothing (legacy receipts already match via to_key).
+   public_key_type                 address_key;
 };
 
 struct by_from;
@@ -430,7 +437,7 @@ FC_REFLECT( graphene::wallet::exported_keys, (password_checksum)(account_keys) )
 
 FC_REFLECT( graphene::wallet::blind_receipt,
             (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf)
-            (received_block) )
+            (received_block)(address_key) )
 
 FC_REFLECT( graphene::wallet::approval_delta,
    (active_approvals_to_add)

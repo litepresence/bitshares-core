@@ -1518,9 +1518,15 @@ vector<asset>   wallet_api::get_blind_balances( const string& key_or_label )cons
    // then one RPC round-trip per chunk — never one per decoy (timing-link
    // defense: per-decoy fetch timing fingerprints the wallet's set).
    vector<commitment_type> candidates;
+   flat_set<commitment_type> seen;
    for( auto itr = start; itr != end; ++itr )
-      if( !itr->used )
+      if( !itr->used && seen.insert( itr->commitment() ).second )
          candidates.push_back( itr->commitment() );
+   // RP4: AuthKey receipts (to_key = one-time child) are invisible to the
+   // indexed range above; match them via the rename-proof address_key link.
+   for( const auto& r : my->_wallet.blind_receipts )
+      if( !r.used && r.address_key == pub_key && seen.insert( r.commitment() ).second )
+         candidates.push_back( r.commitment() );
    uint32_t batch = my->_blind_defaults.decoy_fetch_batch_size;
    if( batch == 0 ) batch = 1;
    flat_set<commitment_type> live;
@@ -1671,28 +1677,40 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    uint32_t head_block = 0;
    if( min_mix > 0 )
       head_block = get_dynamic_global_properties().head_block_number;
-   while( start != end )
-   {
-      if( !blind_receipt_mix_eligible( start->received_block, head_block, min_mix ) )
+   // RP4: merge indexed (to_key) + address_key matches in asset+unused scope.
+   // Pointers into multi_index nodes stay valid across the post-loop modify
+   // (node-based container; marking happens after selection, as before).
+   vector<const blind_receipt*> scope;
+   for( auto itr = start; itr != end; ++itr )
+      scope.push_back( &*itr );
+   for( const auto& r : my->_wallet.blind_receipts )
+      if( !r.used && r.amount.asset_id == amount.asset_id && r.address_key == from_key )
       {
-         ++start;
+         bool dup = false;
+         for( auto s : scope ) if( s->commitment() == r.commitment() ) { dup = true; break; }
+         if( !dup ) scope.push_back( &r );
+      }
+   for( auto rp : scope )
+   {
+      const auto& rec = *rp;
+      if( !blind_receipt_mix_eligible( rec.received_block, head_block, min_mix ) )
+      {
          continue; // too young (or unknown age): never spendable under a hold
       }
-      auto result = my->_remote_db->get_blinded_balances( {start->commitment() } );
+      auto result = my->_remote_db->get_blinded_balances( {rec.commitment() } );
       if( result.size() == 0 )
       {
-         used.push_back( start->commitment() );
+         used.push_back( rec.commitment() );
       }
       else
       {
-         blind_tr.inputs.push_back({start->commitment(), start->control_authority});
-         blinding_factors.push_back( start->data.blinding_factor );
-         total_amount += start->amount;
+         blind_tr.inputs.push_back({rec.commitment(), rec.control_authority});
+         blinding_factors.push_back( rec.data.blinding_factor );
+         total_amount += rec.amount;
 
          if( total_amount >= amount + blind_tr.fee )
             break;
       }
-      ++start;
    }
    for( const auto& u : used )
    {
@@ -1763,11 +1781,12 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
       conf_output.decrypted_memo.commitment = change_out.commitment;
       conf_output.decrypted_memo.check   = from_secret._hash[0].value();
       conf_output.confirmation.one_time_key = one_time_key.get_public_key();
-      conf_output.confirmation.to = from_key;
+      conf_output.confirmation.to = public_key_type( from_pub_key.child( from_child ) ); // AuthKey for change too
       conf_output.confirmation.encrypted_memo =
             fc::aes_encrypt( from_secret, fc::raw::pack( conf_output.decrypted_memo ) );
       conf_output.auth = change_out.owner;
       conf_output.confirmation_receipt = conf_output.confirmation;
+      change_out.stealth_memo = conf_output.confirmation;
 
       confirm.outputs.push_back( conf_output );
    }
@@ -1782,10 +1801,11 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    conf_output.decrypted_memo.commitment = to_out.commitment;
    conf_output.decrypted_memo.check   = secret._hash[0].value();
    conf_output.confirmation.one_time_key = one_time_key.get_public_key();
-   conf_output.confirmation.to = to_key;
+   conf_output.confirmation.to = public_key_type( to_pub_key.child( child ) ); // AuthKey, never address key
    conf_output.confirmation.encrypted_memo = fc::aes_encrypt( secret, fc::raw::pack( conf_output.decrypted_memo ) );
    conf_output.auth = to_out.owner;
    conf_output.confirmation_receipt = conf_output.confirmation;
+   to_out.stealth_memo = conf_output.confirmation;
 
    confirm.outputs.push_back( conf_output );
 
@@ -1871,10 +1891,11 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
       conf_output.decrypted_memo.commitment = out.commitment;
       conf_output.decrypted_memo.check   = secret._hash[0].value();
       conf_output.confirmation.one_time_key = one_time_key.get_public_key();
-      conf_output.confirmation.to = to_key;
+      conf_output.confirmation.to = public_key_type( to_pub_key.child( child ) ); // AuthKey, never address key (spec §7)
       conf_output.confirmation.encrypted_memo =
             fc::aes_encrypt( secret, fc::raw::pack( conf_output.decrypted_memo ) );
       conf_output.confirmation_receipt = conf_output.confirmation;
+      out.stealth_memo = conf_output.confirmation; // ride the pre-existing op39 wire field
 
       confirm.outputs.push_back( conf_output );
 
@@ -1917,23 +1938,49 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    result.conf = conf;
 
    auto to_priv_key_itr = my->_keys.find( *conf.to );
-   FC_ASSERT( to_priv_key_itr != my->_keys.end(), "No private key for receiver", ("conf",conf) );
+   fc::optional<fc::ecc::private_key> to_priv_key_opt;
+   public_key_type address_key; // wallet address this output was sent to (== to_key for legacy)
+   if( to_priv_key_itr != my->_keys.end() )
+   {
+      // LEGACY compat (spec §7.2): old receipts name the ADDRESS key in `to`.
+      to_priv_key_opt = wif_to_key( to_priv_key_itr->second );
+      FC_ASSERT( to_priv_key_opt, "Corrupt key for receiver" );
+      address_key = *conf.to;
+   }
+   else
+   {
+      // FIXED receipts: `to` is the AuthKey = address.child(sha256(shared)).
+      // Scan the wallet's address keys; one ECDH + compare per candidate.
+      for( const auto& kv : my->_keys )
+      {
+         auto cand = wif_to_key( kv.second );
+         if( !cand ) continue;
+         auto s = cand->get_shared_secret( conf.one_time_key );
+         auto c = fc::sha256::hash( s );
+         fc::ecc::public_key cand_pub = kv.first; // public_key_type → ecc
+         if( public_key_type( cand_pub.child( c ) ) == *conf.to )
+         {
+            to_priv_key_opt = cand;
+            address_key = kv.first;
+            break;
+         }
+      }
+      FC_ASSERT( to_priv_key_opt, "No private key for receiver (scan miss)", ("conf",conf) );
+   }
+   auto to_priv_key = *to_priv_key_opt;
 
-
-   auto to_priv_key = wif_to_key( to_priv_key_itr->second );
-   FC_ASSERT( to_priv_key );
-
-   auto secret       = to_priv_key->get_shared_secret( conf.one_time_key );
+   auto secret       = to_priv_key.get_shared_secret( conf.one_time_key );
    auto child        = fc::sha256::hash( secret );
 
-   auto child_priv_key = to_priv_key->child( child );
+   auto child_priv_key = to_priv_key.child( child );
    //auto blind_factor = fc::sha256::hash( child );
 
    auto plain_memo = fc::aes_decrypt( secret, conf.encrypted_memo );
    auto memo = fc::raw::unpack<stealth_confirmation::memo_data>( plain_memo );
 
    result.to_key   = *conf.to;
-   result.to_label = get_key_label( result.to_key );
+   result.to_label = get_key_label( address_key ); // address label, not AuthKey's (RP4 display)
+   result.address_key = address_key; // rename-proof linkage for balance/spend/history (RP4)
    if( memo.from )
    {
       result.from_key = *memo.from;
@@ -2003,7 +2050,8 @@ vector<blind_receipt> wallet_api::blind_history( const string& key_or_account )c
 
    for( auto& r : my->_wallet.blind_receipts )
    {
-      if( r.from_key == pub_key || r.to_key == pub_key )
+      // RP4: match AuthKey receipts via the address_key link as well.
+      if( r.from_key == pub_key || r.to_key == pub_key || r.address_key == pub_key )
          result.push_back( r );
    }
    std::sort( result.begin(), result.end(),

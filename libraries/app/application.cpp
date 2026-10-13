@@ -1395,7 +1395,13 @@ void application::set_api_limit()
 }
 std::shared_ptr<abstract_plugin> application::get_plugin(const string& name) const
 {
-   return my->_active_plugins[name];
+   // RP4 test-enabler: find, never operator[] — a miss must NOT insert a null
+   // entry, which shutdown_plugins() would later dereference (teardown segfault
+   // on any get_plugin miss, e.g. wallet's optional custom_operations probe).
+   const auto itr = my->_active_plugins.find( name );
+   if( itr == my->_active_plugins.end() )
+      return nullptr;
+   return itr->second;
 }
 
 bool application::is_plugin_enabled(const string& name) const

@@ -45,6 +45,7 @@
 #include <graphene/chain/transaction_evaluation_state.hpp>
 #include <graphene/chain/impacted.hpp>
 #include <graphene/app/database_api.hpp>
+#include <graphene/app/api.hpp>
 #include <graphene/wallet/wallet.hpp>
 
 #include <graphene/chain/stealth_prover.hpp>
@@ -14093,6 +14094,91 @@ BOOST_AUTO_TEST_CASE( rp3_recognition_and_nullifier_api_block_scan )
    // and records no nullifiers: empty vectors, no throw.
    BOOST_CHECK( api.get_stealth_recognitions( spend_block - 16, spend_block - 1 ).empty() );
    BOOST_CHECK( api.get_stealth_nullifiers( spend_block - 16, spend_block - 1 ).empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Receive-path (RP4): op39 AuthKey unlinkability fix, wallet-in-fixture.
+// (cli_test's websocket path is broken in this container — identical fixture
+// failure with and without these changes, before any test body runs — so
+// RP4/RP5 wallet integration runs here against the fixture db via a LOCAL
+// login_api: same wallet code paths, no websocket.)
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE( rp4_plugin_miss_no_shutdown_poison )
+{ try {
+   // Regression: get_plugin() on an unregistered plugin must return null
+   // WITHOUT poisoning shutdown (operator[] used to insert a null entry that
+   // shutdown_plugins() dereferenced → teardown segfault; found via wallet's
+   // optional custom_operations probe). Teardown succeeding IS the assertion.
+   BOOST_CHECK( !app.get_plugin( "definitely_not_a_plugin" ) );
+   BOOST_CHECK( !app.get_plugin( "definitely_not_a_plugin" ) );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( rp4_op39_authkey_round_trip )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   // Local (non-websocket) login_api bound to the fixture app.
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "rp4-test-password" );
+   W.unlock( "rp4-test-password" );
+   // Wallet file MUST be CWD-relative (never /tmp-absolute): import_key backs
+   // the file up to a CWD-relative path, and the backup copy requires src and
+   // dst on the same filesystem. CWD-relative keeps them together in every
+   // environment. NOTE (container-only): this container's virtiofs breaks
+   // copy_file_range (spurious EXDEV), so run wallet-file tests with CWD on
+   // overlayfs (e.g. /tmp); on normal filesystems any CWD works.
+   // Sweep leftovers for re-run hermeticity.
+   for( const auto& f : { "rp4-wallet-test.json",
+                          "before-import-key-4daef9cd.wallet", "after-import-key-4daef9cd.wallet" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "rp4-wallet-test.json" );
+
+   std::string dan_wif = graphene::utilities::key_to_wif( dan_private_key );
+   BOOST_CHECK( W.import_key( "dan", dan_wif ) );
+   auto alice_pub = W.create_blind_account( "alice", "rp4 alice brainkey words here" );
+
+   // Public → blind, broadcast=false (build/sign only; push manually so the
+   // output exists on-chain for the liveness check in get_blind_balances).
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice","100"}}, false );
+   PUSH_TX( db, confirm.trx );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( confirm.trx.operations.size(), 1u );
+   const auto& ttb = confirm.trx.operations[0].get<transfer_to_blind_operation>();
+   BOOST_REQUIRE_EQUAL( ttb.outputs.size(), 1u );
+   const auto& out = ttb.outputs[0];
+   // stealth_memo embedded, `to` is the AuthKey — never the address key.
+   BOOST_REQUIRE( out.stealth_memo.valid() );
+   BOOST_REQUIRE( out.stealth_memo->to.valid() );
+   BOOST_CHECK( *out.stealth_memo->to != alice_pub );
+   // owner is the SAME AuthKey the memo names (spec §7.1).
+   BOOST_REQUIRE_EQUAL( out.owner.key_auths.size(), 1u );
+   BOOST_CHECK( out.owner.key_auths.begin()->first == *out.stealth_memo->to );
+
+   // Receive via the fixed receipt (scan path: AuthKey not yet in _keys).
+   BOOST_REQUIRE_EQUAL( confirm.outputs.size(), 1u );
+   std::string receipt = confirm.outputs[0].confirmation_receipt;
+   auto rcpt = W.receive_blind_transfer( receipt, "", "" );
+   BOOST_CHECK( rcpt.amount.amount == core.amount( 10000000 ).amount );
+   auto bals = W.get_blind_balances( "alice" );
+   BOOST_REQUIRE_EQUAL( bals.size(), 1u );
+   BOOST_CHECK( bals[0].amount == core.amount( 10000000 ).amount );
+
+   // Legacy compat: a receipt naming the ADDRESS key still works (direct hit).
+   auto confirm2 = W.transfer_to_blind( "dan", "1.3.0", {{"alice","50"}}, false );
+   BOOST_REQUIRE_EQUAL( confirm2.outputs.size(), 1u );
+   graphene::protocol::stealth_confirmation legacy = confirm2.outputs[0].confirmation_receipt;
+   legacy.to = alice_pub; // what pre-RP4 senders wrote
+   auto rcpt2 = W.receive_blind_transfer( std::string( legacy ), "", "" );
+   BOOST_CHECK( rcpt2.amount.amount == core.amount( 5000000 ).amount );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

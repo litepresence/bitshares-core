@@ -38,8 +38,10 @@ class liquidity_pool_object;
 /**
  * A sampled decoy ring: `ring_size` distinct live commitments of one
  * asset, consensus-ordered (member order is the signature's member order),
- * with the real spent output at `real_index` (shuffled there by wallet
- * randomness so the real position carries no signal).
+ * with the real spent output at `real_index` (Fisher-Yates-shuffled into
+ * the FULL ring under RAND_bytes, decoys and real together, so neither the
+ * real's position nor the ring's member order carries the creation-window
+ * structure the stratified set selection is built from — PRV-01).
  */
 struct stealth_sampled_ring
 {
@@ -61,11 +63,15 @@ struct stealth_sampled_ring
  *
  * The returned set always contains `real_commitment` (which must itself
  * satisfy the candidate rule — a too-young real input fails closed here,
- * never in consensus) plus ring_size−1 random distinct others
- * (Fisher-Yates under RAND_bytes). Thin-pool skew is honored by verifying
- * the final set with stealth_check_decoy_policy at this asset's live
- * depth (the same call the evaluator makes); skew failures resample with
- * fresh randomness (bounded attempts) and throw when the pool cannot
+ * never in consensus) plus ring_size−1 random distinct others, drawn
+ * stratified over 100-block creation windows (anti-Sybil: one slot per
+ * non-empty window per pass, never an output-proportional share) and then
+ * Fisher-Yates-shuffled as a FULL ring under RAND_bytes so the emitted
+ * member order is uniform and independent of that window structure (the
+ * real position carries no signal — PRV-01). Thin-pool skew is honored by
+ * verifying the final set with stealth_check_decoy_policy at this asset's
+ * live depth (the same call the evaluator makes); skew failures resample
+ * with fresh randomness (bounded attempts) and throw when the pool cannot
  * supply a conformant ring (availability yields to privacy).
  *
  * @param ring_size 16..32 (G2 TARGET floor; no thin-pool emergency leg).

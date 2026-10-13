@@ -12443,6 +12443,175 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---- PRV-01 (round-9 Critical; seats PRV-01 / WPC-01 / SC-09 / V-09):
+// the op109 sampler's EMISSION ORDER must not fingerprint the real input.
+//
+// Defect (stealth_pool_builder.cpp pre-fix): candidates are bucketed by
+// created_block/100 into a std::map and round-robined bucket-by-bucket in
+// ASCENDING KEY order — one pick per non-empty bucket per pass — so
+// `picked` comes out as the canonical interleaved round-robin
+// (A,B,C,A,B,C,...) of the decoy multiset; the real input is then spliced
+// in at a random index with NO final shuffle of the whole ring. Member
+// order is consensus-significant and on the wire, and every member's
+// created_block is public chain state, so an observer who knows the
+// windows names the real member directly:
+//   (a) ring[0] is ALWAYS the minimum window (the first bucket's first
+//       pick, or the real — which lives in that same bucket here), so the
+//       first position is a constant, not a sample;
+//   (b) removing the real input's position ALWAYS leaves the canonical
+//       ascending-key round-robin of the remaining multiset — that is the
+//       attack of REPAIR-02: remove each candidate k in turn and re-run
+//       the sampler's own draw order; the true k matches by construction.
+//       (Measuring "EXACTLY one matching position" instead would be a
+//       weaker metric than it looks: same-window decoys adjacent to the
+//       spliced real also restore the canonical form — windows are
+//       interchangeable within a bucket — so the odd-one-out set is
+//       typically size 2..3 and a unique-match count reads ~51/200 even
+//       on the unfixed sampler. The anonymity claim is already destroyed
+//       at size 2..3, and the "at least one match" metric is the one that
+//       is deterministic on the defect: 200/200.)
+// Note the canonical form is the INTERLEAVE, not a sorted run: the
+// round-robin refills the lowest window every pass, so a global
+// non-decreasing-window test would be vacuous (it never holds even on
+// the defective sampler). After a Fisher-Yates of the whole ring, (a)
+// becomes a 6/16 draw and (b) collapses to ~0 (a uniform permutation of
+// the 6/5/5 multiset is the round-robin of its own multiset with
+// probability 1/2018016; matching it after a one-element removal is
+// likewise ~1e-6 per candidate position), so both assertions below are
+// RED on the unfixed sampler and GREEN once the final shuffle lands.
+//
+// Fixture = wallet_sampler_stratifies_windows exactly (56+7+7 blinds over
+// three distinct 100-block windows, real in the first/minimum window;
+// that case's exact outside == 2000 pins the 5/5/5 round-robin split and
+// the absence of a window straddle), so this case reuses the same harness
+// instead of inventing a second one. Real-position histogram is NOT
+// asserted: the splice index `at` was already uniform, so it is vacuous
+// against the defect — the window order is the signal.
+BOOST_AUTO_TEST_CASE( poolswap_sampler_no_window_order_fingerprint )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   auto own_key = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( own_key.get_public_key() ), 1 );
+   // One pending block per batch (no window straddle); unseeded pool with
+   // exact-cost fees anchor(1) = 1M (cost path binds). Depth 70 = deep
+   // regime (>= 64) so the decoy policy never rejects on skew.
+   std::vector<fc::ecc::commitment_type> commitsA;
+   for( int i = 0; i < 56; ++i )
+   {
+      auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
+                             "fA-" + std::to_string(i), { 500 }, 1000000 );
+      BOOST_REQUIRE_EQUAL( r.size(), 1u );
+      if( i == 0 ) commitsA.push_back( r[0].commit );
+   }
+   generate_blocks( 110 ); // next 100-block window guaranteed (110 > 100)
+   for( int i = 0; i < 7; ++i )
+      T_ee_deposit( *this, dan_id, dan_private_key, own,
+                    "fB-" + std::to_string(i), { 500 }, 1000000 );
+   generate_blocks( 110 );
+   for( int i = 0; i < 7; ++i )
+      T_ee_deposit( *this, dan_id, dan_private_key, own,
+                    "fC-" + std::to_string(i), { 500 }, 1000000 );
+   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 70u );
+   const auto& bbi =
+      db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   auto win_of = [&]( const fc::ecc::commitment_type& c ) -> uint32_t
+   {
+      auto itr = bbi.find( c );
+      BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "member not indexed" );
+      return itr->created_block / 100;
+   };
+   // The observer's fingerprint model: the sampler's own draw order —
+   // bucket by window ascending, one pick per non-empty bucket per pass
+   // (stealth_pool_builder.cpp round-robin). Returns the canonical WINDOW
+   // sequence of a multiset (within-window member identity is irrelevant:
+   // the windows alone pin the order).
+   auto canonical_rr = []( const std::vector<uint32_t>& w )
+   {
+      std::map<uint32_t, size_t> cnt;
+      for( uint32_t x : w ) ++cnt[x];
+      std::vector<uint32_t> out;
+      out.reserve( w.size() );
+      bool progress = true;
+      while( progress && out.size() < w.size() )
+      {
+         progress = false;
+         for( auto& kv : cnt )
+         {
+            if( out.size() >= w.size() ) break;
+            if( kv.second > 0 )
+            {
+               out.push_back( kv.first );
+               --kv.second;
+               progress = true;
+            }
+         }
+      }
+      return out;
+   };
+   // 200 rings: unfixed rates 1.0 / 1.0 vs fixed 6/16 / ~0 — the
+   // thresholds below sit many sigma clear of both, so neither direction
+   // can flake.
+   const int samples = 200;
+   uint32_t first_is_min = 0; // (a)
+   uint32_t any_odd = 0;      // (b) rings where >= 1 removal restores the
+                              //     canonical draw order (the attack)
+   uint32_t sum_odd = 0;      // (b) total matching positions across rings
+   for( int s = 0; s < samples; ++s )
+   {
+      graphene::chain::stealth_sampled_ring smp =
+         graphene::chain::stealth_sample_pool_ring(
+            db, core.get_id(), commitsA[0] );
+      BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
+      BOOST_REQUIRE( smp.real_index < smp.ring.size() );
+      BOOST_CHECK( smp.ring[smp.real_index] == commitsA[0] );
+      { // distinct members (evaluator refuses duplicates)
+         std::vector<fc::ecc::commitment_type> sorted = smp.ring;
+         std::sort( sorted.begin(), sorted.end() );
+         BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
+                      == sorted.end() );
+      }
+      std::vector<uint32_t> w;
+      w.reserve( smp.ring.size() );
+      for( const auto& m : smp.ring ) w.push_back( win_of( m ) );
+      const uint32_t minw = *std::min_element( w.begin(), w.end() );
+      if( w.front() == minw ) ++first_is_min;
+      // (b) the REPAIR-02 attack: remove each position in turn and ask
+      // whether the rest is the canonical round-robin of its own
+      // multiset. Unfixed: the real input's position ALWAYS matches.
+      // Fixed: no position matches.
+      uint32_t odd = 0;
+      for( size_t i = 0; i < w.size(); ++i )
+      {
+         std::vector<uint32_t> rest;
+         rest.reserve( w.size() - 1 );
+         for( size_t j = 0; j < w.size(); ++j )
+            if( j != i ) rest.push_back( w[j] );
+         if( rest == canonical_rr( rest ) ) ++odd;
+      }
+      if( odd > 0 ) ++any_odd;
+      sum_odd += odd;
+   }
+   BOOST_CHECK_MESSAGE( first_is_min < (uint32_t)samples,
+      "PRV-01 (a): ring[0] was the minimum window in every ring ("
+      << first_is_min << "/" << samples
+      << ") — constant ascending-window head, not a uniform draw" );
+   BOOST_CHECK_MESSAGE( any_odd * 4 < (uint32_t)samples,
+      "PRV-01 (b): some removal restored the sampler's canonical draw "
+      "order (REPAIR-02 real-position recovery) in " << any_odd << "/"
+      << samples << " rings, " << sum_odd << " matching positions total "
+      "— expected 200/200 rings unfixed (RED) vs ~0 fixed (GREEN)" );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
 // EE-2 test-only helper: generalized op104 (stealth_transfer) ring spend.
 // Spends pool outputs `ins` (p.each each) into `outs` new V2 BP+ outputs plus
 // `fee`. Mirrors t5_build_spend (1-in/2-out) with the SHAPE parameterised, so

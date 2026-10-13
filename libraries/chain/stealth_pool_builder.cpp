@@ -154,8 +154,11 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
       // candidates by creation window (created_block / 100 — the same grid
       // as blind_window_counts), then round-robin across non-empty buckets.
       // A single-window dust dump earns one slot per pass, not an
-      // output-proportional share. Bucket order is shuffled-order (no
-      // signal); the real input's own bucket stays eligible (excluding it
+      // output-proportional share. WHICH candidates land in each bucket is
+      // shuffle-derived, but this loop EMITS them bucket-by-bucket in
+      // ascending map-KEY order — the pick set is anti-Sybil policy, the
+      // emission order is a fingerprint until the final shuffle below
+      // (PRV-01). The real input's own bucket stays eligible (excluding it
       // would shrink the set and mark which window lacks the real input).
       std::map<uint32_t, std::vector<size_t>> buckets;
       for( size_t k = 0; k < order.size(); ++k )
@@ -184,6 +187,41 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
       uint32_t at = rand_below( ring_size, ok );
       FC_ASSERT( ok, "Prover RNG failed" );
       picked.insert( picked.begin() + at, real_c );
+
+      // PRV-01 (round-9 Critical): the stratified draw above EMITS its
+      // picks in ascending-key bucket order — std::map iterates by window
+      // KEY, not by the shuffle of `order`, so `picked` is the canonical
+      // interleaved round-robin (window A, B, C, A, B, C, ...) of the
+      // decoy multiset, with the real only spliced in. Member order is
+      // consensus-significant and on the wire, and every member's
+      // created_block is public, so that order alone names the real:
+      // removing the real's position always restores the canonical draw
+      // order (same-window decoys next to it do too — windows are
+      // interchangeable within a bucket), collapsing a 16-ring to the
+      // 2..3 positions in that set. The stratified SET above is
+      // deliberate anti-Sybil policy and is unchanged; only the final
+      // EMISSION ORDER is re-randomized here — Fisher-Yates over the
+      // ENTIRE ring (decoys + real) under RAND_bytes, so the real's
+      // position is uniform and independent of the window structure.
+      // Fail-closed, exactly like the shuffles above: a failed RNG never
+      // yields a fingerprintable ring.
+      {
+         std::vector<size_t> ring_order( picked.size() );
+         for( size_t i = 0; i < ring_order.size(); ++i )
+            ring_order[i] = i;
+         FC_ASSERT( shuffle_indices( ring_order ), "Prover RNG failed" );
+         std::vector<cand> shuffled;
+         shuffled.reserve( picked.size() );
+         size_t new_at = 0;
+         for( size_t j = 0; j < ring_order.size(); ++j )
+         {
+            shuffled.push_back( picked[ ring_order[j] ] );
+            if( ring_order[j] == (size_t)at )
+               new_at = j;
+         }
+         picked.swap( shuffled );
+         at = (uint32_t)new_at;
+      }
 
       std::vector<uint32_t> heights;
       std::vector<fc::time_point_sec> times;

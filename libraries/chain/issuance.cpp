@@ -64,6 +64,28 @@ void h2_issue_ensure_bands( vector<share_type>& bands )
    }
 }
 
+/// Saturating share addition (Recovery-scope h2_sat_add precedent):
+/// pair-level totals can in principle exceed int64 while comparisons only
+/// need monotonicity. Checked share math (+=) still throws on overflow at
+/// the object write; this helper is for read-side sums only. External
+/// linkage (declared in issuance_evaluator.hpp, not in the anonymous
+/// helpers below): asset_evaluator.cpp, vault_evaluator.cpp, and
+/// vault_lifecycle_evaluator.cpp all project pilot-cap restore face through
+/// it, exactly as h2_issue_ensure_bands above.
+share_type h2_issue_sat_add( share_type a, share_type b )
+{
+   if( a <= share_type( 0 ) )
+      return b;
+   if( b <= share_type( 0 ) )
+      return a;
+   const boost::multiprecision::uint256_t sum =
+         boost::multiprecision::uint256_t( uint64_t( a.value ) )
+       + boost::multiprecision::uint256_t( uint64_t( b.value ) );
+   if( sum > boost::multiprecision::uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
+      return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
+   return share_type( int64_t( uint64_t( sum ) ) );
+}
+
 namespace {
 
 using boost::multiprecision::uint256_t;
@@ -100,27 +122,10 @@ share_type h2_issue_fee_slice( share_type amount )
                          * uint256_t( GRAPHENE_H2_ISSUE_CONVERSION_FEE_BPS )
                          / uint256_t( 10000 );
    return share_type( int64_t( uint64_t( slice ) ) );
-}
+ }
 
-/// Saturating share addition (Recovery-scope h2_sat_add precedent):
-/// pair-level totals can in principle exceed int64 while comparisons only
-/// need monotonicity. Checked share math (+=) still throws on overflow at
-/// the object write; this helper is for read-side sums only.
-share_type h2_issue_sat_add( share_type a, share_type b )
-{
-   if( a <= share_type( 0 ) )
-      return b;
-   if( b <= share_type( 0 ) )
-      return a;
-   const uint256_t sum = uint256_t( uint64_t( a.value ) )
-                       + uint256_t( uint64_t( b.value ) );
-   if( sum > uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
-      return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
-   return share_type( int64_t( uint64_t( sum ) ) );
-}
-
-/**
- * rmin gate (declared, exact, no floats, no division): does reserve
+ /**
+  * rmin gate (declared, exact, no floats, no division): does reserve
  * @p bts_raw BTS backing @p supply_face face at @p price at or above
  * @p rmin_bps? Face value of the reserve is bts_raw * quote / base, so
  * value/supply >= rmin/10000 cross-multiplies (256-bit) to
@@ -677,6 +682,31 @@ void h2_issue_on_pair_halt( database& d, asset_id_type pair )
    const vector<h2_pending_vesting> pending = reserve->pending_vestings; // copy: reverts below
    if( !pending.empty() )
    {
+      // PC-01 pilot ceiling (audit-round-9): this loop RE-MINTS face with no
+      // door in front of it, so it must hold the same $20,000 face cap the
+      // mint doors enforce. Project the whole restore FIRST -- current_supply
+      // plus every still-unvested face_burned about to come back -- and
+      // refuse fail-closed BEFORE any state moves: no partial revert, no
+      // silent clamp (a half-applied revert would leave escrow, balances,
+      // book, and bands disagreeing). Exact integer math, no price input.
+      // Equality admits (inclusive cap), same as the doors. Reached only
+      // from transaction evaluators plus the maintenance sweeps, so the
+      // projection is pinned to be unreachable by construction: the mint and
+      // issuer-direct doors count pending + queued restore face, which is
+      // exactly the quantity `current + restore` here.
+      {
+         const asset_object& pair_asset = pair( d );
+         const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset.precision );
+         const share_type restore = h2_issue_pending_restore_face( d, *reserve, now );
+         const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
+         const share_type projected =
+               h2_issue_sat_add( pair_dyn.current_supply, restore );
+         FC_ASSERT( projected <= pilot_cap,
+                    "Pilot ceiling: halt revert would restore token supply ${s} "
+                    "past the $20,000 face pilot cap for this pair; scale-up "
+                    "needs a new binary",
+                    ("s", projected) );
+      }
       for( const h2_pending_vesting& p : pending )
       {
          const vesting_balance_object* vb = d.find( p.owner_vesting );
@@ -786,6 +816,39 @@ share_type h2_issue_pilot_cap_face( uint8_t precision )
    if( cap > uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
       return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
    return share_type( int64_t( uint64_t( cap ) ) );
+}
+
+share_type h2_issue_pending_restore_face( const database& d,
+                                          const reserve_object& reserve,
+                                          const time_point_sec& now )
+{
+   // PC-01 projection half. Same unvested predicate the revert loop applies,
+   // evaluated at the SAME `now` a halt would read (head_block_time): an
+   // entry that still stands here can only be closer to maturity by the time
+   // a halt runs, so this sum can over-count what will actually be restored,
+   // never under-count it. Bounded by GRAPHENE_H2_ISSUE_PENDING_VEST_CAP.
+   share_type face( 0 );
+   for( const h2_pending_vesting& p : reserve.pending_vestings )
+   {
+      const vesting_balance_object* vb = d.find( p.owner_vesting );
+      if( vb == nullptr || !vb->policy.is_type<linear_vesting_policy>() )
+         continue; // stood: matured/missing/non-linear, never rebooked
+      const linear_vesting_policy& lin = vb->policy.get<linear_vesting_policy>();
+      if( now < lin.begin_timestamp + lin.vesting_duration_seconds )
+         face = h2_issue_sat_add( face, p.face_burned );
+   }
+   return face;
+}
+
+share_type h2_issue_queued_restore_face( const reserve_object& reserve )
+{
+   // PC-01 projection half for the terminal refund: every queue entry
+   // refunds unconditionally on wind-down, so the whole queue is restore
+   // face. Bounded by GRAPHENE_H2_ISSUE_EXIT_QUEUE_MAX_COUNT.
+   share_type face( 0 );
+   for( const h2_exit_request& q : reserve.exit_queue )
+      face = h2_issue_sat_add( face, q.face );
+   return face;
 }
 
 void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op )
@@ -963,33 +1026,52 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
       FC_ASSERT( ( pair_dyn.current_supply + op.stable_amount ) <= pair_asset->options.max_supply,
                  "Mint exceeds the pair asset's maximum supply" );
    }
-   // Pilot ceiling (AC-02, consensus-enforced): total senior outstanding
-   // per pair never exceeds $20,000 face while the pilot phase holds
-   // (precision-scaled: 20000 x 10^pair_precision face units). BOTH the
-   // book (reserve stable_supply) and the token (pair current_supply) must
-   // stay under it on every supply-creating path -- the mint door checks
-   // both legs because issuer-direct flow (asset_issue) moves the token
-   // without touching the book. Lifting the ceiling is a new binary +
-   // audit, never a vote toggle: scale is fail-closed by construction.
-   // Exact integer math (saturating adds), no price input, deterministic
-   // on every node. Equality admits (inclusive cap).
-   {
-      const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset->precision );
-      const share_type book_before =
-            _creates_reserve ? share_type( 0 ) : _reserve->stable_supply;
-      FC_ASSERT( h2_issue_sat_add( book_before, op.stable_amount ) <= pilot_cap,
-                 "Pilot ceiling: post-mint book ${b} exceeds the $20,000 "
-                 "face pilot cap for this pair; scale-up needs a new binary",
-                 ("b", h2_issue_sat_add( book_before, op.stable_amount )) );
-      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
-      FC_ASSERT( h2_issue_sat_add( pair_dyn.current_supply, op.stable_amount )
-                 <= pilot_cap,
-                 "Pilot ceiling: post-mint token supply ${s} exceeds the "
-                 "$20,000 face pilot cap for this pair; scale-up needs a "
-                 "new binary",
-                 ("s", h2_issue_sat_add( pair_dyn.current_supply,
-                                         op.stable_amount )) );
-   }
+    // Pilot ceiling (AC-02, consensus-enforced): total senior outstanding
+    // per pair never exceeds $20,000 face while the pilot phase holds
+    // (precision-scaled: 20000 x 10^pair_precision face units). BOTH the
+    // book (reserve stable_supply) and the token (pair current_supply) must
+    // stay under it on every supply-creating path -- the mint door checks
+    // both legs because issuer-direct flow (asset_issue) moves the token
+    // without touching the book. Lifting the ceiling is a new binary +
+    // audit, never a vote toggle: scale is fail-closed by construction.
+    // Exact integer math (saturating adds), no price input, deterministic
+    // on every node. Equality admits (inclusive cap).
+    // PC-01 (audit-round-9): the two supply-RESTORING paths (halt revert,
+    // wind-down exit-queue refund) re-mint face with no door in front of
+    // them, so the doors count the restore face too -- current/book PLUS
+    // the pending + queued face those paths would hand back. Without this
+    // leg the exploit was: fill to cap, redeem X (face parks in a pending
+    // escrow), mint X back (both legs still read <= cap), halt/wind-down ->
+    // standing supply cap+X. `current + pending + queued` only ever grows
+    // here (redeem and exit_request move face between the three buckets;
+    // restores move it back), so this single projection makes both restore
+    // asserts unreachable -- defense in depth behind them, and the reason a
+    // maintenance-driven wind-down can never reject a block over it.
+    {
+       const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset->precision );
+       // A genesis mint creates the reserve, so it has no pending/queue yet.
+       const share_type restore_face =
+             _creates_reserve ? share_type( 0 )
+             : h2_issue_sat_add( h2_issue_pending_restore_face( d, *_reserve, now ),
+                                 h2_issue_queued_restore_face( *_reserve ) );
+       const share_type book_before =
+             _creates_reserve ? share_type( 0 )
+             : h2_issue_sat_add( _reserve->stable_supply, restore_face );
+       FC_ASSERT( h2_issue_sat_add( book_before, op.stable_amount ) <= pilot_cap,
+                  "Pilot ceiling: post-mint book ${b} exceeds the $20,000 "
+                  "face pilot cap for this pair; scale-up needs a new binary",
+                  ("b", h2_issue_sat_add( book_before, op.stable_amount )) );
+       const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+       const share_type token_before =
+             h2_issue_sat_add( pair_dyn.current_supply, restore_face );
+       FC_ASSERT( h2_issue_sat_add( token_before, op.stable_amount )
+                  <= pilot_cap,
+                  "Pilot ceiling: post-mint token supply ${s} exceeds the "
+                  "$20,000 face pilot cap for this pair; scale-up needs a "
+                  "new binary",
+                  ("s", h2_issue_sat_add( token_before,
+                                          op.stable_amount )) );
+    }
 
    // Effective door cap (ISSUANCE-2 live rule; the fixed $2,000 cap survives
    // as the ceiling inside it): the shared per-block counter still bounds

@@ -67,22 +67,35 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
    FC_ASSERT( !pair_asset->is_market_issued(),
               "Vault pairs must be vault-backed UIAs: market-issued (H1-track) "
               "assets are excluded from bonded custody" );
-   // Pilot ceiling (AC-02, consensus-enforced): the pair's standing token
-   // supply must already sit at or under the $20,000 face cap when the
-   // vault binds it. Without this, pre-bind issuer-direct flow (inert
-   // with no vault row to match) could print past the cap, then register
-   // and leave over-cap supply standing while every future mint refuses.
-   // Exact integer compare, no price/time input; equality admits
-   // (inclusive cap).
-   {
-      const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset->precision );
-      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
-      FC_ASSERT( pair_dyn.current_supply <= pilot_cap,
-                 "Pilot ceiling: pair current supply ${s} exceeds the "
-                 "$20,000 face pilot cap for this pair; vault registration "
-                 "refused while over-cap",
-                 ("s", pair_dyn.current_supply) );
-   }
+    // Pilot ceiling (AC-02, consensus-enforced): the pair's standing token
+    // supply must already sit at or under the $20,000 face cap when the
+    // vault binds it. Without this, pre-bind issuer-direct flow (inert
+    // with no vault row to match) could print past the cap, then register
+    // and leave over-cap supply standing while every future mint refuses.
+    // Exact integer compare, no price/time input; equality admits
+    // (inclusive cap). PC-01: pending + queued restore face counts here too
+    // (all other doors do), so a bind can never accept a pair whose
+    // restore paths would later cross the cap. A fresh bind has no reserve
+    // yet -- the reserve is created at the first mint -- so today this term
+    // is exactly zero and the check is byte-equivalent to the standing one;
+    // it holds the invariant on its own should a re-bind ever follow a
+    // reserve that still carries parked restore face.
+    {
+       const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset->precision );
+       const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+       share_type restore_face( 0 );
+       if( const reserve_object* reserve = h2_find_reserve( d, op.pair ) )
+          restore_face = h2_issue_sat_add(
+                h2_issue_pending_restore_face( d, *reserve, d.head_block_time() ),
+                h2_issue_queued_restore_face( *reserve ) );
+       const share_type projected =
+             h2_issue_sat_add( pair_dyn.current_supply, restore_face );
+       FC_ASSERT( projected <= pilot_cap,
+                  "Pilot ceiling: pair current supply ${s} exceeds the "
+                  "$20,000 face pilot cap for this pair; vault registration "
+                  "refused while over-cap",
+                  ("s", projected) );
+    }
    // Allow-list enforced at registration (H2a review direction): locks check
    // per-type, so registration must not accept anything else. BTS-only at
    // genesis; basket assets join through an explicit later rule.

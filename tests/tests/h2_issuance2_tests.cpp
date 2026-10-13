@@ -2048,4 +2048,289 @@ BOOST_AUTO_TEST_CASE( pilot_ceiling_binds_vault_registration )
    BOOST_CHECK( vid( db ).vault_pair == ok );
 } FC_LOG_AND_RETHROW() }
 
+/// PC-01 (audit-round-9, Critical): the $20,000 face pilot ceiling must hold
+/// across the SUPPLY-RESTORING paths, not only the mint doors. Exploit shape:
+/// fill the pair to the cap, redeem X (the face parks in an unvested door
+/// escrow), mint X back (pre-fix: BOTH door legs still read `<= cap`), then
+/// force a pair halt so the revert re-mints X on top of the refilled cap and
+/// standing supply lands at cap+X. Two independent defenses, both pinned in
+/// this file:
+///  (a) the doors hold current/book + PENDING + QUEUED restore face under the
+///      cap, so the refill leg that made the attack possible refuses at the
+///      pilot gate -- the restore can never be handed face the doors did not
+///      already count;
+///  (b) `h2_issue_on_pair_halt` / `h2_create_winddown` project their own
+///      restore and refuse fail-closed before any state moves
+///      (`pilot_ceiling_refuses_over_cap_halt_revert` and
+///      `pilot_ceiling_refuses_over_cap_winddown_refund` drive it directly).
+/// This case drives (a) end to end and then proves the halt lands at EXACTLY
+/// the cap -- never above it.
+BOOST_AUTO_TEST_CASE( pilot_ceiling_holds_across_halt_revert )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const share_type cap = h2_issue_pilot_cap_face( 5 ); // 20000 x 10^5
+   BOOST_REQUIRE_EQUAL( cap.value, 2000000000LL );      // precision-5 pin
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPCAP", "HYPCAPF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "R" );
+
+   // Fill BOOK and token to exactly the cap (the pilot_ceiling_caps_pair_scale
+   // door-fill: three door-cap-scale chunks, one block each so the shared
+   // per-block door counter resets between legs).
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000000000LL ), share_type( 50000000LL ) );
+   generate_block();
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 180541624874LL ), share_type( 1800000000LL ) );
+   generate_block();
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 20000000000LL ), share_type( 150000000LL ) );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, cap.value );
+   BOOST_REQUIRE_EQUAL( h2j_find_reserve( *this, d.pair )->stable_supply.value,
+                        cap.value );
+
+   // BURN 500 into an unvested door escrow: supply and book drop, the face
+   // parks in pending_vestings as restore face.
+   generate_block(); // reset the door counter (redeem is a second leg)
+   const vesting_balance_id_type escrow = h2j_redeem(
+         *this, alice_id, alice_private_key, d, share_type( 500 ) );
+   BOOST_REQUIRE( db.find( escrow ) != nullptr );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+         cap.value - 500 );
+   generate_block(); // seal the redeem; fresh door counter for the refill leg
+
+   // MINT the 500 back -- the refill that made PC-01 possible. Pre-fix both
+   // door legs read (cap - 500) + 500 = cap and ADMIT; post-fix the doors
+   // count the pending restore face, so the leg reads cap + 500 and refuses
+   // at the pilot gate. Deposit sized to clear the net-face gate (floor of
+   // the 100 BTS/face suite price) first: 100000 - 30bps fee -> 997 >= 500.
+   {
+      hybrid_mint_operation op;
+      op.minter        = alice_id;
+      op.vault         = d.vault;
+      op.deposit       = asset( share_type( 100000 ), asset_id_type() );
+      op.stable_amount = share_type( 500 );
+      op.fxr_asset     = d.fxr;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      h2j_require_pilot_refusal( *this, tx, "mint refill of redeemed face" );
+   }
+   BOOST_REQUIRE_EQUAL( db.get_balance( alice_id, d.pair ).amount.value,
+                        cap.value - 500 );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+         cap.value - 500 );
+
+   // HALT: the revert restores exactly the 500 the doors refused to re-mint,
+   // so it lands AT the cap and never over it.
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+   h2j_freeze( *this, alice_id, alice_private_key, d.vault, d.oracle );
+
+   BOOST_CHECK( db.find( escrow ) == nullptr ); // escrow cancelled
+   BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == cap );
+   BOOST_CHECK( d.pair( db ).dynamic_asset_data_id( db ).current_supply <= cap );
+   BOOST_CHECK_EQUAL( d.pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+                      cap.value );
+   BOOST_CHECK( d.vault( db ).outstanding <= cap );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->stable_supply <= cap );
+   BOOST_CHECK( r->pending_vestings.empty() );
+} FC_LOG_AND_RETHROW() }
+
+/// PC-01 defense (b), halt leg driven DIRECTLY: `h2_issue_on_pair_halt` must
+/// refuse fail-closed when the standing token supply already sits at the cap
+/// while an unvested door escrow is still owed its revert face, so the revert
+/// would print cap+X. White-box construction: the doors now refuse exactly
+/// this state (case above), so the only way left to hand it to the restore
+/// path is to raise the standing supply surgically. Pre-fix pair_freeze is
+/// ACCEPTED and re-mints 500 on top of the cap (supply cap+500, escrow gone,
+/// book/stock mirrors moved); post-fix the FC_ASSERT fires inside
+/// `h2_issue_on_pair_halt`, the freeze transaction is rejected, and NOTHING
+/// moves.
+BOOST_AUTO_TEST_CASE( pilot_ceiling_refuses_over_cap_halt_revert )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const share_type cap = h2_issue_pilot_cap_face( 5 );
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPCAPX", "HYPCAPXF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "S" );
+
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000 ), share_type( 1000 ) );
+   generate_block(); // reset the door counter (redeem is a second leg)
+   const vesting_balance_id_type escrow = h2j_redeem(
+         *this, alice_id, alice_private_key, d, share_type( 500 ) );
+   BOOST_REQUIRE( db.find( escrow ) != nullptr );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, 500 );
+   BOOST_REQUIRE_EQUAL( h2j_find_reserve( *this, d.pair )->pending_vestings.size(),
+                        1u );
+
+   // Stand the token AT the cap with 500 of revert face still pending.
+   // Applied immediately after a block (no pushed transactions open), so it
+   // lands on base state and persists (h2s_set_books precedent). The fixture
+   // asserts sum(balances) == current_supply at teardown, so the phantom
+   // standing supply must sit somewhere: bob carries it, which keeps alice's
+   // real 500 intact as the "was the face returned?" probe below.
+   db.modify( d.pair( db ).dynamic_asset_data_id( db ),
+              [cap]( asset_dynamic_data_object& data ) {
+                 data.current_supply = cap;
+              } );
+   db.adjust_balance( bob_id, asset( cap - 500, d.pair ) );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, cap.value );
+   BOOST_REQUIRE_EQUAL( db.get_balance( alice_id, d.pair ).amount.value, 500 );
+
+   // Halt entry with a LIVE bonded price (the revert path needs one).
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+   {
+      pair_freeze_operation op;
+      op.freezer = alice_id;
+      op.vault   = d.vault;
+      op.oracle  = d.oracle;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      h2j_require_pilot_refusal( *this, tx, "pair_freeze over-cap halt revert" );
+   }
+
+   // Fail-closed: no partial revert, no silent clamp, nothing restored.
+   BOOST_CHECK( db.find( escrow ) != nullptr ); // escrow untouched
+   BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 500 ) );
+   BOOST_CHECK_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, cap.value );
+   BOOST_CHECK( d.vault( db ).outstanding == share_type( 500 ) );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->stable_supply == share_type( 500 ) );
+   BOOST_CHECK_EQUAL( r->pending_vestings.size(), 1u );
+} FC_LOG_AND_RETHROW() }
+
+/// PC-01 defense (b), wind-down leg driven DIRECTLY: `h2_create_winddown`
+/// refunds every queued exit to face with no cap check pre-fix, so a
+/// cap-standing token plus a queued exit prints cap+X the moment the vault
+/// winds down. Same white-box construction as the halt case (the doors now
+/// refuse this state); the wind-down itself is driven through the REAL
+/// maintenance sweep -- coverage breach -> 36h top-up -> auto wind-down --
+/// which is the only production entry into `h2_create_winddown` besides
+/// vault_resolve. Pre-fix the sweep completes and refunds 200 on top of the
+/// cap; post-fix the FC_ASSERT rejects the maintenance block and no wind-down
+/// object, refund, or supply change is written.
+BOOST_AUTO_TEST_CASE( pilot_ceiling_refuses_over_cap_winddown_refund )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const share_type cap = h2_issue_pilot_cap_face( 5 );
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYPCAPW", "HYPCAPWF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "T" );
+
+   // Book: mint 1000, queue a 200-face exit (face burns at request time:
+   // supply and outstanding 800, alice holds 800, queue holds 200 of
+   // restore face).
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000 ), share_type( 1000 ) );
+   generate_block();
+   // Keep the imminent maintenance out of the stale landing below: a live
+   // maintenance while the book is healthy is a no-op either way, but the
+   // queue must never be batch-settled before the wind-down refunds it.
+   if( ( db.get_dynamic_global_properties().next_maintenance_time
+         - db.head_block_time() ).to_seconds() < 900 )
+      generate_blocks( db.head_block_time() + 1200 );
+   h2j_exit_request( *this, alice_id, alice_private_key, d, share_type( 200 ) );
+   generate_block(); // seal the door flow onto base state
+   BOOST_REQUIRE_EQUAL( d.vault( db ).outstanding.value, 800 );
+   BOOST_REQUIRE_EQUAL( h2j_find_reserve( *this, d.pair )->exit_queue.size(), 1u );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, 800 );
+
+   // Two surgical writes, both applied immediately after a block (no pushed
+   // transactions open -> they land on base state and persist): stand the
+   // token AT the cap while 200 of refund face is queued, and breach the
+   // 150% coverage rule so the maintenance sweep drives the vault into the
+   // top-up -> wind-down ladder (surgical-liability precedent:
+   // winddown_sweeps_reserve_backing_and_refunds_queue). Bob carries the
+   // phantom standing supply so the fixture's teardown
+   // sum(balances) == current_supply holds while alice's real 800 stays
+   // intact as the "was the refund paid?" probe below.
+   db.modify( d.pair( db ).dynamic_asset_data_id( db ),
+              [cap]( asset_dynamic_data_object& data ) {
+                 data.current_supply = cap;
+              } );
+   db.adjust_balance( bob_id, asset( cap - 800, d.pair ) );
+   db.modify( d.vault( db ), []( vault_object& v ) {
+      v.outstanding = share_type( 10000000000LL );
+   } );
+
+   // Land past the oracle print lifetime in one leap: that maintenance reads
+   // a STALE bonded price, so the exit batch HOLDS (never settles) the queued
+   // 200 while the vault breaches into TOPUP. A live read would settle the
+   // queue first and leave nothing to refund.
+   const auto seal_time = db.head_block_time();
+   const uint32_t print_lifetime = d.oracle( db ).options.value_lifetime_sec;
+   generate_blocks( seal_time + print_lifetime + 600 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state,
+                        GRAPHENE_H2_VAULT_TOPUP );
+   BOOST_REQUIRE_EQUAL( h2j_find_reserve( *this, d.pair )->exit_queue.size(), 1u );
+   BOOST_REQUIRE_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, cap.value );
+
+   // Past the 36h top-up deadline the sweep auto-winds-down. That is the
+   // entry that must refuse fail-closed: the refund would push cap + 200.
+   bool refused = false;
+   try {
+      generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+   }
+   catch ( const fc::exception& e )
+   {
+      refused = true;
+      BOOST_CHECK_MESSAGE( e.to_string().find( "Pilot ceiling" ) != std::string::npos,
+                           "over-cap wind-down refused off-gate (not the pilot "
+                           "ceiling): " << e.to_string() );
+   }
+   BOOST_CHECK_MESSAGE( refused,
+                        "over-cap wind-down refund was ACCEPTED past the pilot "
+                        "ceiling" );
+
+   // Fail-closed: the wind-down never happened and the refund never moved.
+   BOOST_CHECK_EQUAL( d.vault( db ).maintenance_state,
+                      int( GRAPHENE_H2_VAULT_TOPUP ) );
+   for( const auto& w : db.get_index_type<winddown_vault_index>().indices() )
+      BOOST_CHECK( w.source_vault != d.vault );
+   BOOST_CHECK_EQUAL( h2j_find_reserve( *this, d.pair )->exit_queue.size(), 1u );
+   BOOST_CHECK_EQUAL(
+         d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, cap.value );
+   BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 800 ) );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

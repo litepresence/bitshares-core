@@ -194,6 +194,39 @@ namespace graphene { namespace chain {
      */
     share_type h2_issue_pilot_cap_face( uint8_t precision );
 
+    /**
+     * Saturating share addition (read-side sums only; object writes keep the
+     * checked += that throws on overflow). Monotonic, so a sum that saturates
+     * can only ever fail a `< cap` comparison sooner -- never later.
+     */
+    share_type h2_issue_sat_add( share_type a, share_type b );
+
+    /**
+     * Restore face the halt REVERT would re-mint for @p reserve (PC-01):
+     * face_burned summed over the STILL-UNVESTED pending door outputs at
+     * @p now -- the exact set `h2_issue_on_pair_halt` reverts. Matured,
+     * missing, and non-linear entries STAND (never rebooked), so they never
+     * grow supply and never count here. Time only moves forward, so an entry
+     * counted at the mint door is a superset of what any later halt can
+     * restore: the doors' projection can over-count, never under-count.
+     * Saturating integer sum, bounded by GRAPHENE_H2_ISSUE_PENDING_VEST_CAP
+     * entries; no price, no time-of-day, no floats.
+     */
+    share_type h2_issue_pending_restore_face( const database& d,
+                                              const reserve_object& reserve,
+                                              const time_point_sec& now );
+
+    /**
+     * Restore face the TERMINAL wind-down refund would re-mint for @p
+     * reserve (PC-01): face summed over the exit queue -- every entry
+     * refunds unconditionally on wind-down entry. A maintenance batch settle
+     * pays BTS instead and clears the queue WITHOUT restoring face, so this
+     * is the ceiling on what a wind-down can print, never a prediction of
+     * what it will. Saturating integer sum, bounded by
+     * GRAPHENE_H2_ISSUE_EXIT_QUEUE_MAX_COUNT entries.
+     */
+    share_type h2_issue_queued_restore_face( const reserve_object& reserve );
+
      /// @return the issuance reserve for @p pair, or null when none exists.
     const reserve_object* h2_find_reserve( const database& d, asset_id_type pair );
 
@@ -322,6 +355,9 @@ namespace graphene { namespace chain {
      *    bonded price holds everything fail-closed (no revert, no absorb).
      * Terminal wind-down additionally refunds queued exits to face and sweeps
      * the reserve BTS into the segregated remainder (see h2_create_winddown).
+     * Both restores are pilot-capped (PC-01): this function projects the sum
+     * of the reverts it is about to apply and refuses fail-closed before any
+     * state moves if it would cross h2_issue_pilot_cap_face.
      */
    void h2_issue_on_pair_halt( database& d, asset_id_type pair );
 

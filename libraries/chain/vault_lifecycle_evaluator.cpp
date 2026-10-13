@@ -65,9 +65,36 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
    // their face would stay burned and unpaid (the post-wind-down maintenance
    // sweep never settles). Offset pools are NOT swept: funded claims pay
    // liquid even in wind-down.
-   if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
-   {
-      for( const h2_exit_request& q : r->exit_queue )
+    if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
+    {
+       // PC-01 pilot ceiling (audit-round-9): this refund RE-MINTS face with
+       // no door in front of it, so it must hold the same $20,000 face cap
+       // the mint doors enforce. `h2_issue_on_pair_halt` above has already
+       // applied (and capped) every halt revert for this pair, so this
+       // projects the NEXT restore only: current_supply plus the whole exit
+       // queue about to come back. Refuse fail-closed BEFORE the first
+       // refund: no partial refund, no silent clamp (a half-refunded queue
+       // would leave balances, book, bands, and the queue entry count
+       // disagreeing). Exact integer math, no price input; equality admits
+       // (inclusive cap), same as the doors. Unreachable by construction:
+       // the mint and issuer-direct doors count pending + queued restore
+       // face, which is exactly `current + restore` here -- so the
+       // maintenance sweep that enters through this function can never
+       // reject a block over it.
+       if( !r->exit_queue.empty() )
+       {
+          const asset_object& pair_asset = vault.vault_pair( d );
+          const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset.precision );
+          const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
+          const share_type projected = h2_issue_sat_add(
+                pair_dyn.current_supply, h2_issue_queued_restore_face( *r ) );
+          FC_ASSERT( projected <= pilot_cap,
+                     "Pilot ceiling: wind-down exit-queue refund would restore "
+                     "token supply ${s} past the $20,000 face pilot cap for "
+                     "this pair; scale-up needs a new binary",
+                     ("s", projected) );
+       }
+       for( const h2_exit_request& q : r->exit_queue )
       {
          d.adjust_balance( q.requester, asset( q.face, vault.vault_pair ) );
          const asset_object& pair_asset = vault.vault_pair( d );

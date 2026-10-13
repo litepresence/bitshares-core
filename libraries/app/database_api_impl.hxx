@@ -206,6 +206,11 @@ class database_api_impl : public std::enable_shared_from_this<database_api_impl>
        // G2: per-asset stealth-output enumeration for decoy selection.
        vector<blinded_balance_object> get_stealth_outputs(
           asset_id_type asset_id, bool unspent_only )const;
+       // RP3: bulk-by-height recognition + nullifier scans (receive-path).
+       vector<stealth_recognition_entry> get_stealth_recognitions(
+          uint32_t from_block, uint32_t to_block )const;
+       vector<stealth_nullifier_entry> get_stealth_nullifiers(
+          uint32_t from_block, uint32_t to_block )const;
 
       // Withdrawals
       vector<withdraw_permission_object> get_withdraw_permissions_by_giver( const std::string account_id_or_name,

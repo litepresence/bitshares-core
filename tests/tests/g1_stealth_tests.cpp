@@ -14032,4 +14032,67 @@ BOOST_AUTO_TEST_CASE( rp1_recognition_consensus_opaque )
    BOOST_CHECK( idx.find( stop.outputs[1].commitment ) != idx.end() );
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// Receive-path (RP3): bulk-by-height recognition + nullifier APIs.
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE( rp3_recognition_and_nullifier_api_block_scan )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "rp3-api", 16, true );
+   const size_t s = 5;
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V1, "rp3-api-sp", 600, 390, 10 );
+   stealth_recognition rec;
+   rec.one_time_key = public_key_type( fc::ecc::private_key::generate().get_public_key() );
+   rec.to           = public_key_type( fc::ecc::private_key::generate().get_public_key() );
+   rec.encrypted_memo.assign( 64, '\x11' );
+   stop.outputs[0].recognition = rec; // output 1 left absent (R2 legacy case)
+   set_expiration( db, trx );
+   trx.operations = { stop };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   const uint32_t spend_block = db.head_block_num();
+
+   graphene::app::database_api api( db );
+   // Range must include the spend block.
+   auto recs = api.get_stealth_recognitions( spend_block, spend_block );
+   BOOST_REQUIRE_EQUAL( recs.size(), 1u );
+   BOOST_CHECK_EQUAL( recs[0].block_num, spend_block );
+   BOOST_CHECK( recs[0].recognition.one_time_key == rec.one_time_key );
+   BOOST_CHECK( recs[0].recognition.to == rec.to );
+   BOOST_CHECK( recs[0].commitment == stop.outputs[0].commitment );
+   // Absent-recognition output produced no entry (spec §5: "whose outputs carry recognition").
+   auto all = api.get_stealth_recognitions( spend_block - 16, spend_block ); // funding + spend range
+   for( const auto& e : all )
+      BOOST_CHECK( e.output_index != 1u || e.commitment != stop.outputs[1].commitment );
+
+   // Nullifiers: op104 records key_image + alt_key_image for the single input.
+   auto nulls = api.get_stealth_nullifiers( spend_block, spend_block );
+   BOOST_REQUIRE_EQUAL( nulls.size(), 2u );
+   const auto& in = stop.inputs[0];
+   std::vector<char> img( in.key_image.begin(), in.key_image.end() );
+   std::vector<char> imga( in.alt_key_image.begin(), in.alt_key_image.end() );
+   const fc::sha256 expect1 = graphene::chain::nullifier_key( img );
+   const fc::sha256 expect2 = graphene::chain::nullifier_key( imga );
+   BOOST_CHECK( nulls[0].key_image == expect1 || nulls[0].key_image == expect2 );
+   BOOST_CHECK( nulls[1].key_image == expect1 || nulls[1].key_image == expect2 );
+   BOOST_CHECK( nulls[0].key_image != nulls[1].key_image );
+
+   // Range cap: to-from beyond GRAPHENE_STEALTH_SCAN_MAX_BLOCKS refused.
+   BOOST_CHECK_THROW( api.get_stealth_recognitions( 1, 1 + graphene::app::GRAPHENE_STEALTH_SCAN_MAX_BLOCKS ),
+                      fc::exception );
+   // to_block past head refused.
+   BOOST_CHECK_THROW( api.get_stealth_recognitions( spend_block, spend_block + 1000 ),
+                      fc::exception );
+   // Funding range holds op39 deposits without stealth_memo (RP4 not yet built)
+   // and records no nullifiers: empty vectors, no throw.
+   BOOST_CHECK( api.get_stealth_recognitions( spend_block - 16, spend_block - 1 ).empty() );
+   BOOST_CHECK( api.get_stealth_nullifiers( spend_block - 16, spend_block - 1 ).empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

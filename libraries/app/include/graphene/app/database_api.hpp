@@ -62,6 +62,28 @@ using std::map;
 
 class database_api_impl;
 
+/// Max block span for stealth bulk-by-height scans (enumerate-don't-compute;
+/// same hygiene class as history API limits). App-layer, not consensus.
+static constexpr uint32_t GRAPHENE_STEALTH_SCAN_MAX_BLOCKS = 2000;
+
+/// One on-chain recognition datum (receive-path RP3). Carries the output's
+/// actual commitment so the wallet can run the mandatory memo re-derivation
+/// (spec §2 R6) against chain truth.
+struct stealth_recognition_entry {
+   uint32_t                    block_num = 0;
+   uint32_t                    trx_in_block = 0;
+   uint32_t                    op_in_trx = 0;
+   uint32_t                    output_index = 0;
+   commitment_type             commitment;
+   graphene::protocol::stealth_recognition recognition;
+};
+
+struct stealth_nullifier_entry {
+   uint32_t    block_num = 0;
+   uint32_t    trx_in_block = 0;
+   fc::sha256  key_image; ///< sha256(33B image) — matches stealth_nullifier_object
+};
+
 /**
  * @brief The database_api class implements the RPC API for the chain database.
  *
@@ -1428,8 +1450,28 @@ class database_api
         * the ring, created_block/created_time for the decoy-policy check).
         * Read-only; empty when the asset holds no (matching) blinds.
         */
-       vector<blinded_balance_object> get_stealth_outputs(
-          asset_id_type asset_id, bool unspent_only )const;
+      vector<blinded_balance_object> get_stealth_outputs(
+         asset_id_type asset_id, bool unspent_only )const;
+
+      /**
+       * @brief bulk-by-height recognition download (spec §5): every output in
+       * {op39,40,41 stealth_memo} ∪ {op104,106,108,109 recognition} in the
+       * range that carries recognition data. Enumerate-don't-compute over
+       * blocks the node already stores; privacy-preserving (wallet reveals
+       * nothing about which outputs it cares about).
+       */
+      vector<stealth_recognition_entry> get_stealth_recognitions(
+         uint32_t from_block, uint32_t to_block )const;
+
+      /**
+       * @brief bulk-by-height spent download (spec §5): every nullifier
+       * RECORDED by ops in the range (op104 key_image+alt; op108 v1+v2;
+       * op109 key_image+alt). Wallet tests its own images against the list;
+       * absent ⇒ still live. Values match stealth_nullifier_object::key_image
+       * (nullifier_key = sha256 of the 33B point).
+       */
+      vector<stealth_nullifier_entry> get_stealth_nullifiers(
+         uint32_t from_block, uint32_t to_block )const;
 
       /////////////////
       // Withdrawals //
@@ -1705,6 +1747,8 @@ FC_API(graphene::app::database_api,
     (get_blinded_balances)
     (get_stealth_effective_set)
     (get_stealth_outputs)
+    (get_stealth_recognitions)
+    (get_stealth_nullifiers)
 
    // Withdrawals
    (get_withdraw_permissions_by_giver)
@@ -1720,3 +1764,8 @@ FC_API(graphene::app::database_api,
    (list_tickets)
    (get_tickets_by_account)
 )
+
+FC_REFLECT( graphene::app::stealth_recognition_entry,
+            (block_num)(trx_in_block)(op_in_trx)(output_index)(commitment)(recognition) )
+FC_REFLECT( graphene::app::stealth_nullifier_entry,
+            (block_num)(trx_in_block)(key_image) )

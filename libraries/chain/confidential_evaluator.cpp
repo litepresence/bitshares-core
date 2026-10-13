@@ -114,16 +114,22 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
    // Pool floor counter: post-STEALTH creates carry metadata (counted);
    // pre-fork creates are grandfathered (helper no-ops pre-fork anyway).
    stealth_pool_count_add( db(), o.amount.asset_id, (int32_t)o.outputs.size() );
-   // Phase-1 instrumentation (spec 2026-10-11 §8): deposit-side attribution.
-   // State only — no behavior gate reads it. Same call posture as count-add.
-   stealth_deposit_histogram_add( db(), o.amount.asset_id, o.from,
-                                  (uint32_t)o.outputs.size() );
    // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
+   // CI-01 (round-9): consume re-derives stealth_op39_subsidy_count, which
+   // reads the depositor window. It MUST see the same pre-add window that
+   // do_evaluate's require saw (evaluate runs before any histogram write),
+   // or a deposit that tips the depositor past the 1/16 dominance boundary
+   // would be admitted at full subsidy and then consumed at the capped 1 —
+   // require/consume mirror broken. Same posture as cold_n above (A3).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                     o.fee.asset_id, cold_n,
                                     calculate_fee_for_operation( operation( o ) ), core_fee_paid,
                                     std::min( (uint32_t)o.outputs.size(),
                                        stealth_op39_subsidy_count( db(), o.amount.asset_id, o.from, operation( o ) ) ) );
+   // Phase-1 instrumentation (spec 2026-10-11 §8): deposit-side attribution.
+   // AFTER consume so the window write does not perturb the subsidy re-derivation.
+   stealth_deposit_histogram_add( db(), o.amount.asset_id, o.from,
+                                  (uint32_t)o.outputs.size() );
    stealth_window_count_add( db(), (uint32_t)o.outputs.size() );
    stealth_count_blind_op( db() );
    stealth_count_blind_work( db(), stealth_work_for_range_proofs( (uint32_t)o.outputs.size() ) );

@@ -14440,4 +14440,209 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
    generate_block();
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// CI-01 (round-9, Important): op39 require/consume window mirror at the
+// dominance boundary.
+//
+// stealth_op39_subsidy_count reads the depositor window. do_evaluate's
+// require sees the PRE-add window; do_apply's consume must see the SAME
+// pre-add window or a deposit that tips the depositor past the 1/16
+// dominance boundary is admitted at full subsidy and then consumed at the
+// capped 1 — require/consume mirror broken (fee leakage: the user is
+// under-charged relative to the pool debit evaluate admitted).
+//
+// Scenario: dan holds exactly 64 of 1024 window slots (64*16 == 1024, NOT
+// dominant under the strict >). He deposits 8 more outputs in one op39.
+//   evaluate: pre-add window 64/1024 → not dominant → subsidy_n = 8
+//   apply:    must ALSO read 64/1024 → subsidy_n = 8
+// The buggy order (histogram_add before consume) would read 72/1024
+// (72*16 = 1152 > 72, dominant) → subsidy_n = 1, breaking the mirror.
+//
+// Pin: with a funded parity pool and a parity-level fee, the pool debit
+// must equal anchor(8) - parity (the FULL subsidy evaluate admitted), not
+// anchor(1) - parity (the capped debit the buggy order would take).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( ci01_op39_dominance_boundary_mirror )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   const asset_id_type core_id = core.get_id();
+   transfer( account_id_type()( db ), dan, core.amount( 2000000000 ) );
+   generate_block(); // seal the transfer so direct writes below survive replay
+
+   // Pin scale at 100% and set the schedule fee BELOW the pinned anchor so
+   // a real parity gap exists (parity_core < anchor → gap > 0).
+   // Direct-write on SEALED state (no pending session open).
+   db.modify( db.get_global_properties(), []( global_property_object& p ) {
+      auto& fees = p.parameters.get_mutable_fees();
+      fees.scale = GRAPHENE_100_PERCENT;
+      auto& fee_params = fees.parameters;
+      auto itr = fee_params.find( transfer_to_blind_operation::fee_params_t() );
+      // Schedule: fee=1 CORE + price_per_output=1 CORE → calculate_fee(8)
+      // = 1M + 1M*8 = 9M, well under the pinned anchor(8)=45M.
+      itr->get<transfer_to_blind_operation::fee_params_t>().fee = 1 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      itr->get<transfer_to_blind_operation::fee_params_t>().price_per_output = 1 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      // 8-output V1 deposit carries 8 legacy range proofs; the genesis tx
+      // size limit would reject it before the float rule ever runs.
+      p.parameters.maximum_transaction_size = 1024 * 1024;
+   } );
+   generate_block(); // seal the fee-scale change
+   // Parity fee = the schedule level (parity_core), so gap = anchor(8) - parity_core.
+   const share_type anchor8 = stealth_cost_anchor_core( db, 8 );
+   // anchor(8) = max(pinned 45M, schedule 9M) = 45M under the pinned constants.
+   BOOST_REQUIRE_EQUAL( anchor8.value, (int64_t)( 45 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+   {
+      transfer_to_blind_operation synth;
+      synth.outputs.resize( 8 );
+      const share_type parity_core =
+         db.current_fee_schedule().calculate_fee( operation( synth ) ).amount;
+      // With the schedule above: 1M + 1M*8 = 9M.
+      BOOST_REQUIRE_EQUAL( parity_core.value, (int64_t)( 9 * GRAPHENE_BLOCKCHAIN_PRECISION ) );
+   }
+   const share_type parity_fee = share_type( 9 * GRAPHENE_BLOCKCHAIN_PRECISION ); // schedule level
+   const share_type expect_gap = anchor8 - parity_fee; // 45M - 9M = 36M
+
+   // Opt CORE in and seed the parity pool through the real Task-7 funding path
+   // (5% routes, so debit 20x the need). Need >= expect_gap (36M).
+   g1c_opt_in_parity( db, core_id );
+   db.adjust_balance( dan_id, core.amount( -800000000 ) );
+   db.pay_market_fees( nullptr, core, core.amount( 800000000 ), true, core.amount( 800000000 ) );
+   BOOST_REQUIRE( T_ee_pool( db, core_id ) >= expect_gap.value );
+   const int64_t pool_before = T_ee_pool( db, core_id );
+
+   // Seed depth >= FLOOR (11) so cold_n = n_outputs (not 0) in the consume
+   // below. 11 single-output deposits at the exact anchor(1) cost — cost
+   // path, pool untouched by the seeding itself.
+   {
+      auto ok_seed = fc::ecc::private_key::generate();
+      const authority own_seed( 1, public_key_type( ok_seed.get_public_key() ), 1 );
+      const int64_t anchor1 = stealth_cost_anchor_core( db, 1 ).value;
+      for( int i = 0; i < 11; ++i )
+      {
+         transfer_to_blind_operation seed;
+         seed.amount = core.amount( 100 );
+         seed.from = dan_id;
+         seed.fee = core.amount( anchor1 );
+         blind_output o;
+         o.owner = own_seed;
+         auto B = T_blind_secret( "ci01-seed-b|" + std::to_string( i ) );
+         o.commitment = fc::ecc::blind( B, 100 );
+         o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B,
+                             T_secret( "ci01-seed-n|" + std::to_string( i ) ), 0, 0, 100 );
+         seed.outputs = { o };
+         seed.blinding_factor = B;
+         set_expiration( db, trx );
+         trx.clear_signatures();
+         trx.operations.clear();
+         trx.operations = { seed };
+         sign( trx, dan_private_key );
+         PUSH_TX( db, trx );
+         trx.clear_signatures();
+         trx.operations.clear();
+      }
+      BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core_id ), 11u );
+      // Cost-path seeding left the pool untouched.
+      BOOST_REQUIRE_EQUAL( T_ee_pool( db, core_id ), pool_before );
+      generate_block(); // seal before the direct window overwrite below
+   }
+
+   // Seed dan's deposit window to EXACTLY 64/1024 via direct state write
+   // (64 one-output events from dan + 960 from strangers). Sealed block
+   // first so the direct writes survive replay. head=64 so a future write
+   // lands past dan's block (positions 0..63 = dan, 64..1023 = strangers).
+   generate_block();
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      db.modify( st, [&]( stealth_status_object& s ) {
+         auto& w = s.deposit_windows[ core_id ];
+         w.events.clear();
+         w.count = 1024;
+         w.head = 64;
+         w.total_ever = 1024;
+         for( uint32_t i = 0; i < 64; ++i )
+            w.events[i] = stealth_deposit_event{ dan_id, 1u };
+         for( uint32_t i = 64; i < 1024; ++i )
+            w.events[i] = stealth_deposit_event{ account_id_type( 500 + ( i % 100 ) ), 1u };
+      } );
+   }
+   // Pin the pre-add classifier: 64/1024 is NOT dominant; after an 8-output
+   // deposit (one event with n=8 at head) dan holds 72, 72*16=1152>1024 →
+   // dominant. The buggy order would see this tipped state in consume.
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      const auto& w = st.deposit_windows.find( core_id )->second;
+      BOOST_REQUIRE( !stealth_window_dominant( w, dan_id, GRAPHENE_STEALTH_RING_TARGET ) );
+      // Simulate ONE op39 write: single event n=8 at head, head advances,
+      // one stranger slot overwritten (count stays 1024).
+      stealth_depositor_window tipped = w;
+      tipped.events[ w.head ] = stealth_deposit_event{ dan_id, 8u };
+      tipped.head = ( w.head + 1 ) % 1024;
+      BOOST_REQUIRE( stealth_window_dominant( tipped, dan_id, GRAPHENE_STEALTH_RING_TARGET ) );
+   }
+
+   // 8-output deposit from dan at the parity fee. Consume MUST debit the
+   // full gap evaluate admitted (anchor(8) - parity), not the capped leg.
+   auto ok = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
+   transfer_to_blind_operation ttb;
+   ttb.amount = core.amount( 800 );
+   ttb.from = dan_id;
+   ttb.fee = core.amount( parity_fee.value );
+   BIGNUM* acc = BN_new();
+   BN_zero( acc );
+   for( int i = 0; i < 8; ++i )
+   {
+      fc::sha256 B = T_blind_secret( "ci01-b|" + std::to_string( i ) );
+      BIGNUM* b = T_bn( B );
+      BN_mod_add( acc, acc, b, T_order(), T_ctx() );
+      BN_free( b );
+      blind_output o;
+      o.owner = own;
+      o.commitment = fc::ecc::blind( B, 100 );
+      o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, B,
+                          T_secret( "ci01-n|" + std::to_string( i ) ), 0, 0, 100 );
+      ttb.outputs.push_back( o );
+   }
+   std::sort( ttb.outputs.begin(), ttb.outputs.end(),
+              []( const blind_output& a, const blind_output& b ) {
+                 return a.commitment < b.commitment;
+              } );
+   std::vector<char> b32( 32 );
+   BN_bn2binpad( acc, (unsigned char*)b32.data(), 32 );
+   ttb.blinding_factor = fc::sha256( b32.data(), 32 );
+   BN_free( acc );
+   set_expiration( db, trx );
+   trx.clear_signatures();
+   trx.operations.clear();
+   trx.operations = { ttb };
+   sign( trx, dan_private_key );
+   PUSH_TX( db, trx );
+   trx.clear_signatures();
+   trx.operations.clear();
+
+   // THE PIN: the pool was debited the FULL gap evaluate admitted. A buggy
+   // order (histogram_add before consume) would have debited only the
+   // capped leg (anchor(1) - parity == 0 for this parity fee, since
+   // anchor(1)=10M > parity=44M... wait, parity=44M > anchor(1)=10M, so
+   // capped gap would be 0 → pool untouched). Either way the debit must
+   // equal expect_gap, proving require/consume agreed on subsidy_n=8.
+   const int64_t pool_after = T_ee_pool( db, core_id );
+   BOOST_CHECK_EQUAL( pool_before - pool_after, expect_gap.value );
+
+   // The window write still landed (post-consume, not skipped).
+   {
+      const auto& st = *db.get_index_type<stealth_status_index>().indices().begin();
+      const auto& w = st.deposit_windows.find( core_id )->second;
+      uint64_t dan_n = 0;
+      for( const auto& kv : w.events )
+         if( kv.second.account == dan_id )
+            dan_n += kv.second.n;
+      BOOST_CHECK_EQUAL( dan_n, 72u ); // 64 pre-seed + 8 this deposit
+   }
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

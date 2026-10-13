@@ -356,6 +356,23 @@ struct stealth_ring_input
 };
 
 /**
+ * @brief Wallet-layer recognition data carried on a blinded output (RP1).
+ * @ingroup g1_stealth
+ *
+ * Consensus-OPAQUE (spec §2 R1): no evaluator reads this field; it rides the
+ * wire so wallets can recover openings from blocks. `to` is the derived
+ * one-time AuthKey — NEVER the recipient address key (unlinkability, spec §7).
+ * Memo ciphertext packs graphene::protocol::stealth_confirmation::memo_data
+ * (confidential.hpp) — same struct Phase-I receipts already verify (R6).
+ */
+struct stealth_recognition
+{
+   public_key_type  one_time_key;   ///< OTK, sender-random (33B on wire)
+   public_key_type  to;             ///< child AuthKey; non-optional by design
+   vector<char>     encrypted_memo; ///< AES(Shared(OTK, ViewKey), packed memo_data)
+};
+
+/**
  * @brief A new blinded output (works for both proof versions).
  * @ingroup g1_stealth
  */
@@ -367,6 +384,9 @@ struct stealth_blind_output
    /// 658 bytes for m=2; only m=1 is wired to consensus, R9A).
    vector<char>          range_proof;
    authority             owner;
+   /// APPENDED-LAST optional recognition (spec §2). Wire-default absent;
+   /// consensus-opaque (R1); rides the existing STEALTH gate (R3).
+   optional<stealth_recognition> recognition;
 };
 
 /**
@@ -644,8 +664,10 @@ struct stealth_pool_exchange_operation : public base_operation
 FC_REFLECT( graphene::protocol::stealth_ring_input,
             (ring)(key_image)(ring_sig)(pseudo_output)(alt_key_image)(alt_ring_sig)
             (ring_scheme) )
+FC_REFLECT( graphene::protocol::stealth_recognition,
+            (one_time_key)(to)(encrypted_memo) )
 FC_REFLECT( graphene::protocol::stealth_blind_output,
-            (commitment)(range_proof)(owner) )
+            (commitment)(range_proof)(owner)(recognition) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation,
             (fee)(asset_id)(proof_version)(excess)(inputs)(outputs)(extensions) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation,

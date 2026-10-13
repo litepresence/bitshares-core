@@ -13943,4 +13943,93 @@ BOOST_AUTO_TEST_CASE( subsidy_op109_burn_critical_still_fires_on_excess )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// Receive-path (RP1): recognition field on stealth_blind_output.
+// Spec: docs/superpowers/specs/2026-10-12-g1-stealth-receive-path-design.md §2.
+// ---------------------------------------------------------------------------
+
+// R2: absent recognition is wire-default; pack/unpack round-trips both cases.
+BOOST_AUTO_TEST_CASE( rp1_recognition_wire_round_trip )
+{ try {
+   stealth_blind_output o;
+   o.commitment = fc::ecc::blind( T_blind_secret( "rp1-wire" ), 777 );
+   o.range_proof.assign( 8, '\x01' );
+   auto k = fc::ecc::private_key::generate();
+   o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+
+   // Absent: default-constructed optional.
+   BOOST_CHECK( !o.recognition.valid() );
+   auto packed_absent = fc::raw::pack( o );
+   stealth_blind_output o2 = fc::raw::unpack<stealth_blind_output>( packed_absent );
+   BOOST_CHECK( !o2.recognition.valid() );
+   BOOST_CHECK( o2.commitment == o.commitment );
+   BOOST_CHECK( o2.range_proof == o.range_proof );
+
+   // Present: round-trips all three fields byte-exact.
+   stealth_recognition rec;
+   rec.one_time_key = public_key_type( fc::ecc::private_key::generate().get_public_key() );
+   rec.to           = public_key_type( fc::ecc::private_key::generate().get_public_key() );
+   rec.encrypted_memo.assign( 3, '\x42' );
+   o.recognition = rec;
+   auto packed = fc::raw::pack( o );
+   BOOST_CHECK( packed.size() > packed_absent.size() ); // flag byte + payload
+   stealth_blind_output o3 = fc::raw::unpack<stealth_blind_output>( packed );
+   BOOST_REQUIRE( o3.recognition.valid() );
+   BOOST_CHECK( o3.recognition->one_time_key == rec.one_time_key );
+   BOOST_CHECK( o3.recognition->to == rec.to );
+   BOOST_CHECK( o3.recognition->encrypted_memo == rec.encrypted_memo );
+} FC_CAPTURE_AND_RETHROW() }
+
+// R4: recognition costs nothing at the fee layer (price_per_output, not bytes).
+BOOST_AUTO_TEST_CASE( rp1_recognition_fee_neutral )
+{ try {
+   stealth_transfer_operation op;
+   auto Bk = T_blind_secret( "rp1-fee" );
+   stealth_blind_output o;
+   o.commitment  = fc::ecc::blind( Bk, 100 );
+   o.range_proof = fc::ecc::range_proof_sign( 0, o.commitment, Bk, T_secret( "rp1-fee-n" ), 0, 0, 100 );
+   auto k = fc::ecc::private_key::generate();
+   o.owner = authority( 1, public_key_type( k.get_public_key() ), 1 );
+   op.outputs = { o };
+   stealth_transfer_operation::fee_params_t kparams;
+   const auto fee_absent = op.calculate_fee( kparams );
+   o.recognition = stealth_recognition();
+   o.recognition->one_time_key = public_key_type( k.get_public_key() );
+   o.recognition->to           = o.recognition->one_time_key;
+   o.recognition->encrypted_memo.assign( 110, '\x00' ); // realistic size
+   op.outputs = { o };
+   BOOST_CHECK( op.calculate_fee( kparams ) == fee_absent );
+} FC_CAPTURE_AND_RETHROW() }
+
+// R1: consensus opacity — a fully valid ring spend WITH recognition (and with
+// garbage bytes in the memo) applies; evaluators never read the field.
+BOOST_AUTO_TEST_CASE( rp1_recognition_consensus_opaque )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   t5_pool p = t5_fund_pool( *this, dan, dan_private_key, "rp1-opq", 16, true );
+   const size_t s = 5;
+   stealth_transfer_operation stop = t5_build_spend( core, p, s,
+      GRAPHENE_STEALTH_PROOF_V1, "rp1-opq-sp", 600, 390, 10 );
+   // Attach realistic recognition to output 0 and GARBAGE to output 1.
+   stealth_recognition good;
+   good.one_time_key = public_key_type( fc::ecc::private_key::generate().get_public_key() );
+   good.to           = public_key_type( fc::ecc::private_key::generate().get_public_key() );
+   good.encrypted_memo.assign( 96, '\x07' );
+   stop.outputs[0].recognition = good;
+   stop.outputs[1].recognition = stealth_recognition(); // default keys, empty memo
+   BOOST_CHECK_NO_THROW( stop.validate() );
+   set_expiration( db, trx );
+   trx.operations = { stop };
+   BOOST_CHECK_NO_THROW( PUSH_TX( db, trx ) ); trx.clear();
+   generate_block();
+   // Blinded balances exist for BOTH outputs: recognition moved no consensus state.
+   const auto& idx = db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   BOOST_CHECK( idx.find( stop.outputs[0].commitment ) != idx.end() );
+   BOOST_CHECK( idx.find( stop.outputs[1].commitment ) != idx.end() );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

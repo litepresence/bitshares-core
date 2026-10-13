@@ -122,40 +122,33 @@ No mandatory blindness for any operation class; no blind order books, margin
 positions, pool shares, or vault/oracle/issuance accounting; no blind asset
 types or supply totals; no custodial tumbling presented as a substitute.
 
-## 9. Availability disclosure — ring spends consume their decoys (F-08, normative)
+## 9. Availability disclosure — ring spends and the nullifier set (F-08, normative)
 
 Wallets MUST surface this section before the first blind receive (6th
 MUSE-R12 item, BSIP-2 §4):
 
-- Every ring spend CONSUMES its entire ring: all members (real input plus
-  every decoy) are spent-flagged on apply and refused on every later leg —
-  future rings, explicit withdrawals, legacy transfers, and turnstile legs
-  alike. Flags are never cleared.
-- ANY stealth output can be rendered permanently unspendable by a stranger:
-  ring membership requires no ownership, so anyone can include your output
-  as their decoy and destroy it for the price of one fee. This is current
-  consensus semantics (pinned by `r9c_decoy_owner_explicit_spend_refused`),
-  not a bug in your wallet, and there is no recourse on-chain.
-- Pool-burn rates at pilot scale (≤$20k book): one ring-16 spend consumes
-  16 decoy candidates and mints 2 — a 16→2 burn per spend — so heavy
-  spending visibly thins the pool and the floor gate halts spends honestly
-  instead of building thin rings. At pilot scale a 100-output Sybil flood
-  costs ~$1 plus a 24h park (BSIP-2 Rationale), so early sets are thin until
-  volume arrives: the wallet MUST warn below recommended minimums and MUST
-  NOT promise set sizes the chain cannot see.
-- Design direction (not yet implemented, no wallet action): the explicit
-  legs may one day check owner-supplied key images against the nullifier
-  set instead of the spent flag (precise, privacy-preserving); the ring
-  gate keeps the flag regardless. Until then, treat every blind receipt as
-  spendable exactly once — by you, or destroyed as someone else's decoy.
-- **Scale escalation — read this before the book leaves pilot size.** The
-  disclosure above is pilot-adequate and nothing more. Below pilot size a
-  single griefing fee already costs more than the value at risk, so the
-  vector is a nuisance. At $5M+ book the same action becomes a cheap
-  denial-of-service: an attacker drains the decoy pool for a trivial
-  fraction of what they destroy, and honest spends keep paying the ring-depth
-  cost on top. Wallets MUST NOT present the ≤$20k pilot economics as a
-  general property of this protocol, and MUST NOT describe longer disclosure
-  as a remedy. Leaving pilot scale requires a pre-scale CONSENSUS change
-  (the nullifier check above), separately specified, audited and activated —
-  it cannot be substituted by any amount of warning text.
+- **Nullifier migration IS consensus at the round-9 audited tip `06dcd808`**
+  (op108 `stealth_explicit_spend_operation`, same STEALTH gate as ops 104–107;
+  proof verified before the nullifier lookup; whole-ring spent flag retired).
+  Ring membership alone no longer marks a decoy spent: only the real input's
+  nullifier is recorded. Decoy outputs stay decoy-eligible for future rings
+  (this is the intended griefing elimination, not a bug).
+- ANY stealth output can still be rendered unspendable by its true owner
+  (or anyone who knows an opening) via an explicit spend that nullifies it —
+  that is one-time spend semantics, not ring-inclusion griefing. A stranger
+  who does NOT know an opening cannot nullify your output by including it as
+  a decoy (nullifiers require the representation proof, verified first).
+- Under the retired spent-flag regime (pre-op108), one ring-16 spend burned
+  16 decoy candidates (16→2). That burn is historical. At the current tip the
+  live-set cost of a spend is the anonymity-set dilution of adding decoys,
+  not permanent destruction of every ring member; pool-burn economics at
+  pilot scale (≤$20k book) still mean early sets are thin until volume
+  arrives: the wallet MUST warn below recommended minimums and MUST NOT
+  promise set sizes the chain cannot see.
+- **Scale escalation — read this before the book leaves pilot size.** Thin
+  anonymity sets at pilot size are a nuisance; at $5M+ book a thin set is a
+  cheap denial-of-service against honest privacy. Wallets MUST NOT present
+  the ≤$20k pilot economics as a general property of this protocol, and MUST
+  NOT describe longer disclosure as a remedy. Activation of op108/Rule R
+  remains gated on the named CLSAG/BP+ specialist audit covering those ops
+  and on the activation checklist (round-9: still NO_GO).

@@ -71,6 +71,7 @@
 #include <graphene/utilities/key_conversion.hpp>
 #include <graphene/utilities/words.hpp>
 #include <graphene/wallet/wallet.hpp>
+#include <graphene/wallet/stealth_receive.hpp>
 #include <graphene/wallet/api_documentation.hpp>
 #include "wallet_api_impl.hpp"
 #include <graphene/debug_witness/debug_api.hpp>
@@ -1447,6 +1448,10 @@ public_key_type  wallet_api::get_public_key( const string& label )const
    auto key_itr   = my->_wallet.labeled_keys.get<by_label>().find(label);
    if( key_itr != my->_wallet.labeled_keys.get<by_label>().end() )
       return key_itr->key;
+   // RP5: dual-key stealth address labels resolve to the view pub (identity).
+   for( const auto& r : my->_wallet.stealth_addresses )
+      if( r.label == label )
+         return r.view_pub;
    return public_key_type();
 }
 
@@ -1693,6 +1698,11 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    for( auto rp : scope )
    {
       const auto& rec = *rp;
+      // RP5: watch-only tallies carry no spend authority — refuse to build a
+      // spend from them (fail-closed at build; the tx could never authorize).
+      FC_ASSERT( !( rec.control_authority == authority() ),
+                 "Cannot spend watch-only receipt (tally only, no spend key)",
+                 ("commitment",rec.commitment()) );
       if( !blind_receipt_mix_eligible( rec.received_block, head_block, min_mix ) )
       {
          continue; // too young (or unknown age): never spendable under a hold
@@ -1722,13 +1732,23 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
               "Insufficient Balance",
               ("available",total_amount)("amount",amount)("fee",blind_tr.fee) );
 
+   // RP5: dual-key resolution — secret under ViewKey, AuthKey from SpendKey.
+   // Single-key legs degenerate (same key for both).
+   fc::ecc::public_key to_secret_base = to_key, to_auth_base = to_key;
+   fc::ecc::public_key from_secret_base = from_key, from_auth_base = from_key;
+   for( const auto& r : my->_wallet.stealth_addresses )
+   {
+      if( r.label == to_key_or_label ) { to_secret_base = r.view_pub; to_auth_base = r.spend_pub; }
+      if( r.label == from_key_or_label ) { from_secret_base = r.view_pub; from_auth_base = r.spend_pub; }
+   }
+
    auto one_time_key = fc::ecc::private_key::generate();
-   auto secret       = one_time_key.get_shared_secret( to_key );
+   auto secret       = one_time_key.get_shared_secret( to_secret_base );
    auto child        = fc::sha256::hash( secret );
    auto nonce        = fc::sha256::hash( one_time_key.get_secret() );
    auto blind_factor = fc::sha256::hash( child );
 
-   auto from_secret  = one_time_key.get_shared_secret( from_key );
+   auto from_secret  = one_time_key.get_shared_secret( from_secret_base );
    auto from_child   = fc::sha256::hash( from_secret );
    auto from_nonce   = fc::sha256::hash( nonce );
 
@@ -1750,8 +1770,8 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
       blinding_factors.push_back( blind_factor );
       idump(("nochange to_blind_factor")(blind_factor) );
    }
-   fc::ecc::public_key from_pub_key = from_key;
-   fc::ecc::public_key to_pub_key = to_key;
+   fc::ecc::public_key from_pub_key = from_auth_base;
+   fc::ecc::public_key to_pub_key = to_auth_base;
 
    blind_output to_out;
    to_out.owner       = to_temp ? authority() : authority( 1, public_key_type( to_pub_key.child( child ) ), 1 );
@@ -1860,12 +1880,49 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
 
    asset total_amount = asset_obj->amount(0);
 
-   for( auto item : to_amounts )
-   {
+    for( auto item : to_amounts )
+    {
       auto one_time_key = fc::ecc::private_key::generate();
-      auto to_key       = get_public_key( item.first );
-      auto secret       = one_time_key.get_shared_secret( to_key );
-      auto child        = fc::sha256::hash( secret );
+
+      // Resolution: existing single-key label/base58 key, else dual-key record.
+      public_key_type to_key; // single-key address (degenerate view==spend)
+      fc::optional<public_key_type> view_pub, spend_pub;
+      {
+         auto label_itr = my->_wallet.labeled_keys.get<by_label>().find( item.first );
+         if( label_itr != my->_wallet.labeled_keys.get<by_label>().end() )
+         {
+            to_key = label_itr->key;
+         }
+         else
+         {
+            bool found_dual = false;
+            for( const auto& r : my->_wallet.stealth_addresses )
+            {
+               if( r.label == item.first )
+               {
+                  view_pub  = r.view_pub;
+                  spend_pub = r.spend_pub;
+                  found_dual = true;
+                  break;
+               }
+            }
+            if( !found_dual )
+               to_key = get_public_key( item.first ); // base58 fallback (throws if unknown)
+         }
+      }
+
+      // secret + AuthKey: dual-key encrypts under ViewKey, AuthKey from SpendKey_pub;
+      // single-key is the degenerate case (same key material, RP2 helper path).
+      // (Copy-init is the proven protocol→ecc conversion in this file; explicit
+      // functional casts are ambiguous — do not "simplify" these two lines.)
+      public_key_type sb = view_pub.valid() ? *view_pub : to_key;
+      public_key_type ab = view_pub.valid() ? *spend_pub : to_key;
+      fc::ecc::public_key secret_base = sb;
+      fc::ecc::public_key auth_base = ab;
+      fc::sha256 child;
+      auto secret = one_time_key.get_shared_secret( secret_base );
+      child = fc::sha256::hash( secret );
+      fc::ecc::public_key auth_pub = auth_base.child( child );
       auto nonce        = fc::sha256::hash( one_time_key.get_secret() );
       auto blind_factor = fc::sha256::hash( child );
 
@@ -1874,33 +1931,30 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
       auto amount = asset_obj->amount_from_string(item.second);
       total_amount += amount;
 
-
-      fc::ecc::public_key to_pub_key = to_key;
       blind_output out;
-      out.owner       = authority( 1, public_key_type( to_pub_key.child( child ) ), 1 );
+      out.owner       = authority( 1, public_key_type( auth_pub ), 1 );
       out.commitment  = fc::ecc::blind( blind_factor, amount.amount.value );
       if( to_amounts.size() > 1 )
          out.range_proof = fc::ecc::range_proof_sign( 0, out.commitment, blind_factor, nonce,
-                                                      0, RANGE_PROOF_MANTISSA, amount.amount.value );
+                                                       0, RANGE_PROOF_MANTISSA, amount.amount.value );
 
       blind_confirmation::output conf_output;
       conf_output.label = item.first;
-      conf_output.pub_key = to_key;
+      conf_output.pub_key = view_pub.valid() ? *view_pub : to_key;
       conf_output.decrypted_memo.amount = amount;
       conf_output.decrypted_memo.blinding_factor = blind_factor;
       conf_output.decrypted_memo.commitment = out.commitment;
       conf_output.decrypted_memo.check   = secret._hash[0].value();
       conf_output.confirmation.one_time_key = one_time_key.get_public_key();
-      conf_output.confirmation.to = public_key_type( to_pub_key.child( child ) ); // AuthKey, never address key (spec §7)
+      conf_output.confirmation.to = public_key_type( auth_pub ); // AuthKey (RP4 + dual-key)
       conf_output.confirmation.encrypted_memo =
             fc::aes_encrypt( secret, fc::raw::pack( conf_output.decrypted_memo ) );
       conf_output.confirmation_receipt = conf_output.confirmation;
-      out.stealth_memo = conf_output.confirmation; // ride the pre-existing op39 wire field
+      out.stealth_memo = conf_output.confirmation; // op39 wire carrier (RP4)
 
       confirm.outputs.push_back( conf_output );
-
       bop.outputs.push_back(out);
-   }
+    }
    bop.amount          = total_amount;
    bop.blinding_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() );
 
@@ -1940,6 +1994,10 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    auto to_priv_key_itr = my->_keys.find( *conf.to );
    fc::optional<fc::ecc::private_key> to_priv_key_opt;
    public_key_type address_key; // wallet address this output was sent to (== to_key for legacy)
+   // RP5 dual-key state: when a record matches, auth derives from spend_priv
+   // (hot) or is absent (watch-only tally).
+   fc::optional<fc::ecc::private_key> dual_auth_opt;
+   bool dual_matched = false;
    if( to_priv_key_itr != my->_keys.end() )
    {
       // LEGACY compat (spec §7.2): old receipts name the ADDRESS key in `to`.
@@ -1948,6 +2006,39 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
       address_key = *conf.to;
    }
    else
+   {
+      // RP5: dual-key records — match under ViewKey, AuthKey from SpendKey.
+      // address_key is the view pub (receipt linkage identity).
+      for( const auto& r : my->_wallet.stealth_addresses )
+      {
+         auto v_itr = my->_keys.find( r.view_pub );
+         if( v_itr == my->_keys.end() ) continue;
+         auto view_priv = wif_to_key( v_itr->second );
+         if( !view_priv ) continue;
+         fc::optional<fc::ecc::private_key> spend_priv;
+         if( !r.watch_only )
+         {
+            auto s_itr = my->_keys.find( r.spend_pub );
+            if( s_itr != my->_keys.end() )
+               spend_priv = wif_to_key( s_itr->second );
+         }
+         stealth_recognition rec;
+         rec.one_time_key = conf.one_time_key;
+         rec.to = *conf.to;
+         rec.encrypted_memo = conf.encrypted_memo;
+         auto m = try_recognition( rec, *view_priv, r.spend_pub, spend_priv );
+         if( m.valid() && verify_memo_commitment( m->memo ) )
+         {
+            to_priv_key_opt = view_priv; // secret/child derive from view below
+            if( m->has_auth )
+               dual_auth_opt = m->auth_priv;
+            dual_matched = true;
+            address_key = r.view_pub;
+            break;
+         }
+      }
+   }
+   if( !to_priv_key_opt )
    {
       // FIXED receipts: `to` is the AuthKey = address.child(sha256(shared)).
       // Scan the wallet's address keys; one ECDH + compare per candidate.
@@ -1972,7 +2063,16 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    auto secret       = to_priv_key.get_shared_secret( conf.one_time_key );
    auto child        = fc::sha256::hash( secret );
 
-   auto child_priv_key = to_priv_key.child( child );
+   // RP5: dual-hot receipts authorize via spend-derived auth, not the view key.
+   fc::ecc::private_key child_priv_key;
+   if( dual_matched )
+   {
+      FC_ASSERT( dual_auth_opt.valid(),
+                 "Watch-only address matched: cannot derive spend authority (tally via scan_stealth_recognitions)" );
+      child_priv_key = *dual_auth_opt;
+   }
+   else
+      child_priv_key = to_priv_key.child( child );
    //auto blind_factor = fc::sha256::hash( child );
 
    auto plain_memo = fc::aes_decrypt( secret, conf.encrypted_memo );
@@ -2039,6 +2139,127 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
 
    return result;
 }
+
+public_key_type wallet_api::create_stealth_address( const string& label,
+                                                    const string& brain_key,
+                                                    uint32_t index )const
+{ try {
+   FC_ASSERT( !is_locked() );
+   FC_ASSERT( my->_wallet.stealth_addresses.end()
+              == std::find_if( my->_wallet.stealth_addresses.begin(), my->_wallet.stealth_addresses.end(),
+                               [&]( const stealth_address_record& r ){ return r.label == label; } ),
+              "Stealth address label already exists" );
+   auto keys = derive_stealth_address_keys( brain_key, index );
+   stealth_address_record rec;
+   rec.label = label;
+   rec.view_pub = public_key_type( keys.view_pub );
+   rec.spend_pub = public_key_type( keys.spend_pub );
+   rec.watch_only = false;
+   my->_wallet.stealth_addresses.push_back( rec );
+   // Hot: persist both privkeys in the encrypted _keys map (address-key grade).
+   auto vlabel = label + ".view";
+   auto slabel = label + ".spend";
+   FC_ASSERT( set_key_label( public_key_type( keys.view_pub ), vlabel ) );
+   FC_ASSERT( set_key_label( public_key_type( keys.spend_pub ), slabel ) );
+   my->_keys[ public_key_type( keys.view_pub ) ]  = graphene::utilities::key_to_wif( keys.view_priv );
+   my->_keys[ public_key_type( keys.spend_pub ) ] = graphene::utilities::key_to_wif( keys.spend_priv );
+   save_wallet_file();
+   return rec.view_pub;
+} FC_CAPTURE_AND_RETHROW( (label)(index) ) }
+
+vector<stealth_address_record> wallet_api::import_stealth_view_key(
+      const string& label, const string& view_wif,
+      const public_key_type& spend_pub )const
+{ try {
+   FC_ASSERT( !is_locked() );
+   auto view_priv = wif_to_key( view_wif );
+   FC_ASSERT( view_priv, "Invalid view WIF" );
+   stealth_address_record rec;
+   rec.label = label;
+   rec.view_pub = public_key_type( view_priv->get_public_key() );
+   rec.spend_pub = spend_pub;
+   rec.watch_only = true;
+   my->_wallet.stealth_addresses.push_back( rec );
+   auto vlabel = label + ".view";
+   FC_ASSERT( set_key_label( rec.view_pub, vlabel ) );
+   my->_keys[ rec.view_pub ] = view_wif;
+   save_wallet_file();
+   return my->_wallet.stealth_addresses;
+} FC_CAPTURE_AND_RETHROW( (label) ) }
+
+vector<stealth_address_record> wallet_api::get_stealth_addresses()const
+{ return my->_wallet.stealth_addresses; }
+
+vector<blind_receipt> wallet_api::scan_stealth_recognitions(
+      uint32_t from_block, uint32_t to_block )const
+{ try {
+   FC_ASSERT( !is_locked() );
+   auto entries = my->_remote_db->get_stealth_recognitions( from_block, to_block );
+   const auto& by_cmt = my->_wallet.blind_receipts.get<by_commitment>();
+   vector<blind_receipt> fresh;
+   for( const auto& e : entries )
+   {
+      if( by_cmt.find( e.commitment ) != by_cmt.end() )
+         continue; // idempotent
+      const auto& rec = e.recognition;
+      fc::optional<stealth_match_result> m;
+      public_key_type matched_address;
+      string matched_label;
+      // Dual-key records first.
+      for( const auto& r : my->_wallet.stealth_addresses )
+      {
+         auto v_itr = my->_keys.find( r.view_pub );
+         if( v_itr == my->_keys.end() ) continue;
+         auto view_priv = wif_to_key( v_itr->second );
+         if( !view_priv ) continue;
+         fc::optional<fc::ecc::private_key> spend_priv;
+         auto s_itr = my->_keys.find( r.spend_pub );
+         if( !r.watch_only && s_itr != my->_keys.end() )
+            spend_priv = wif_to_key( s_itr->second );
+         m = try_recognition( rec, *view_priv, r.spend_pub, spend_priv );
+         if( m.valid() ) { matched_address = r.view_pub; matched_label = r.label; break; }
+      }
+      // Degenerate single-key scan over remaining _keys (blind accounts).
+      if( !m.valid() )
+      {
+         for( const auto& kv : my->_keys )
+         {
+            auto cand = wif_to_key( kv.second );
+            if( !cand ) continue;
+            m = try_recognition_single_key( rec, *cand );
+            if( m.valid() ) { matched_address = kv.first; matched_label = get_key_label( kv.first ); break; }
+         }
+      }
+      if( !m.valid() )
+         continue;
+      FC_ASSERT( verify_memo_commitment( m->memo ), "Memo failed commitment re-derivation" );
+      blind_receipt br;
+      br.conf.one_time_key = rec.one_time_key;
+      br.conf.to = rec.to;
+      br.conf.encrypted_memo = rec.encrypted_memo;
+      br.to_key = rec.to;
+      br.to_label = matched_label;
+      br.address_key = matched_address;
+      br.amount = m->memo.amount;
+      br.data = m->memo;
+      br.control_authority = m->has_auth
+            ? authority( 1, public_key_type( m->auth_priv.get_public_key() ), 1 )
+            : authority();
+      br.date = fc::time_point::now();
+      try { br.received_block = get_dynamic_global_properties().head_block_number; }
+      catch( const fc::exception& ) { br.received_block = 0; }
+      br.used = false;
+      // Hot path only: persist auth child key (address-key grade). Watch-only
+      // leaves has_auth false — tally receipt, no spend material stored.
+      if( m->has_auth )
+         my->_keys[ public_key_type( m->auth_priv.get_public_key() ) ] = key_to_wif( m->auth_priv );
+      my->_wallet.blind_receipts.insert( br );
+      fresh.push_back( br );
+   }
+   if( !fresh.empty() )
+      save_wallet_file();
+   return fresh;
+} FC_CAPTURE_AND_RETHROW( (from_block)(to_block) ) }
 
 vector<blind_receipt> wallet_api::blind_history( const string& key_or_account )const
 {

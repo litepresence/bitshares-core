@@ -21,13 +21,15 @@ namespace graphene { namespace wallet {
 
 using graphene::protocol::stealth_recognition;
 using graphene::protocol::stealth_confirmation;
-using memo_data = stealth_confirmation::memo_data;
+// NB: no `memo_data` alias here — graphene::wallet::memo_data already names
+// the legacy blind memo (sign_memo/read_memo). Always spell the stealth memo
+// as stealth_confirmation::memo_data in full.
 
 struct stealth_match_result
 {
    fc::ecc::private_key auth_priv; ///< valid iff has_auth (hot path only)
    bool                 has_auth = false; ///< false for watch-only matches
-   memo_data            memo;      ///< decrypted; caller MUST verify_memo_commitment
+   stealth_confirmation::memo_data memo; ///< decrypted; caller MUST verify_memo_commitment
 };
 
 /// Deterministic dual-key material from a brainkey (BSIP-0054 salvage).
@@ -45,7 +47,8 @@ inline stealth_address_keys derive_stealth_address_keys( const std::string& brai
 {
    auto path = [&]( const char* tag ) {
       std::string pre = brain_key + tag;
-      unsigned char idx[4] = { char(index>>24), char(index>>16), char(index>>8), char(index) };
+      unsigned char idx[4] = { static_cast<unsigned char>(index>>24), static_cast<unsigned char>(index>>16),
+                                 static_cast<unsigned char>(index>>8), static_cast<unsigned char>(index) };
       fc::sha256::encoder enc;
       auto h = fc::sha256::hash( pre.data(), pre.size() );
       enc.write( h.data(), 32 );
@@ -63,7 +66,7 @@ inline stealth_address_keys derive_stealth_address_keys( const std::string& brai
 inline stealth_recognition build_recognition( const fc::ecc::private_key& otk,
                                               const fc::ecc::public_key& view_pub,
                                               const fc::ecc::public_key& spend_pub,
-                                              const memo_data& memo )
+                                              const stealth_confirmation::memo_data& memo )
 {
    auto secret = otk.get_shared_secret( view_pub );
    auto child  = fc::sha256::hash( secret );
@@ -90,7 +93,7 @@ inline fc::optional<stealth_match_result> try_recognition(
          return {};
       stealth_match_result out;
       auto plain = fc::aes_decrypt( secret, rec.encrypted_memo );
-      out.memo = fc::raw::unpack<memo_data>( plain );
+      out.memo = fc::raw::unpack<stealth_confirmation::memo_data>( plain );
       if( spend_priv.valid() )
       {
          out.auth_priv = spend_priv->child( child );
@@ -109,7 +112,7 @@ inline fc::optional<stealth_match_result> try_recognition_single_key(
 }
 
 /// Mandatory before trusting any memo (spec §2 R6 / §3): re-derive the opening.
-inline bool verify_memo_commitment( const memo_data& memo )
+inline bool verify_memo_commitment( const stealth_confirmation::memo_data& memo )
 {
    try {
       auto c = fc::ecc::blind( memo.blinding_factor, memo.amount.amount.value );

@@ -944,6 +944,34 @@ class wallet_api
                                             const string& opt_memo )const;
 
       /**
+       * RP5: create a deterministic dual-key stealth address from a brainkey
+       * (BSIP-0054 salvage; versioned path — wallet release, not a fork).
+       * @return the view public key (base58); label indexes the record.
+       */
+      public_key_type create_stealth_address( const string& label,
+                                              const string& brain_key,
+                                              uint32_t index )const;
+
+      /**
+       * RP5: import a watch-only stealth address (view priv + spend pub).
+       * Scanning tallies; spending is impossible without the spend key.
+       */
+      vector<stealth_address_record> import_stealth_view_key(
+            const string& label, const string& view_wif,
+            const public_key_type& spend_pub )const;
+
+      /**
+       * RP5: bulk scan over the node's recognition API; verifies each memo
+       * against its on-chain commitment; stores blind_receipts. Watch-only
+       * wallets tally without deriving spend keys. Idempotent.
+       */
+      vector<blind_receipt> scan_stealth_recognitions( uint32_t from_block,
+                                                       uint32_t to_block )const;
+
+      /// RP5: list the dual-key address book.
+      vector<stealth_address_record> get_stealth_addresses()const;
+
+      /**
        * Transfers a public balance from \c from_account_name_or_id to one or more blinded balances using a
        * stealth transfer.
        * @param from_account_name_or_id name or ID of an account to transfer from
@@ -2175,6 +2203,10 @@ FC_API( graphene::wallet::wallet_api,
         (stealth_pool_swap)
         (blind_history)
         (receive_blind_transfer)
+        (create_stealth_address)
+        (import_stealth_view_key)
+        (scan_stealth_recognitions)
+        (get_stealth_addresses)
         (get_order_book)
         (account_store_map)
         (get_account_storage)

@@ -47,6 +47,7 @@
 #include <graphene/app/database_api.hpp>
 #include <graphene/app/api.hpp>
 #include <graphene/wallet/wallet.hpp>
+#include <graphene/wallet/stealth_receive.hpp>
 
 #include <graphene/chain/stealth_prover.hpp>
 #include <graphene/chain/stealth_pool_builder.hpp>
@@ -14179,6 +14180,95 @@ BOOST_AUTO_TEST_CASE( rp4_op39_authkey_round_trip )
    legacy.to = alice_pub; // what pre-RP4 senders wrote
    auto rcpt2 = W.receive_blind_transfer( std::string( legacy ), "", "" );
    BOOST_CHECK( rcpt2.amount.amount == core.amount( 5000000 ).amount );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Receive-path (RP5): dual-key watch-only + deterministic derivation + scan.
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "rp5-test-password" );
+   W.unlock( "rp5-test-password" );
+   for( const auto& f : { "rp5-wallet-test.json", "rp5-watch-test.json",
+                          "before-import-key-4daef9cd.wallet", "after-import-key-4daef9cd.wallet" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "rp5-wallet-test.json" );
+
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   BOOST_TEST_MESSAGE("Deterministic dual-key addresses; per-invoice rotation");
+   auto bki = "rp5 alice brainkey words here";
+   auto alice_view = W.create_stealth_address( "alice-st", bki, 0 );
+   auto alice_view2 = W.create_stealth_address( "alice-st2", bki, 1 );
+   BOOST_CHECK( alice_view != alice_view2 ); // per-invoice SpendKey iteration (spec §6)
+   auto recs = W.get_stealth_addresses();
+   BOOST_REQUIRE_EQUAL( recs.size(), 2u );
+   BOOST_CHECK( !recs[0].watch_only );
+
+   BOOST_TEST_MESSAGE("Nathan sends to the dual-key address");
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"}}, false );
+   BOOST_REQUIRE_EQUAL( confirm.trx.operations.size(), 1u );
+   const auto& ttb = confirm.trx.operations[0].get<transfer_to_blind_operation>();
+   BOOST_REQUIRE_EQUAL( ttb.outputs.size(), 1u );
+   const auto& out = ttb.outputs[0];
+   BOOST_REQUIRE( out.stealth_memo.valid() && out.stealth_memo->to.valid() );
+   // `to` is the AuthKey: neither the view pub nor the spend pub.
+   BOOST_CHECK( *out.stealth_memo->to != alice_view );
+   BOOST_CHECK( *out.stealth_memo->to != recs[0].spend_pub );
+   PUSH_TX( db, confirm.trx );
+   generate_block();
+
+   BOOST_TEST_MESSAGE("Scan the spend block range; receipt stored under view identity");
+   auto head = db.head_block_num();
+   const uint32_t scan_from = head >= 5 ? head - 5 : 1;
+   auto fresh = W.scan_stealth_recognitions( scan_from, head );
+   BOOST_REQUIRE_EQUAL( fresh.size(), 1u );
+   BOOST_CHECK( fresh[0].amount.amount == core.amount( 20000000 ).amount );
+   BOOST_CHECK( fresh[0].address_key == alice_view );
+   auto bals = W.get_blind_balances( "alice-st" );
+   BOOST_REQUIRE_EQUAL( bals.size(), 1u );
+   BOOST_CHECK( bals[0].amount == core.amount( 20000000 ).amount );
+
+   BOOST_TEST_MESSAGE("Idempotent re-scan adds nothing");
+   BOOST_CHECK( W.scan_stealth_recognitions( scan_from, head ).empty() );
+
+   BOOST_TEST_MESSAGE("Watch-only: view-key import tallies without spend keys");
+   graphene::wallet::wallet_data wdata2;
+   wdata2.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api WO( wdata2, rapi );
+   WO.set_password( "rp5-watch-password" );
+   WO.unlock( "rp5-watch-password" );
+   WO.set_wallet_filename( "rp5-watch-test.json" );
+   // Re-derive deterministically (same brainkey+index ⇒ same keys).
+   auto keys = graphene::wallet::derive_stealth_address_keys( bki, 0 );
+   WO.import_stealth_view_key( "alice-wo", graphene::utilities::key_to_wif( keys.view_priv ),
+                               public_key_type( keys.spend_pub ) );
+   auto wo_fresh = WO.scan_stealth_recognitions( scan_from, head );
+   BOOST_REQUIRE_EQUAL( wo_fresh.size(), 1u );
+   BOOST_CHECK( wo_fresh[0].amount.amount == core.amount( 20000000 ).amount );
+   auto wo_bals = WO.get_blind_balances( "alice-wo" );
+   BOOST_REQUIRE_EQUAL( wo_bals.size(), 1u );
+   // Watch-only cannot spend: must throw (fail-closed), never silently succeed.
+   BOOST_CHECK_THROW( WO.transfer_from_blind( "alice-wo", "dan", "10", "1.3.0", false ),
+                      fc::exception );
+
+   BOOST_TEST_MESSAGE("Hot path spends the scanned receipt (op41 leg)");
+   auto spend = W.transfer_from_blind( "alice-st", "dan", "150", "1.3.0", false );
+   BOOST_CHECK( !spend.trx.operations.empty() );
+   PUSH_TX( db, spend.trx );
+   generate_block();
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -161,9 +161,18 @@ typedef multi_index_container<
 > key_label_index_type;
 
 
-struct wallet_data
+/// RP5: dual-key stealth address book entry (view/spend pubs; watch-only when
+/// the spend priv is absent from _keys). address_key for receipts = view_pub.
+struct stealth_address_record
 {
-   /** Chain ID this wallet is used with */
+   string          label;
+   public_key_type view_pub;
+   public_key_type spend_pub;
+   bool            watch_only = false;
+};
+
+struct wallet_data
+{   /** Chain ID this wallet is used with */
    chain_id_type chain_id;
    account_multi_index_type my_accounts;
    /// @return IDs of all accounts in @ref my_accounts
@@ -204,6 +213,8 @@ struct wallet_data
 
    key_label_index_type                                              labeled_keys;
    blind_receipt_index_type                                          blind_receipts;
+   /// RP5 dual-key address book (appended-last; old files load empty).
+   vector<stealth_address_record>                                    stealth_addresses;
 
    string                    ws_server = "ws://localhost:8090";
    string                    ws_user;
@@ -405,6 +416,7 @@ FC_REFLECT( graphene::wallet::blind_transfer_defaults,
             (min_broadcast_delay_sec)(min_mix_blocks) )
 
 FC_REFLECT( graphene::wallet::key_label, (label)(key) )
+FC_REFLECT( graphene::wallet::stealth_address_record, (label)(view_pub)(spend_pub)(watch_only) )
 FC_REFLECT( graphene::wallet::blind_balance, (amount)(from)(to)(one_time_key)(blinding_factor)(commitment)(used) )
 FC_REFLECT( graphene::wallet::blind_confirmation::output,
             (label)(pub_key)(decrypted_memo)(confirmation)(auth)(confirmation_receipt) )
@@ -420,6 +432,7 @@ FC_REFLECT( graphene::wallet::wallet_data,
             (pending_account_registrations)(pending_witness_registrations)
             (labeled_keys)
             (blind_receipts)
+            (stealth_addresses)
             (ws_server)
             (ws_user)
             (ws_password)

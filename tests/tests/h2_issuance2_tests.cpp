@@ -2333,4 +2333,218 @@ BOOST_AUTO_TEST_CASE( pilot_ceiling_refuses_over_cap_winddown_refund )
    BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 800 ) );
 } FC_LOG_AND_RETHROW() }
 
+// ---- ISS-R9-07 / R9-I8: FXR junior provenance and pin ----
+
+/// Generic refusal probe (pilot-ceiling precedent): PUSH_TX must fail AND the
+/// failure must name THIS guard's needle. A refusal off-guard (some other
+/// gate firing first) is a wrong-reason pass and fails the check, so each
+/// case below proves its own defense, not merely "a refusal happened".
+void h2j_require_refusal( database_fixture& f, signed_transaction& tx,
+                          const char* needle, const char* what )
+{
+   try { PUSH_TX( f.db, tx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE( e.to_string().find( needle ) != std::string::npos,
+            what << " refused off-guard (not '" << needle << "'): "
+                 << e.to_string() );
+      return;
+   }
+   BOOST_FAIL( what << " was ACCEPTED" );
+}
+
+/// Build a hybrid_mint transaction without pushing it (refusal probes need
+/// the tx, not a direct push). Same fields h2j_mint pushes.
+signed_transaction h2j_build_mint_tx(
+      database_fixture& f, account_id_type minter, const fc::ecc::private_key& key,
+      const h2j_door& d, share_type deposit_bts, share_type stable )
+{
+   hybrid_mint_operation op;
+   op.minter        = minter;
+   op.vault         = d.vault;
+   op.deposit       = asset( deposit_bts, asset_id_type() );
+   op.stable_amount = stable;
+   op.fxr_asset     = d.fxr;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return tx;
+}
+
+/// Build an asset_issue transaction without pushing it (issuer-direct
+/// refusal probes). Same fields h2j_pilot_issue pushes.
+signed_transaction h2j_build_issue_tx(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
+      asset_id_type token, account_id_type to, share_type amount )
+{
+   asset_issue_operation op;
+   op.issuer           = issuer;
+   op.asset_to_issue   = asset( amount, token );
+   op.issue_to_account = to;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   return tx;
+}
+
+/// ISS-R9-07 pre-mint attack: the issuer prints junior supply BEFORE any
+/// reserve pins the FXR, then the first mint pins the reserve over phantom
+/// supply -- wind-down junior claims burn FXR from balances, so that phantom
+/// would pay out. Defense (guard 1, fresh pin): reserve creation refuses any
+/// FXR whose current_supply is nonzero. Before the fix this mint is ACCEPTED.
+BOOST_AUTO_TEST_CASE( h2_iss_r9_07_pre_mint_fresh_pin_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYR907A", "HYR907AF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "R" );
+
+   // Issuer-direct print before any pin: the issuer-direct pilot gate is
+   // inert here (FXR is not a vault pair), so this ADMITS pre-fix and
+   // post-fix alike -- the guard under test is the pin, not the issue.
+   h2j_pilot_issue( *this, alice_id, alice_private_key, d.fxr, alice_id,
+                    share_type( 1000 ) );
+   BOOST_REQUIRE_EQUAL( d.fxr( db ).dynamic_asset_data_id( db ).current_supply.value,
+                        1000 );
+
+   // The mint that would CREATE the reserve over that phantom supply must
+   // refuse at the fresh-pin guard.
+   signed_transaction tx = h2j_build_mint_tx(
+         *this, alice_id, alice_private_key, d,
+         share_type( 200000000000LL ), share_type( 50000000LL ) );
+   h2j_require_refusal( *this, tx, "zero supply",
+                        "reserve pinning a pre-minted FXR" );
+   BOOST_CHECK( h2j_find_reserve( *this, d.pair ) == nullptr );
+} FC_LOG_AND_RETHROW() }
+
+/// ISS-R9-07 issue lock: after a reserve pins the FXR, issuer-direct
+/// asset_issue on that token would grow supply WITHOUT moving the reserve's
+/// fxr_supply ledger (mirror drift -> phantom burn headroom). Defense
+/// (guard 2): asset_issue refuses any asset pinned as a junior. Scope pin:
+/// the PAIR's issuer-direct door stays open on the same reserve. Before the
+/// fix the FXR issue below is ACCEPTED.
+BOOST_AUTO_TEST_CASE( h2_iss_r9_07_post_pin_issue_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYR907B", "HYR907BF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "S" );
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000000000LL ), share_type( 50000000LL ) );
+   BOOST_REQUIRE( h2j_find_reserve( *this, d.pair ) != nullptr );
+   const int64_t pinned_supply =
+         d.fxr( db ).dynamic_asset_data_id( db ).current_supply.value;
+
+   signed_transaction tx = h2j_build_issue_tx(
+         *this, alice_id, alice_private_key, d.fxr, alice_id, share_type( 1 ) );
+   h2j_require_refusal( *this, tx, "pinned as an FXR junior",
+                        "issuer-direct issue on a pinned FXR" );
+   BOOST_CHECK_EQUAL( d.fxr( db ).dynamic_asset_data_id( db ).current_supply.value,
+                      pinned_supply );
+
+   // Guard scope: the senior PAIR is not a junior pin -- its issuer-direct
+   // door must still admit post-pin (pilot-cap paths depend on it).
+   h2j_pilot_issue( *this, alice_id, alice_private_key, d.pair, alice_id,
+                    share_type( 1 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// ISS-R9-07 double pin: two reserves pinning ONE FXR token would run two
+/// fxr_supply ledgers over one shared asset current_supply -- wind-down
+/// burns against either ledger draw down the same balance pool. Defense
+/// (guard 3): reserve creation refuses an FXR already pinned by a live
+/// reserve (unique by_reserve_fxr index backs the check). Before the fix
+/// this second mint is ACCEPTED.
+BOOST_AUTO_TEST_CASE( h2_iss_r9_07_double_pin_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door a = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYR907C", "HYR907CF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "C" );
+   h2j_mint( *this, alice_id, alice_private_key, a,
+             share_type( 200000000000LL ), share_type( 50000000LL ) );
+   BOOST_REQUIRE( h2j_find_reserve( *this, a.pair ) != nullptr );
+
+   const h2j_door b = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYR907D", "HYR907DF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "D" );
+   // Second door reaches for the ALREADY-PINNING junior token.
+   h2j_door reach = b;
+   reach.fxr = a.fxr;
+   signed_transaction tx = h2j_build_mint_tx(
+         *this, alice_id, alice_private_key, reach,
+         share_type( 200000000000LL ), share_type( 50000000LL ) );
+   h2j_require_refusal( *this, tx, "already pinned",
+                        "second reserve pinning the same FXR" );
+   BOOST_CHECK( h2j_find_reserve( *this, b.pair ) == nullptr );
+   BOOST_CHECK( h2j_find_reserve( *this, a.pair ) != nullptr );
+} FC_LOG_AND_RETHROW() }
+
+/// GREEN: a normal reserve creation with a fresh FXR still succeeds, the
+/// pin lands, the reserve ledger mirrors the token supply, the post-pin
+/// mint door still works (mint moves both sides of the mirror), and the
+/// issuer-direct PAIR door stays open (the lock is FXR-only).
+BOOST_AUTO_TEST_CASE( h2_iss_r9_07_fresh_pin_admits )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYR907E", "HYR907EF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "E" );
+   BOOST_REQUIRE_EQUAL( d.fxr( db ).dynamic_asset_data_id( db ).current_supply.value,
+                        0 );
+
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 200000000000LL ), share_type( 50000000LL ) );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->fxr_asset == d.fxr );
+   // Mirror invariant: reserve ledger == token supply at the pin.
+   BOOST_CHECK_EQUAL( r->fxr_supply.value,
+                      d.fxr( db ).dynamic_asset_data_id( db ).current_supply.value );
+
+   // Post-pin mint door still moves BOTH sides of the mirror.
+   generate_block(); // reset the shared door counter
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 20000000000LL ), share_type( 150000000LL ) );
+   r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK_EQUAL( r->fxr_supply.value,
+                      d.fxr( db ).dynamic_asset_data_id( db ).current_supply.value );
+
+   // Lock scope: issuer-direct issue on the PAIR still admits post-pin.
+   h2j_pilot_issue( *this, alice_id, alice_private_key, d.pair, alice_id,
+                    share_type( 1 ) );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

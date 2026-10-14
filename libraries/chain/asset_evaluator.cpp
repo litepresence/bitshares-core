@@ -30,6 +30,7 @@
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
@@ -431,6 +432,24 @@ void_result asset_issue_evaluator::do_evaluate( const asset_issue_operation& o )
    FC_ASSERT( !a.is_liquidity_pool_share_asset(), "Cannot manually issue a liquidity pool share asset." );
 
    FC_ASSERT( a.can_create_new_supply(), "Can not create new supply" );
+
+   // FXR provenance lock (ISS-R9-07 / R9-I8): once an asset is pinned as
+   // some reserve's junior token, issuer-direct supply is refused -- the
+   // reserve's fxr_supply ledger mirrors this token's current_supply and
+   // only the mint door may move both sides together (an issue here would
+   // grow the balance the wind-down junior path burns, with no ledger
+   // behind it). Fail-closed, no hardfork date: the reserve index is empty
+   // until the first post-H2 mint, so this gate never fires on a legacy
+   // replay (bit*, HONEST.*, gateway UIAs) or pre-fork. Scope: pinned juniors
+   // only -- the senior PAIR's issuer-direct door is untouched below.
+   {
+      const auto& by_fxr = d.get_index_type<reserve_index>()
+                            .indices().get<by_reserve_fxr>();
+      FC_ASSERT( by_fxr.find( o.asset_to_issue.asset_id ) == by_fxr.end(),
+                 "Asset ${s} is pinned as an FXR junior by an issuance "
+                 "reserve; issuer-direct supply is refused",
+                 ("s", a.symbol) );
+   }
 
    to_account = &o.issue_to_account(d);
    FC_ASSERT( is_authorized_asset( d, *to_account, a ) );

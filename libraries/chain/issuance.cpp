@@ -932,6 +932,35 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
       FC_ASSERT( fxr_asset->precision == pair_asset->precision,
                  "FXR/pair precision must match: parity math is unit-exact" );
       FC_ASSERT( fxr_asset->can_create_new_supply(), "FXR asset can create no new supply" );
+      // ISS-R9-07 / R9-I8 provenance guards (audit round-9), fail-closed.
+      // (a) Uniqueness first, so the refusal names the double pin even when
+      // the shared token also carries standing supply: two reserves pinning
+      // one FXR run two fxr_supply ledgers over ONE asset current_supply,
+      // and wind-down burns drawn against either ledger would spend the same
+      // balance pool twice. The unique by_reserve_fxr index backstops this
+      // assert at insert time. No reserve rows exist pre-H2, so the lookup
+      // misses everywhere on a legacy replay (same inertness argument as the
+      // pilot-cap gates).
+      {
+         const auto& by_fxr = d.get_index_type<reserve_index>()
+                               .indices().get<by_reserve_fxr>();
+         FC_ASSERT( by_fxr.find( op.fxr_asset ) == by_fxr.end(),
+                    "FXR token ${f} is already pinned by an existing reserve; "
+                    "a junior token backs exactly one reserve",
+                    ("f", op.fxr_asset) );
+      }
+      // (b) Fresh pin: the junior ledger opens at the pin, so the token must
+      // carry ZERO standing supply. Pre-minted (phantom) FXR would sit in
+      // balances the wind-down junior path burns for payout without ever
+      // having entered through the mint door. Inert pre-H2: the reserve
+      // index is empty until the first post-fork mint.
+      {
+         const auto& fxr_dyn = fxr_asset->dynamic_asset_data_id( d );
+         FC_ASSERT( fxr_dyn.current_supply == share_type( 0 ),
+                    "FXR token ${f} carries ${s} standing supply; a junior "
+                    "pin requires zero supply (pre-mint refused)",
+                    ("f", op.fxr_asset)("s", fxr_dyn.current_supply) );
+      }
    }
    else
       FC_ASSERT( op.fxr_asset == _reserve->fxr_asset,

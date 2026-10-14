@@ -130,16 +130,26 @@ class reserve_object : public abstract_object<reserve_object, protocol_ids, rese
 };
 
 struct by_reserve_pair; ///< reserves by pair (unique)
+struct by_reserve_fxr;  ///< reserves by pinned junior token (unique; ISS-R9-07)
 
 /**
-* @ingroup object_index
-*/
+ * @ingroup object_index
+ */
 using reserve_multi_index_type = multi_index_container<
    reserve_object,
    indexed_by<
       ordered_unique< tag<by_id>, member< object, object_id_type, &object::id > >,
       ordered_unique< tag<by_reserve_pair>,
          member< reserve_object, asset_id_type, &reserve_object::pair >
+      >,
+      // ISS-R9-07 provenance: one live junior pin per FXR token. The unique
+      // index is the storage-layer backstop behind the reserve-creation
+      // check -- two reserves can never share one FXR even if an evaluator
+      // path ever missed the assert (generic_index::insert refuses the
+      // duplicate). fxr_asset is immutable after creation, so the key never
+      // moves.
+      ordered_unique< tag<by_reserve_fxr>,
+         member< reserve_object, asset_id_type, &reserve_object::fxr_asset >
       >
    >
 >;

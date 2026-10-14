@@ -76,6 +76,17 @@ namespace graphene { namespace protocol {
    /// queue always spans the configured delay whatever the publish rate.
    constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_PENDING = 16;
 
+   /**
+    * GOV-R9-02 consensus time-lock: a challenge-set freeze costs a 2/3
+    * supermajority of the deciding set, while `oracle_unfreeze` costs one
+    * seated member and one op fee. The op therefore may not apply until this
+    * many seconds after the oracle's `open_disputes` last reached 0 (the
+    * clear anchor is recorded then; never recorded = never cleared = never
+    * unfrozen through this op). Integer seconds against head-block time
+    * only: no wall-clock, no floats (audit round-9 REPAIR-87).
+    */
+   constexpr uint32_t GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC = 14 * 24 * 60 * 60;
+
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH = 2;
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH = 16;
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_DESCRIPTION_LENGTH = 1000;

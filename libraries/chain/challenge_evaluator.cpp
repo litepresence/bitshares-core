@@ -466,10 +466,23 @@ void h2_apply_challenge_resolution( database& d, const vault_challenge_object& c
    } );
 }
 
+/// GOV-R9-02: anchor the committee unfreeze time-lock the instant an oracle's
+/// last open dispute clears. Runs inside the object's modify lambda, so it
+/// reads the post-decrement counter and records ONLY on the transition to 0 --
+/// a still-open dispute leaves the previous anchor alone. oracle_unfreeze
+/// checks `open_disputes == 0` before it ever reads the anchor, so the two
+/// gates cannot disagree about whether a clear happened.
+inline void h2_note_dispute_cleared( oracle_object& o, time_point_sec cleared_at )
+{
+   if( o.open_disputes == 0 )
+      o.dispute_cleared_time = cleared_at;
+}
+
 void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
                                   uint8_t resolution, account_id_type decisive_voter )
 {
    const oracle_object& oracle = x.oracle(d);
+   const time_point_sec cleared_at = d.head_block_time();
    if( resolution == GRAPHENE_H2_DISPUTE_SUSTAIN )
    {
       d.adjust_balance( x.challenger, asset( x.challenger_bonds, asset_id_type() ) );
@@ -498,7 +511,7 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
          m.finder = m.challenger;
          m.state = GRAPHENE_H2_CHALLENGE_SUSTAINED;
       } );
-      d.modify( oracle, []( oracle_object& o ) {
+      d.modify( oracle, [cleared_at]( oracle_object& o ) {
          o.open_disputes -= 1;
          // Fail-closed: a sustained bad print stops value promotion while the
          // raw aggregate stays transparent. R-02: the owner MUST NOT clear
@@ -509,6 +522,9 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
          // Slash stays flag-only here (slashed=true above); slash-to-seizure
          // is a follow-on phase, not half-built.
          o.options.frozen = true;
+         // GOV-R9-02: the clear anchors the unfreeze time-lock (a 2/3-sustained
+         // freeze is not undone by one member in the same breath).
+         h2_note_dispute_cleared( o, cleared_at );
       } );
       return;
    }
@@ -525,9 +541,13 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
       m.state = ( resolution == GRAPHENE_H2_DISPUTE_FAST_REJECT )
                 ? GRAPHENE_H2_CHALLENGE_FAST_REJECTED : GRAPHENE_H2_CHALLENGE_EXONERATED;
    } );
-   d.modify( oracle, [&pool]( oracle_object& o ) {
+   d.modify( oracle, [cleared_at, &pool]( oracle_object& o ) {
       o.open_disputes -= 1;
       o.forfeit_pool_balance = o.forfeit_pool_balance + pool;
+      // GOV-R9-02: exoneration/fast-reject clears the counter too, so the
+      // anchor tracks the clear whatever the verdict (the unfreeze gate reads
+      // it only while a freeze stands).
+      h2_note_dispute_cleared( o, cleared_at );
    } );
 }
 
@@ -689,13 +709,17 @@ void process_expired_h2_challenges( database& d )
          x.state = GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN;
          x.finder = x.challenger;
       } );
-      d.modify( oracle, [&pool]( oracle_object& o ) {
+      d.modify( oracle, [&pool, &now]( oracle_object& o ) {
          o.open_disputes -= 1;
          o.forfeit_pool_balance = o.forfeit_pool_balance + pool;
          // R-02: expiry freeze is challenge-set like sustain: owner
          // oracle_update MUST NOT clear it (refused); committee
          // oracle_unfreeze clears after resolution.
          o.options.frozen = true;
+         // GOV-R9-02: expiry is a clear too -- it anchors the same unfreeze
+         // time-lock, so a missed vote window cannot be converted into an
+         // instant single-member unfreeze.
+         h2_note_dispute_cleared( o, now );
       } );
    }
 }

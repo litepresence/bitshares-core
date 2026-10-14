@@ -504,6 +504,24 @@ void_result oracle_unfreeze_evaluator::do_evaluate( const oracle_unfreeze_operat
     // first, never mid-vote.
     FC_ASSERT( _oracle->open_disputes == 0,
                "Oracle carries open disputes; unfreeze refused until resolution" );
+    // GOV-R9-02: even resolved, a challenge-set freeze stands for
+    // GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC after the last clear. Imposing it
+    // takes a 2/3 supermajority of the deciding set; clearing it here takes
+    // one seated member and one op fee, so without the lock a single capture
+    // undoes the only durable sanction (GOV-02 slash is flag-only). Both
+    // branches fail closed: never cleared = no anchor = no unfreeze, and an
+    // anchor newer than the delay = still locked (head-block time only).
+    FC_ASSERT( _oracle->dispute_cleared_time != time_point_sec(),
+               "Oracle has no cleared dispute to anchor the unfreeze time-lock; "
+               "refused (owner oracle_update clears a Track A freeze)" );
+    {
+       const int64_t held_sec =
+             ( d.head_block_time() - _oracle->dispute_cleared_time ).to_seconds();
+       FC_ASSERT( held_sec >= int64_t( GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC ),
+                  "Unfreeze time-lock: ${h}s since the last dispute cleared, "
+                  "${t}s required",
+                  ("h", held_sec)("t", GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC) );
+    }
     // R3-01 coherence, R4-02 NONE tightening (documented choice: REFUSE while
     // the deviation ladder holds the pair). The frozen flag conflates two
     // causes: guilty freezes (disputes) clear here, deviation halts (any

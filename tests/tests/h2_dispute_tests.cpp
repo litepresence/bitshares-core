@@ -291,6 +291,22 @@ void h2d_vote(
    PUSH_TX( f.db, tx );
 }
 
+/// Committee unfreeze through the price-leg op (throws on refusal), the exact
+/// path a single seated member pushes.
+void h2d_committee_unfreeze( database_fixture& f, account_id_type unfreezer,
+                             const fc::ecc::private_key& key, oracle_id_type oid )
+{
+   oracle_unfreeze_operation uop;
+   uop.unfreezer = unfreezer;
+   uop.oracle    = oid;
+   signed_transaction tx;
+   tx.operations.push_back( uop );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
 /// GOV-R9-01 setup: opens a live oracle dispute so a permissionless fresh
 /// registrant and an elected genesis seat can be asked to vote on the very
 /// same target. Reference creation is itself committee-gated, so it is done
@@ -1299,6 +1315,9 @@ BOOST_AUTO_TEST_CASE( owner_cannot_clear_sustain_freeze_committee_unfreezes )
    BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
    BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
    BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+   // GOV-R9-02: this clear is the anchor the committee unfreeze time-lock
+   // runs from (head-block time of the resolution block).
+   const fc::time_point_sec cleared = db.head_block_time();
 
    // Owner clear refused: challenge-set freeze (sustained terminal history).
    {
@@ -1329,7 +1348,14 @@ BOOST_AUTO_TEST_CASE( owner_cannot_clear_sustain_freeze_committee_unfreezes )
       BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
    }
 
-   // Committee path clears after resolution (open==0, sustained history present).
+   // GOV-R9-02: the committee unfreeze waits out the 14-day time-lock from
+   // the clear above -- one seated member may not undo a 2/3 act in the
+   // same breath (both refusals above ran before the lock elapsed).
+   generate_blocks( cleared + GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC + 60 );
+   generate_block();
+   set_expiration( db, trx );
+
+   // Committee path clears after the lock (open==0, sustained history present).
    {
       oracle_unfreeze_operation uop;
       uop.unfreezer = alice_id;
@@ -1421,6 +1447,9 @@ BOOST_AUTO_TEST_CASE( owner_cannot_clear_open_or_expiry_freeze )
    generate_block();
    BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
    BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   // GOV-R9-02: expiry is a clear too -- this head-block time anchors the
+   // committee unfreeze time-lock exactly as a sustain does.
+   const fc::time_point_sec cleared = db.head_block_time();
 
    // Owner still refused (challenge-set expiry history); committee clears.
    {
@@ -1436,6 +1465,12 @@ BOOST_AUTO_TEST_CASE( owner_cannot_clear_open_or_expiry_freeze )
       tx.sign( alice_private_key, db.get_chain_id() );
       BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
    }
+
+   // GOV-R9-02: the committee unfreeze waits out the 14-day time-lock from
+   // the expiry clear above (the owner refusal ran before it elapsed).
+   generate_blocks( cleared + GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC + 60 );
+   generate_block();
+   set_expiration( db, trx );
    {
       oracle_unfreeze_operation uop;
       uop.unfreezer = alice_id;
@@ -1521,6 +1556,139 @@ BOOST_AUTO_TEST_CASE( gov_r9_01_elected_seat_still_votes )
    BOOST_CHECK_NO_THROW( h2d_vote( *this, seat0.get_id(), init_account_priv_key,
                                    object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE ) );
    BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN ); // 1 vote: no quorum
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// GOV-R9-02 (round-9 REPAIR-87): the unfreeze time-lock after a cleared dispute
+// ---------------------------------------------------------------------------
+
+/// GOV-R9-02: a sustained freeze costs a 2/3 supermajority of the deciding set;
+/// undoing it costs one op fee from one seated member. The asymmetry is the
+/// finding (combined with GOV-02's flag-only slash, the freeze is the only
+/// durable sanction), so the unfreeze must sit behind a consensus time-lock:
+/// refused until 14 days after open_disputes reached 0, then it clears.
+BOOST_AUTO_TEST_CASE( h2_gov_r9_02_unfreeze_time_lock_after_dispute_clear )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "R902.USD", bts_ref, usd_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   // Sustain: the freeze the time-lock protects. The head-block time of this
+   // block is the moment open_disputes reaches 0 (the anchor).
+   const oracle_dispute_id_type did = h2d_post_dispute(
+         *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+         h2d_evidence( "gov-r9-02" ) );
+   const uint64_t need = h2d_vote_threshold( *this );
+   for( uint64_t i = 0; i < need; ++i )
+      h2d_vote( *this, get_account( string( "init" ) + fc::to_string( i ) ).get_id(),
+                init_account_priv_key, object_id_type( did ),
+                GRAPHENE_H2_DISPUTE_SUSTAIN );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+   const fc::time_point_sec cleared = db.head_block_time();
+
+   // (1) The dispute cleared in the block above: the committee unfreeze must
+   // still refuse -- one member cannot undo a 2/3 act in the same breath.
+   BOOST_CHECK_THROW( h2d_committee_unfreeze( *this, alice_id, alice_private_key, oid ),
+                      fc::exception );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // (2) One minute short of the delay still refuses (the lock is measured
+   // from the clear, not from the freeze, and never runs early).
+   generate_blocks( cleared + 14 * 24 * 60 * 60 - 60 );
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_CHECK_THROW( h2d_committee_unfreeze( *this, alice_id, alice_private_key, oid ),
+                      fc::exception );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // (3) Past the delay the same op clears: a lock, not a permanent bar.
+   generate_blocks( cleared + 14 * 24 * 60 * 60 + 60 );
+   generate_block();
+   set_expiration( db, trx );
+   h2d_committee_unfreeze( *this, alice_id, alice_private_key, oid );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+} FC_LOG_AND_RETHROW() }
+
+/// GOV-R9-02 fail-closed neighbor: an oracle with NO dispute history never gets
+/// a clear anchor, so committee unfreeze must refuse -- never = never cleared,
+/// no timestamp, no unfreeze. Track A owner freezes still clear through
+/// oracle_update (R-02), which is the path the time-lock must not touch.
+BOOST_AUTO_TEST_CASE( h2_gov_r9_02_unfreeze_refused_without_cleared_dispute )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "R902N.USD", bts_ref, usd_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+
+   // Owner freezes through the Track A path: no dispute ever opened, so there
+   // is no resolution to anchor a time-lock to.
+   {
+      oracle_update_operation fop;
+      fop.owner     = alice_id;
+      fop.oracle_id = oid;
+      oracle_options frozen = oid( db ).options;
+      frozen.frozen = true;
+      fop.new_options = frozen;
+      signed_transaction tx; tx.operations.push_back( fop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   BOOST_REQUIRE_EQUAL( oid( db ).open_disputes, 0u );
+
+   // Committee unfreeze refuses: fail-closed, no anchor, no unfreeze.
+   BOOST_CHECK_THROW( h2d_committee_unfreeze( *this, alice_id, alice_private_key, oid ),
+                      fc::exception );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // The owner path is untouched: a Track A freeze with no dispute history
+   // still clears through oracle_update (R-02), with no time-lock attached.
+   {
+      oracle_update_operation uop;
+      uop.owner     = alice_id;
+      uop.oracle_id = oid;
+      oracle_options live = oid( db ).options;
+      live.frozen = false;
+      uop.new_options = live;
+      signed_transaction tx; tx.operations.push_back( uop );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, tx );
+   }
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

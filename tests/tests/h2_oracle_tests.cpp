@@ -1895,6 +1895,24 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
    // block would trip duplicate_transaction, never the gate under test.
    generate_block();
 
+   // GOV-R9-02: the committee unfreeze now waits 14 days from this clear.
+   // Chain time only -- carol keeps a daily publish so her producer bond
+   // stays ahead of its 7-day unlock (publish-advanced; a lapsed bond drops
+   // the pair out of the bonded live set and the wire pauses forever).
+   // No trades though: the wire has no samples, so every sweep pauses and
+   // the stage holds at NONE. The refusal pinned below must therefore still
+   // trip the deviation ladder (windows 1-2 run after this wait), never the
+   // clock.
+   const fc::time_point_sec cleared = db.head_block_time();
+   const fc::time_point_sec wait_end = cleared + GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC + 60;
+   while( db.head_block_time() < wait_end )
+   {
+      h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
+      generate_blocks( db.head_block_time() + 86400 );
+   }
+   generate_block();
+   set_expiration( db, trx );
+
    // Window 1: aligned market on the surviving carol feed — clean, no halt,
    // and the guilty freeze is untouched by the clean wire.
    h2e_publish( *this, oid, carol_id, carol_private_key, 100, 1 );
@@ -2234,16 +2252,27 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
    generate_block();
    BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
    BOOST_REQUIRE_EQUAL( oid( db ).options.frozen, true );
+   // GOV-R9-02: expiry is a clear -- this head-block time anchors the
+   // committee unfreeze time-lock.
+   const fc::time_point_sec cleared = db.head_block_time();
 
    // Two clean windows after expiry: the stage logic runs (nothing held —
    // Phase A cleared it) but the expiry freeze persists past the reopen
-   // read, pinning expiry-before-reopen. Committee unfreeze then clears.
+   // read, pinning expiry-before-reopen.
    for( int w = 0; w < 2; ++w )
    {
       h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
       trade_both( 1000000, 51 + w );
       pass_window();
    }
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // GOV-R9-02: idle chain time until the 14-day lock from the expiry clear
+   // elapses -- no publishes, no trades, so every sweep pauses and the stage
+   // holds; the eventual committee unfreeze must clear a real lock.
+   generate_blocks( cleared + GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC + 60 );
+   generate_block();
+   set_expiration( db, trx );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
    h2e_committee_unfreeze( *this, alice_id, alice_private_key, oid );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
@@ -2845,6 +2874,17 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
    BOOST_CHECK_EQUAL( tw->halt_stage, 0u );
    BOOST_CHECK_EQUAL( tw->redemptions_halted, false );
    BOOST_CHECK_EQUAL( vid( db ).tripwire_door_hold, false );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+
+   // GOV-R9-02: the committee unfreeze waits 14 days from the S4 expiry
+   // clear. Idle chain time only -- no publishes, no trades, so every sweep
+   // pauses (stage holds at NONE) and both guilty freezes must survive the
+   // whole wait; only then may one seated member clear the oracle half.
+   const fc::time_point_sec cleared = db.head_block_time();
+   generate_blocks( cleared + GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC + 60 );
+   generate_block();
+   set_expiration( db, trx );
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
 

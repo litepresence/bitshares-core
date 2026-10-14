@@ -166,6 +166,16 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        /// Accrued 15% forfeit shares, swept by the H2d reward pool.
        share_type forfeit_pool_balance;
 
+       /**
+        * GOV-R9-02: head-block time at which @ref open_disputes last
+        * transitioned to 0 -- the anchor for the committee unfreeze time-lock
+        * (`GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC`). Written only at the
+        * transition, never cleared, so it only ever moves forward with chain
+        * time. Unset (epoch) means no dispute has ever cleared: the unfreeze
+        * has no anchor and refuses rather than guessing one.
+        */
+       time_point_sec dispute_cleared_time;
+
       /// @return whether a submission made at @p published is still live at @p now
       bool is_submission_live( time_point_sec published, time_point_sec now )const
       {

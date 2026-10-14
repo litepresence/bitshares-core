@@ -114,6 +114,21 @@ fc::sha256 nullifier_key( const std::vector<char>& image33 )
    return fc::sha256::hash( image33.data(), image33.size() );
 }
 
+// AGI-04 (round-9): THE V1<->V2 linkage, single definition (declared in
+// stealth_evaluator.hpp). Replaces the four historical inline ternaries
+// (op40 evaluate/apply, op109 evaluate/apply) so they cannot drift; the
+// op108 absolute tagging agrees by construction (its key_image_v1 field is
+// always the V1-domain image — tagged GRAPHENE_STEALTH_PROOF_V1 directly,
+// same mapping). Unknown versions link to V1: exact historical ternary
+// semantics, unreachable in practice because the op version assert above
+// each linkage refuses the op before the alt leg runs.
+uint8_t stealth_alt_proof_version( uint8_t proof_version )
+{
+   return ( proof_version == protocol::GRAPHENE_STEALTH_PROOF_V1 )
+          ? protocol::GRAPHENE_STEALTH_PROOF_V2
+          : protocol::GRAPHENE_STEALTH_PROOF_V1;
+}
+
 // ---------------------------------------------------------------------------
 // Introspection
 // ---------------------------------------------------------------------------
@@ -378,10 +393,12 @@ uint32_t stealth_work_for_pool_exchange( uint32_t ring_size )
    // ring-size assert and a proposal-embedded op bypasses validate(), so
    // ring_size is unbounded at gate time — saturate, never wrap, and the
    // gate fails closed on the saturated value. Single 1-in/1-out G2 swap
-   // leg: dual-verified ring (both version legs), Schnorr-pin kernel
-   // allowance, 2x range allowance (output BP+ m=1 + conceptual pin cost),
-   // pool-math leg.
-   uint64_t w = GRAPHENE_STEALTH_WORK_US_PER_KERNEL;                             // Schnorr value-pin
+   // leg: dual-verified ring (both version legs), TWO kernel allowances —
+   // the Schnorr value-pin (do_evaluate step 7) AND the conservation kernel
+   // verify_excess (step 10's blind->blind leg runs BOTH; NC-14: the model
+   // had been charging one while the evaluator verified two), 2x range
+   // allowance (output BP+ m=1 + conceptual pin cost), pool-math leg.
+   uint64_t w = 2u * GRAPHENE_STEALTH_WORK_US_PER_KERNEL;                         // value-pin + conservation kernels
    w += (uint64_t)2 * ring_size * GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER;      // dual-verify ring
    w += (uint64_t)2 * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF;                  // output BP+ + pin cost
    w += GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH;                                  // constant-product math
@@ -619,9 +636,7 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    // checked AND recorded, or the opening spends once per version. A future
    // V3 must extend this mapping and the linkage below (fail-closed:
    // unknown versions are already rejected with the op version above).
-   const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
-                               ? GRAPHENE_STEALTH_PROOF_V2
-                               : GRAPHENE_STEALTH_PROOF_V1;
+   const uint8_t alt_version = stealth_alt_proof_version( o.proof_version );
 
    const auto& bbi = d.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
    const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
@@ -805,9 +820,7 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
    // is unknown to the spender), so the decoy owner spends normally.
    // Task 5 (M05/GC-07): BOTH version legs are nullified (the opening was
    // authorized under both; either leg alone would leave the other spendable).
-   const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
-                               ? GRAPHENE_STEALTH_PROOF_V2
-                               : GRAPHENE_STEALTH_PROOF_V1;
+   const uint8_t alt_version = stealth_alt_proof_version( o.proof_version );
    for( const auto& in : o.inputs )
    {
       db().create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
@@ -2070,8 +2083,12 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
       // o.proof_version — an op with proof_version==V2 still has a V1 image
       // in key_image_v1. The ring path tags with o.proof_version because
       // its key_image/alt_key_image fields are RELATIVE (primary/alternate);
-      // op108's fields are absolute. nullifier_key needs the explicit
-      // vector<char> conversion (commitment_type does not convert).
+      // op108's fields are absolute. AGI-04 (round-9): this absolute tagging
+      // IS the stealth_alt_proof_version mapping — key_image_v1 is the
+      // V1-domain image (tag V1), key_image_v2 the V2-domain image (tag V2);
+      // a future V3 must extend the helper AND this pair together.
+      // nullifier_key needs the explicit vector<char> conversion
+      // (commitment_type does not convert).
       {
          const std::vector<char> i1( in.key_image_v1.begin(), in.key_image_v1.end() );
          const std::vector<char> i2( in.key_image_v2.begin(), in.key_image_v2.end() );
@@ -2214,9 +2231,11 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
               "Stealth pool swaps are not allowed until the stealth hardfork" );
    // (2) Blind gate (count).
    stealth_check_blind_gate( d );
-   // (3) Work gate: a swap costs ring + 2xBP + kernel + pool math, strictly
-   // more than :331. Runs before the ring-size asserts, so the calculator
-   // takes a wire-shaped op and saturates (fail-closed, never wraps).
+   // (3) Work gate: a swap costs ring + 2xBP + TWO kernels (value-pin AND
+   // conservation verify_excess — both verified below; NC-14) + pool math,
+   // strictly more than :331. Runs before the ring-size asserts, so the
+   // calculator takes a wire-shaped op and saturates (fail-closed, never
+   // wraps).
    stealth_check_blind_work_gate( d,
       stealth_work_for_pool_exchange( (uint32_t)o.input.ring.size() ) );
    // (4) Asset gates (A AND B): per-asset supply-divergence halts bind both
@@ -2368,9 +2387,7 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
 
    // (10) Ring signature + alt leg over G2RM (binds version, input asset,
    // pool, claimed value, slippage floor, image, ring, pseudo, outputs, F).
-   const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
-                               ? GRAPHENE_STEALTH_PROOF_V2
-                               : GRAPHENE_STEALTH_PROOF_V1;
+   const uint8_t alt_version = stealth_alt_proof_version( o.proof_version );
    std::vector<fc::ecc::commitment_type> ring_cs( in.ring.begin(), in.ring.end() );
    std::vector<fc::ecc::commitment_type> out_cs = { o.output.commitment };
    {
@@ -2475,9 +2492,7 @@ void_result stealth_pool_exchange_evaluator::do_apply( const stealth_pool_exchan
 
    // Nullifiers, both version legs (relative tags, ring-path discipline:
    // key_image rides o.proof_version, alt rides the other version).
-   const uint8_t alt_version = ( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
-                               ? GRAPHENE_STEALTH_PROOF_V2
-                               : GRAPHENE_STEALTH_PROOF_V1;
+   const uint8_t alt_version = stealth_alt_proof_version( o.proof_version );
    db().create<stealth_nullifier_object>( [&]( stealth_nullifier_object& n ) {
       n.key_image = nullifier_key( o.input.key_image );
       n.proof_version = o.proof_version;

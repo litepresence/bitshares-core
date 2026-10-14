@@ -71,12 +71,38 @@ namespace graphene {
          return db.get_global_properties().parameters.extensions.value.updatable_htlc_options;
       }
 
-      void_result htlc_create_evaluator::do_evaluate(const htlc_create_operation& o)
-      {
-         graphene::chain::database& d = db();
-         optional<htlc_options> htlc_options = get_committee_htlc_options(db());
+       void_result htlc_create_evaluator::do_evaluate(const htlc_create_operation& o)
+       {
+          graphene::chain::database& d = db();
+          optional<htlc_options> htlc_options = get_committee_htlc_options(db());
 
-         FC_ASSERT(htlc_options, "HTLC Committee options are not set.");
+          // AGI-08 (round-9) ACCEPTED RISK — read before touching this gate:
+          // hash_algo griefing. The four HTLC hash legs are NOT equal:
+          //  - sha1: ~2^63 collision cost. A LOCK AUTHOR can grind two
+          //    preimages for one published digest and equivocate the lock
+          //    (the classic hash-algo griefing model). sha1 creates are
+          //    SUNSET past the H2 bonds hardfork in the H2 tree
+          //    (track-b-h2 htlc_evaluator.cpp: hardfork-gated refusal
+          //    "SHA1 HTLC creates are sunset past the H2 bonds hardfork");
+          //    G1 carries NO sunset vehicle (byte-identical create path to
+          //    develop; the sunset lives only in H2). Extending that gate
+          //    here would diverge the G1 wire from its audited baseline and
+          //    from the merge surface — the vehicle ships with H2, not a
+          //    G1 drive-by.
+          //  - ripemd160 / hash160: ~2^80 collision, and the REDEEM path
+          //    needs a second-preimage (~2^160), outside the cheap-griefing
+          //    budget. They do NOT enable the sha1 equivocation model, so
+          //    gating them here — while sha1 stays live — would be
+          //    backwards. Accepted at legacy parity, permanently, unless a
+          //    future audit prices 2^80 into the budget.
+          //  - sha256: the only leg that is not griefable under any
+          //    current cost model; H2 forces it for all new locks.
+          // Owner-visible consequence (documented, not enforced): a lock
+          // author CAN equivocate a sha1 lock on any G1-era chain. Counter-
+          // parties should refuse sha1 locks client-side; the chain will
+          // not save them until the H2 sunset lands.
+
+          FC_ASSERT(htlc_options, "HTLC Committee options are not set.");
 
          // make sure the expiration is reasonable
          FC_ASSERT( o.claim_period_seconds <= htlc_options->max_timeout_secs,

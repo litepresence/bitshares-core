@@ -104,16 +104,20 @@ BIGNUM* secp_field()
    return p;
 }
 
-/// Strict parse: 32B big-endian must encode a canonical scalar (< n).
-/// Used BEFORE any modular reduction so non-canonical encodings are
-/// rejected exactly like S1's is_reduced (no malleability surface).
-// AUDIT: strict canonical parse (< n, no wraparound reduction) is the S1
-// is_reduced discipline; relaxing it reopens proof malleability.
+/// Strict parse: 32B big-endian must encode a canonical NON-ZERO scalar
+/// (0 < s < n). NC-16 (round-9): zero was admitted by the < n check alone;
+/// the strict S1 is_reduced / scalar_canonical_nz discipline is 0 < s < n,
+/// so a zero response never reaches the multiexp legs (c0 == 0 would
+/// otherwise collapse the ring equation, a zero pin s collapses to
+/// T == e*Y). Used BEFORE any modular reduction so non-canonical encodings
+/// are rejected exactly like S1's is_reduced (no malleability surface).
+// AUDIT: strict canonical parse (0 < s < n, no wraparound reduction) is the
+// S1 is_reduced discipline; relaxing it reopens proof malleability.
 bool scalar_parse_strict( BIGNUM* out, const unsigned char* in, size_t len )
 {
    if( len != 32 || out == nullptr ) return false;
    BN_bin2bn( in, 32, out );
-   return BN_cmp( out, secp_order() ) < 0;
+   return !BN_is_zero( out ) && BN_cmp( out, secp_order() ) < 0;
 }
 
 bool scalar_from_sha( BIGNUM* out, const fc::sha256& h )
@@ -617,7 +621,9 @@ bool stealth_verify_ring( uint8_t version,
       bn c;
       if( !scalar_parse_strict( c.b, (const unsigned char*)in.ring_sig.data(), 32 ) )
          { err = "c0 not canonical"; goto fail; }
-      // c0 == 0 is legal (challenge space includes 0); canonical means < n.
+      // NC-16 (round-9): c0 == 0 is NOT accepted — the strict parse is
+      // 0 < s < n (scalar_parse_strict / scalar_canonical_nz discipline),
+      // same as every other scalar on this path.
       std::vector<bn*> rb( n ), rv( n ), rd( n );
       for( size_t i = 0; i < n; ++i ) { rb[i] = new bn(); rv[i] = new bn(); rd[i] = new bn(); }
       bool ok = true;

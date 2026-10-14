@@ -125,9 +125,15 @@ constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_MAX_PCT = 40;
 /// gated (they create decoys — gating them would deadlock bootstrapping).
 /// Availability yields to privacy, explicitly (thin-pool rings are worse
 /// than no rings: they mark the spender as one of few).
-/// The value equals GRAPHENE_STEALTH_RING_MIN: a spend needs at least one
-/// full minimum ring of live candidates, so below that no honest ring
-/// exists and halting is the only private option.
+/// The effective ring floor is GRAPHENE_STEALTH_RING_TARGET (16, the
+/// consensus floor everywhere since Task 6): a spend at live depth 11..15
+/// passes this floor assert but then finds fewer than 16 decoy candidates,
+/// so ring FORMATION refuses (raw, not a clean pool-floor halt); below 11
+/// the floor halts cleanly instead. Both ranges are unreachable by design —
+/// the MIN-11 emergency leg (committee-lowered ring min) was never
+/// activated and the window closes the instant the pool holds 16 fresh
+/// outputs. The floor also bounds the A3 cold-start discount (deposits at
+/// pre-floor depth carry at most one ring target of outputs).
 constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
 /// Thin-pool decoy tightening (R-04, proposal): while the per-asset live
 /// pool is below this depth, rings must meet the TARGET size (16, not the

@@ -265,9 +265,16 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       uint32_t              blind_work_block_num = 0;
       uint32_t              blind_work_used_us = 0;
       /// Phase-1 instrumentation (spec 2026-10-11 §8): per-asset deposit
-      /// concentration. STATE ONLY — nothing reads it to permit or refuse.
-      /// Appended-last; zero-initialized, so history reconciles by default.
-      /// Sparse: entries exist only for assets with post-STEALTH deposits.
+      /// concentration. Read by the Rule R subsidy classifier
+      /// (stealth_op39_subsidy_count -> stealth_window_dominance via
+      /// stealth_window_dominant): a depositor past the 1/16 dominance
+      /// boundary has their deposit subsidy capped at 1 output. It does NOT
+      /// permit or refuse the op itself — the fee subsidy is money, not a
+      /// gate — but it is consensus-live through the fee schedule, not
+      /// dead state. (G1-10/round-9: the old "STATE ONLY — nothing reads
+      /// it" doc predated the A3/A4 effective-N wiring.) Appended-last;
+      /// zero-initialized, so history reconciles by default. Sparse: entries
+      /// exist only for assets with post-STEALTH deposits.
       /// flat_map is ORDERED.
       flat_map<asset_id_type, stealth_depositor_window> deposit_windows;
       /// SUP-R-10 (round-9, CDR-10/CDR-11): append-only per-asset grant/route

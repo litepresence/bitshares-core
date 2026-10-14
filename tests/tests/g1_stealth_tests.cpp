@@ -38,6 +38,9 @@
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/protocol/stealth.hpp>
 #include <graphene/protocol/transfer.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
+#include <graphene/protocol/proposal.hpp>
+#include <graphene/protocol/vault_ops.hpp>
 
 #include <graphene/chain/stealth_proof.hpp>
 #include <graphene/chain/stealth_object.hpp>
@@ -4006,7 +4009,188 @@ BOOST_AUTO_TEST_CASE( r9b_ring_scalar_canonicality_vectors )
    { stealth_ring_input bad = good; // A3-last: rb_{n-1} == n (per-member)
      std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() + 32 + 96 * ( n - 1 ) );
      expect_ring_reject( bad, "responses not canonical" ); }
+   // NC-16 (round-9): zero is not canonical either (0 < s < n). The old
+   // parse admitted c0 == 0 with a comment claiming it "is legal"; the
+   // strict S1 discipline refuses it at the parse layer so it never
+   // reaches the multiexp legs.
+   { stealth_ring_input bad = good; // A6: c0 == 0
+     std::fill( bad.ring_sig.begin(), bad.ring_sig.begin() + 32, 0 );
+     expect_ring_reject( bad, "c0 not canonical" ); }
+   { stealth_ring_input bad = good; // A7: rb_0 == 0 (per-member zero)
+     std::fill( bad.ring_sig.begin() + 32, bad.ring_sig.begin() + 64, 0 );
+     expect_ring_reject( bad, "responses not canonical" ); }
    BN_free( n1 ); BN_free( bs ); BN_free( bprime );
+} FC_CAPTURE_AND_RETHROW() }
+
+// NC-16 (round-9): the recovery proof's response scalars obey the same
+// strict 0 < s < n parse as the ring path. Pure verifier vectors — no
+// chain state; a true proof with s_b / s_v zeroed must refuse at the
+// parse layer, never reach the equation legs.
+BOOST_AUTO_TEST_CASE( r16_recovery_zero_scalars_refuse )
+{ try {
+   // Build one honest recovery proof over a genuine commitment.
+   auto B = T_blind_secret( "r16-zero-b" );
+   const uint64_t v = 777;
+   BIGNUM* bb = T_bn( B );
+   auto Cv = T_commit( bb, v );
+   std::vector<unsigned char> Cvec( Cv.begin(), Cv.end() );
+   fc::ecc::commitment_type C;
+   std::copy( Cv.begin(), Cv.end(), C.begin() );
+   fc::ecc::commitment_type I1, I2; std::vector<char> good;
+   T_prove_recovery( Cvec, bb, v, asset_id_type(), I1, I2, good );
+   BN_free( bb );
+   BOOST_REQUIRE( good.size() == 163 );
+   std::string err;
+   BOOST_REQUIRE_MESSAGE( stealth_verify_recovery_proof( C, I1, I2, good,
+                           asset_id_type().instance.value, err ),
+                          "control recovery proof must verify: " << err );
+   { // A: s_b == 0 (bytes 99..130)
+     std::vector<char> bad = good;
+     std::fill( bad.begin() + 99, bad.begin() + 131, 0 );
+     err.clear();
+     BOOST_CHECK( !stealth_verify_recovery_proof( C, I1, I2, bad,
+                    asset_id_type().instance.value, err ) );
+     BOOST_CHECK_EQUAL( err, std::string( "recovery s_b not canonical" ) ); }
+   { // B: s_v == 0 (bytes 131..162)
+     std::vector<char> bad = good;
+     std::fill( bad.begin() + 131, bad.end(), 0 );
+     err.clear();
+     BOOST_CHECK( !stealth_verify_recovery_proof( C, I1, I2, bad,
+                    asset_id_type().instance.value, err ) );
+     BOOST_CHECK_EQUAL( err, std::string( "recovery s_v not canonical" ) ); }
+} FC_CAPTURE_AND_RETHROW() }
+
+// AGI-04 (round-9): the V1<->V2 linkage is ONE mapping. The four historical
+// ternaries (op40 evaluate/apply nullifier tags, op109 evaluate/apply
+// nullifier tags) collapse into this helper, and the op108 absolute
+// tagging must agree with it. Semantics pinned: alt(V1)==V2, alt(V2)==V1,
+// unknown versions link to V1 (fail-closed parity with the op version
+// assert above each linkage — the op never executes with an unknown
+// version, so the alt leg's unknown mapping is unreachable belt-and-braces),
+// and the mapping is an involution on the known pair.
+BOOST_AUTO_TEST_CASE( agi04_alt_proof_version_linkage )
+{ try {
+   BOOST_CHECK_EQUAL( graphene::chain::stealth_alt_proof_version(
+                         GRAPHENE_STEALTH_PROOF_V1 ), GRAPHENE_STEALTH_PROOF_V2 );
+   BOOST_CHECK_EQUAL( graphene::chain::stealth_alt_proof_version(
+                         GRAPHENE_STEALTH_PROOF_V2 ), GRAPHENE_STEALTH_PROOF_V1 );
+   // Future V3 or zero: anything not V1 links to V1 (exact historical
+   // ternary semantics — the else branch catches every non-V1 input).
+   BOOST_CHECK_EQUAL( graphene::chain::stealth_alt_proof_version( 3 ),
+                      GRAPHENE_STEALTH_PROOF_V1 );
+   BOOST_CHECK_EQUAL( graphene::chain::stealth_alt_proof_version( 0 ),
+                      GRAPHENE_STEALTH_PROOF_V1 );
+   // Involution: alt(alt(v)) == v for both known versions.
+   BOOST_CHECK_EQUAL( graphene::chain::stealth_alt_proof_version(
+                         graphene::chain::stealth_alt_proof_version(
+                            GRAPHENE_STEALTH_PROOF_V1 ) ), GRAPHENE_STEALTH_PROOF_V1 );
+   BOOST_CHECK_EQUAL( graphene::chain::stealth_alt_proof_version(
+                         graphene::chain::stealth_alt_proof_version(
+                            GRAPHENE_STEALTH_PROOF_V2 ) ), GRAPHENE_STEALTH_PROOF_V2 );
+} FC_CAPTURE_AND_RETHROW() }
+
+// CI-05 (round-9 crypto-agility): the G1 typelist DECLARES the H2 tag block
+// (83..103) but db_init registers no evaluator for it — contact must fail
+// closed at apply_operation with the generic refusal, before any hardfork
+// or fee logic. Both vehicles the finding names: (a) direct dispatch of
+// op83/op99, (b) proposal-embedded — creation is legal once the matching
+// H2 leg is live (the proposal pre-check mirrors the evaluator gate), and
+// the approved execution must refuse at apply_operation with the SAME
+// generic message, recorded on the proposal as fail_reason (retried at
+// expiry per push_proposal's contract) — never a silent drop.
+BOOST_AUTO_TEST_CASE( ci05_h2_tags_refuse_without_evaluators )
+{ try {
+   const int tag83 = operation::tag<vault_register_operation>::value;
+   const int tag99 = operation::tag<hybrid_mint_operation>::value;
+   BOOST_REQUIRE_EQUAL( tag83, 83 );
+   BOOST_REQUIRE_EQUAL( tag99, 99 );
+   // (a) Direct dispatch: unknown-slot refusal at apply_operation.
+   auto expect_no_eval = [&]( const operation& op, const char* label ) {
+      transaction_evaluation_state es( &db );
+      try {
+         db.apply_operation( es, op );
+         BOOST_FAIL( std::string( label )
+                     << ": missing evaluator must refuse at apply_operation" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+            "No registered evaluator for operation" ) != std::string::npos,
+            label << ": wrong refusal: " << e.to_detail_string() );
+      }
+   };
+   expect_no_eval( operation( vault_register_operation() ), "op83" );
+   expect_no_eval( operation( hybrid_mint_operation() ), "op99" );
+
+   // (b) Proposal-embedded. A validate-clean vault_register (registrar =
+   // dan, the only required authority) is the vehicle.
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 2000000 ) );
+   generate_block();
+   auto make_vr = [&]() {
+      vault_register_operation vr;
+      vr.registrar = dan.id;
+      vr.vault_authority =
+         authority( 1, public_key_type( dan_private_key.get_public_key() ), 1 );
+      vr.min_bond = 1000;
+      vr.min_bond_usd_cents = 10000;
+      vr.secure_ratio_bps = 20000;
+      vr.challenge_window_sec = 3600;
+      return vr;
+   };
+   // Pre-gate: the H2 proposal pre-check refuses creation outright —
+   // pinned so a future evaluator registration cannot silently widen this.
+   {
+      proposal_create_operation pc;
+      pc.fee_paying_account = dan.id;
+      pc.proposed_ops.emplace_back( op_wrapper( operation( make_vr() ) ) );
+      pc.expiration_time = db.head_block_time() + fc::days( 1 );
+      signed_transaction stx;
+      stx.operations = { pc };
+      set_expiration( db, stx );
+      sign( stx, dan_private_key );
+      try {
+         PUSH_TX( db, stx );
+         BOOST_FAIL( "pre-gate proposal embedding op83 must be refused at creation" );
+      } catch( const fc::exception& e ) {
+         BOOST_CHECK_MESSAGE( e.to_detail_string().find(
+            "Not allowed until the H2 bonds hardfork" ) != std::string::npos,
+            e.to_detail_string() );
+      }
+   }
+   // Post-gate: creation succeeds (the finding's "is created")...
+   generate_blocks( HARDFORK_H2_GATEWAY_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   proposal_create_operation pc;
+   pc.fee_paying_account = dan.id;
+   pc.proposed_ops.emplace_back( op_wrapper( operation( make_vr() ) ) );
+   pc.expiration_time = db.head_block_time() + fc::days( 1 );
+   signed_transaction create_stx;
+   create_stx.operations = { pc };
+   set_expiration( db, create_stx );
+   sign( create_stx, dan_private_key );
+   const processed_transaction cptx = PUSH_TX( db, create_stx );
+   const proposal_object& prop = db.get<proposal_object>(
+      cptx.operation_results.front().get<object_id_type>() );
+   BOOST_CHECK( prop.fail_reason.empty() );
+   // ...and the approved execution refuses at apply_operation: the generic
+   // refusal lands on fail_reason (push_proposal throws, the update
+   // evaluator records it, the tx itself succeeds — contract pinned).
+   {
+      proposal_update_operation pu;
+      pu.proposal = prop.id;
+      pu.fee_paying_account = dan.id;
+      pu.active_approvals_to_add.emplace( dan.id );
+      signed_transaction stx;
+      stx.operations = { pu };
+      set_expiration( db, stx );
+      sign( stx, dan_private_key );
+      PUSH_TX( db, stx );
+   }
+   const proposal_object& after = db.get<proposal_object>( prop.id );
+   BOOST_CHECK_MESSAGE( after.fail_reason.find(
+      "No registered evaluator for operation" ) != std::string::npos,
+      "proposal fail_reason must carry the generic refusal: "
+      << after.fail_reason );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( r9b_point_encoding_vectors )
@@ -9823,9 +10007,16 @@ BOOST_AUTO_TEST_CASE( value_pin_rejects_malformed )
    // Non-canonical s (all 0xFF > curve order): strict-parse refusal.
    BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool, T33,
                                            std::string( 32, (char)0xff ), err ) );
-   // Canonical-but-wrong s (all zeros): parse passes, equation must fail.
+   BOOST_CHECK_EQUAL( err, std::string( "pin s not canonical" ) );
+   // NC-16 (round-9): zero is not a canonical response scalar (strict
+   // discipline is 0 < s < n, same as scalar_canonical_nz / the S1
+   // is_reduced rule). Refusal must be the parse-layer refusal, not an
+   // equation failure — a zero s would otherwise reach the multiexp and
+   // collapse the pin to T == e*Y for grinding attackers to probe.
+   err.clear();
    BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool, T33,
                                            std::string( 32, '\0' ), err ) );
+   BOOST_CHECK_EQUAL( err, std::string( "pin s not canonical" ) );
    BN_free( b_P );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -9932,9 +10123,12 @@ BOOST_AUTO_TEST_CASE( g2rm_field_binding )
 BOOST_AUTO_TEST_CASE( g2rm_work_exceeds_transfer )
 { try {
    // A G2 swap costs strictly more than a same-ring G1 transfer (design §7:
-   // ring + 2xBP + kernel + pool math): dual-verified ring legs, the
-   // Schnorr-pin kernel allowance, 2x range allowance (output BP+ m=1 +
-   // conceptual pin cost), plus the pool-math leg.
+   // ring + 2xBP + TWO kernels + pool math): dual-verified ring legs, the
+   // Schnorr-pin kernel allowance, the conservation-kernel allowance (both
+   // kernels the evaluator runs — value-pin then verify_excess), 2x range
+   // allowance (output BP+ m=1 + conceptual pin cost), plus the pool-math
+   // leg. NC-14 (round-9): the model had been charging one kernel while the
+   // evaluator verifies two; the work gate must pay for what it runs.
    const uint32_t n = 16;
    stealth_transfer_operation small;
    small.inputs.resize( 1 ); small.inputs[0].ring.resize( n );
@@ -9942,8 +10136,8 @@ BOOST_AUTO_TEST_CASE( g2rm_work_exceeds_transfer )
    const uint32_t tx = stealth_work_for_stealth_transfer( small );
    const uint32_t g2 = stealth_work_for_pool_exchange( n );
    BOOST_CHECK_MESSAGE( g2 > tx, "G2 work " << g2 << " must exceed G1 work " << tx );
-   // Exact model-arithmetic pin (single input leg, single output).
-   BOOST_REQUIRE_EQUAL( g2, (uint32_t)( GRAPHENE_STEALTH_WORK_US_PER_KERNEL
+   // Exact model-arithmetic pin (single input leg, single output, both kernels).
+   BOOST_REQUIRE_EQUAL( g2, (uint32_t)( 2u * GRAPHENE_STEALTH_WORK_US_PER_KERNEL
       + 2u * n * GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER
       + 2u * GRAPHENE_STEALTH_WORK_US_PER_RANGE_PROOF
       + GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH ) );
@@ -11998,11 +12192,20 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_tamper_fails )
    tampered.input.pseudo_output.data()[0] ^= 0x01;
    trx.operations = { tampered };
    try
-   {
-      PUSH_TX( db, trx );
-      BOOST_FAIL( "tampered-P poolswap was ACCEPTED" );
-   }
-   catch( const fc::exception& e ) { BOOST_CHECK( true ); (void)e; }
+    {
+       PUSH_TX( db, trx );
+       BOOST_FAIL( "tampered-P poolswap was ACCEPTED" );
+    }
+    catch( const fc::exception& e ) {
+       // V-07 (round-9): anchor the refusal to its gate. The value-pin
+       // binds P to amount_to_sell and runs BEFORE the ring legs (do_evaluate
+       // step 7 vs step 10), so a flipped P byte (the prefix stays a valid
+       // 0x02/0x03, so point-parse passes) must land on the value-pin
+       // assert — never the ring or conservation legs.
+       BOOST_CHECK_MESSAGE( e.to_detail_string().find( "value-pin" ) != std::string::npos,
+                            "tamper refusal must come from the value-pin gate: "
+                            << e.to_detail_string() );
+    }
    trx.clear();
    BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );

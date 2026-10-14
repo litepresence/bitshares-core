@@ -140,9 +140,16 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        /// Set while the last promotion was held by the rate limit. Cleared on the next
        /// in-band promotion or at the next maintenance-interval boundary.
        bool rate_limited = false;
-       /// Holds counted in the current maintenance interval. Reset to 0 at each
-       /// interval boundary (and on every successful promotion).
-       uint32_t guard_hits = 0;
+      /// Holds counted in the current maintenance interval. Reset to 0 at each
+      /// interval boundary (and on every successful promotion).
+      /// R-04 (round-9): DIAGNOSTIC ONLY — no consensus rule, escalation, or
+      /// economic consumer reads this counter. Holds still bite through the
+      /// rate_limited flag and last-good-standing price fallback; this field
+      /// merely makes the hold pressure VISIBLE on the object (mirrored to
+      /// tests, e.g. oracle_tests.cpp guard-hit vectors). Deleting it would
+      /// need a wire- and hardfork-safe object cleanup (appended-last field,
+      /// serialization compatibility) — a separate task, never a drive-by.
+      uint32_t guard_hits = 0;
        /// head_block_time / maintenance_interval_sec at the last reset. Integer
        /// division on head-block time only: no floats, no wall-clock.
        uint64_t guard_epoch = 0;

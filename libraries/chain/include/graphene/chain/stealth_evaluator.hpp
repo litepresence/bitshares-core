@@ -479,13 +479,14 @@ uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );
 /// saturated. Called from do_evaluate (gate) and do_apply (accounting).
 uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o );
 /// Work-model units consumed by one G2 stealth pool swap (1-in/1-out):
-/// Schnorr-pin kernel allowance + dual-verified ring legs (both versions) +
-/// 2x range allowance (output BP+ m=1 + conceptual pin cost) + pool-math
-/// leg. Pure, saturated at 0xFFFFFFFF (a proposal-embedded op bypasses
-/// validate(), so ring_size is unbounded at gate time — the gate still
-/// fails closed, never wraps). Strictly exceeds stealth_work_for_stealth_
-/// transfer for equal ring sizes (design §7). Called from do_evaluate
-/// (gate) and do_apply (accounting) by the G2 evaluator (G2-2).
+/// TWO kernel allowances (Schnorr value-pin + conservation verify_excess —
+/// the evaluator runs both; NC-14) + dual-verified ring legs (both
+/// versions) + 2x range allowance (output BP+ m=1 + conceptual pin cost) +
+/// pool-math leg. Pure, saturated at 0xFFFFFFFF (a proposal-embedded op
+/// bypasses validate(), so ring_size is unbounded at gate time — the gate
+/// still fails closed, never wraps). Strictly exceeds stealth_work_for_
+/// stealth_transfer for equal ring sizes (design §7). Called from
+/// do_evaluate (gate) and do_apply (accounting) by the G2 evaluator (G2-2).
 uint32_t stealth_work_for_pool_exchange( uint32_t ring_size );
 /// Work-model units consumed by one op106 turnstile migration (Task 4): one
 /// BP+ output + conservation kernel + recovery-proof kernel, always charged
@@ -498,6 +499,17 @@ uint32_t stealth_work_for_turnstile();
 /// so the test suite links the exact production identity — never duplicated).
 /// Takes vector<char>, NOT commitment_type; callers convert explicitly.
 fc::sha256 nullifier_key( const std::vector<char>& image33 );
+/// AGI-04 (round-9): THE V1<->V2 linkage. Exactly two proof versions exist;
+/// every dual-verify spend authorizes under both, so each op carries a
+/// primary leg (o.proof_version) and an alternate leg whose domain is this
+/// mapping. One definition — the four historical inline ternaries (op40
+/// evaluate/apply, op109 evaluate/apply) and the op108 absolute tagging
+/// discipline must all agree with it. Semantics: alt(V1)==V2, alt(V2)==V1,
+/// anything else links to V1 (fail-closed parity with the op version assert
+/// above each linkage — an unknown-version op is refused before the alt leg
+/// runs, so the unknown->V1 mapping is unreachable belt-and-braces, never a
+/// widening). A future V3 must extend this mapping, not bypass it.
+uint8_t stealth_alt_proof_version( uint8_t proof_version );
 /// Verification-work units counted against the budget in the
 /// currently-pending block (0 pre-fork or on rollover).
 uint32_t stealth_blind_work_this_block( const database& db );

@@ -175,7 +175,7 @@ using reserve_index = generic_index<reserve_object, reserve_multi_index_type>;
  * the owner plus maturity). Absorbs haircut claims pro-rata by the same
  * factor as the balance (floored; absorbers take the first loss), so
  * sum(claims) <= balance holds by construction. The pool absorbs residual
- * shortfalls instantly when a position reads below 100% after bands (exact
+ * shortfalls instantly when a pair reserve reads below 100% after bands (exact
  * predicate in h2_offset_should_absorb); the remainder is recorded on the
  * reserve as uncovered_shortfall (which halts the mint door while nonzero).
  */

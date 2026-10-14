@@ -77,8 +77,8 @@ namespace graphene { namespace protocol {
    /// LLAMMA soft-band count proposal (BSIP-1 section 4, ISSUANCE-2): the
    /// reserve's backing is partitioned across exactly 7 bands as accounting,
    /// never custody -- band totals always sum to the reserve totals. Band
-   /// edges are exact integer fractions of the bonded anchor price (bps
-   /// below); no floats anywhere. All band-shift rounding floors against
+   /// edges are 128-bit-computed (e.g. 7787->7788 at 7 bands/anchor 10000),
+   /// not exact fractions; integer math only, no floats. Band-shift rounding
    /// the mover (dust stays in the source band), favoring the protocol.
    constexpr uint32_t GRAPHENE_H2_ISSUE_N_BANDS = 7;
    /// Band tick proposal: the minimum edge spacing is 250bps (9750->10000),

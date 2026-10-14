@@ -2,9 +2,9 @@
 // challenges/disputes through stake, resolve, freeze, claims, fallback set).
 // Activates with the H2 bonds primitives gate by default; the committee moves
 // it (with the primitives gate) apart from the gateway leg at scheduling.
-// The only consensus-pinned property is the order: gateway strictly before
-// price (BSIP-1 section 6). Before it passes, every price-leg op stays
-// rejected, so no node can produce a block a pre-fork node cannot validate.
+// The only consensus-pinned property is the ORDER: BONDS 2029-11-01 <
+// GATEWAY 2029-12-01 < PRICE 2030-01-01 (BSIP-1 §6). Before PRICE passes,
+// every price-leg op stays rejected (no block a pre-fork node cannot validate).
 #ifndef HARDFORK_H2_PRICE_TIME
 #define HARDFORK_H2_PRICE_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
 #define HARDFORK_H2_PRICE_PASSED(now) (now >= HARDFORK_H2_PRICE_TIME)

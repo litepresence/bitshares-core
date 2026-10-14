@@ -73,7 +73,7 @@ namespace graphene { namespace protocol {
       uint64_t        min_bond_usd_cents = 0; ///< USD-terms denomination record at lock
       asset_id_type   bond_asset;       ///< BTS at genesis (basket timing is a later task)
       uint32_t        secure_ratio_bps = 0;   ///< Must exceed 10000; genesis proposal 20000
-      uint32_t        challenge_window_sec = 0;
+      uint32_t        challenge_window_sec = 0;   ///< unbond-delay FLOOR only (PS-10)
       optional<string> memo;            ///< Lock-proof attestation carrier; never authorizes mint
       extensions_type extensions;       ///< Wire space only at H2 genesis (appended-last rule)
 

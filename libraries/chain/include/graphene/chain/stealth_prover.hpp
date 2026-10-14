@@ -8,6 +8,10 @@
 #include <fc/crypto/elliptic.hpp>
 #include <fc/crypto/sha256.hpp>
 
+#include <openssl/crypto.h>
+
+#include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -44,9 +48,17 @@ namespace graphene { namespace chain {
  * verifiers; its wNAF timing variability is accepted wallet-side surface,
  * not consensus surface.
  *
+ * RNG discipline (WPC-02): every RNG-using entry point consults the
+ * entropy gate (stealth_prover_entropy_ready — RAND_status() == 1 after a
+ * one-time RAND_poll attempt) before it draws anything, and each draw is
+ * still individually fail-closed on RAND_bytes. Proving against an
+ * unseeded generator is refused, never degraded.
+ *
  * Zeroization discipline: every secret BIGNUM is released with
  * BN_clear_free (OpenSSL zeroes before free); secret byte buffers go
- * through OPENSSL_cleanse. The test hook below asserts the cleanse path
+ * through stealth_cleanse_secret (OPENSSL_cleanse + compiler barrier,
+ * WPC-03) and caller-held blinds through the secret_buffer RAII guard
+ * (WPC-04). The test hook below asserts the cleanse path
  * executed on a per-prove secret buffer (post-cleanse copy must read all
  * zeros); full coverage of every temporary is by construction + review,
  * not by the hook alone — the hook proves the path runs, review proves it
@@ -55,6 +67,68 @@ namespace graphene { namespace chain {
  * Integer law: amounts are int64_t/units (never floats); no unordered_*;
  * no wall-clock; no consensus state.
  */
+
+/**
+ * WPC-03 (REPAIR-159): cleanse secret storage AND compiler-fence it.
+ *
+ * OPENSSL_cleanse is an external call the compiler cannot delete outright,
+ * but it can still reorder later reads/writes of the same bytes across the
+ * call, or keep a dead copy of the secret alive past it. The seq-cst
+ * atomic_signal_fence (the standard-conforming spelling of
+ * `asm volatile("" ::: "memory")`) forbids both: every access to the
+ * cleansed bytes after this point is ordered after the cleanse.
+ *
+ * Every secret-buffer cleanse in the prover and the pool builder MUST go
+ * through this one function — it is the only place the barrier lives (the
+ * secret_buffer guard below uses it too).
+ */
+inline void stealth_cleanse_secret( void* p, std::size_t n )
+{
+   OPENSSL_cleanse( p, n );
+   std::atomic_signal_fence( std::memory_order_seq_cst );
+}
+
+/**
+ * WPC-04 (REPAIR-143): RAII zeroization guard over caller-held secret
+ * storage — the pool builder's bP/bOut blinding factors.
+ *
+ * Adopts the storage BY REFERENCE: construction only records the pointer;
+ * destruction cleanses + fences it through stealth_cleanse_secret. Every
+ * exit from the enclosing scope — normal return, FC_ASSERT, any thrown
+ * exception — therefore zeroizes the blind. The destructor is the ONE
+ * zeroize site, so there is no unwind path that can be forgotten.
+ *
+ * Non-copyable; zeroize() is idempotent (after the first cleanse the guard
+ * releases its claim, so it can never touch storage it no longer owns).
+ *
+ * The reference shape is deliberate: an owning wrapper's storage dies with
+ * the object, so a test cannot observe that the destructor zeroized it
+ * without reading destroyed memory. Here the harness owns the fc::sha256,
+ * the guard owns only the wipe, and post-scope bytes are readable, defined
+ * and asserted zero (wpc04_secret_buffer_zeroizes_on_unwind).
+ */
+class secret_buffer
+{
+public:
+   explicit secret_buffer( fc::sha256& storage ) : m_storage( &storage ) {}
+   ~secret_buffer() { zeroize(); }
+
+   secret_buffer( const secret_buffer& ) = delete;
+   secret_buffer& operator=( const secret_buffer& ) = delete;
+
+   /// Cleanse the adopted storage (idempotent: further calls no-op).
+   void zeroize()
+   {
+      if( m_storage )
+      {
+         stealth_cleanse_secret( m_storage->data(), fc::sha256::data_size() );
+         m_storage = nullptr;
+      }
+   }
+
+private:
+   fc::sha256* m_storage;
+};
 
 /**
  * Dual-version pool-ring proof (one opening authorized under both proof
@@ -76,9 +150,36 @@ struct stealth_pool_ring_proof
 };
 
 /**
+ * WPC-02 (REPAIR-134): prover entropy gate. True iff OpenSSL's CSPRNG
+ * reports fully seeded (RAND_status() == 1); a one-time RAND_poll()
+ * attempt runs at the first call and the status is then read per call.
+ * Every RNG-using prover entry point (sample / ring / BP+ / pin) consults
+ * this and refuses to prove when it is false: proving against an unseeded
+ * generator would mint predictable blinds and signing nonces, i.e.
+ * recoverable keys. The fail-closed RAND_bytes checks inside the provers
+ * remain as the second line; this gate is the first (and reports the
+ * failure instead of silently burning retries). stealth_compute_pool_excess
+ * draws no randomness (pure scalar subtraction) and needs no gate.
+ */
+bool stealth_prover_entropy_ready();
+
+/**
+ * Test hook (WPC-02): install a RAND_status() stand-in for the entropy
+ * gate and get the previous provider back (pass nullptr to restore the
+ * real RAND_status). Production code never calls this — it exists so the
+ * unit suite can drive the unseeded branch without interposing on OpenSSL
+ * itself (an LD_PRELOAD/link-level shim is not practical inside
+ * chain_test). Worst case a caller can only lie to its OWN process about
+ * entropy that process already holds; the RAND_bytes fail-closed checks
+ * are untouched by this hook.
+ */
+using stealth_rand_status_fn = int (*)();
+stealth_rand_status_fn stealth_prover_test_set_rand_status( stealth_rand_status_fn fn );
+
+/**
  * Sample a fresh blinding factor: 32 RAND_bytes reduced mod n, retried to
  * nonzero. Fail-closed: throws on RNG failure (a proof must never fall
- * back to a weak/zero blind).
+ * back to a weak/zero blind) or when the entropy gate is closed.
  */
 fc::sha256 stealth_sample_blind();
 

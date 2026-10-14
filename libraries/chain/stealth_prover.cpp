@@ -20,6 +20,36 @@
 #include <openssl/crypto.h>
 
 #include <memory>
+#include <mutex>
+
+// ---------------------------------------------------------------------------
+// WPC-05 (REPAIR-135): ctgrind/dudect instrumentation hooks.
+//
+// Compile-time gated — NEVER defined in a production build. Enable with
+// -DGRAPHENE_CTGRIND plus the Valgrind memcheck headers (apt: valgrind),
+// then run the prover entry points under Memcheck/ctgrind:
+//   GRAPHENE_CTGRIND_SECRET marks secret input bytes undefined (the
+//   ctgrind "this is secret" declaration): any branch, index, or syscall
+//   consuming them is reported as an uninitialised-value use — which IS
+//   the secret-dependent-control-flow finding (WPC rules 2/3/16).
+//   GRAPHENE_CTGRIND_PUBLIC marks outputs defined at a prover's exit:
+//   proofs are wire data, so without this the run drowns in syscall
+//   false positives on proof bytes derived from tainted scalars.
+//
+// Differential runs (ctgrind error scan + dudect p-values archived to
+// build/logs/) are a PRE-ACTIVATION gate requiring external tooling; this
+// environment has no valgrind headers/binary, so here the hooks are
+// compile-verified only (see task-r9-i7-report.md).
+// ---------------------------------------------------------------------------
+#ifdef GRAPHENE_CTGRIND
+#  include <valgrind/valgrind.h>
+#  include <valgrind/memcheck.h>
+#  define GRAPHENE_CTGRIND_SECRET( p, n )  VALGRIND_MAKE_MEM_UNDEFINED( (p), (n) )
+#  define GRAPHENE_CTGRIND_PUBLIC( p, n )  VALGRIND_MAKE_MEM_DEFINED( (p), (n) )
+#else
+#  define GRAPHENE_CTGRIND_SECRET( p, n )  ((void)0)
+#  define GRAPHENE_CTGRIND_PUBLIC( p, n )  ((void)0)
+#endif
 
 namespace graphene { namespace chain {
 
@@ -58,9 +88,33 @@ struct prover_ctx
 // cleanse, so nonzero bytes prove the cleanse did not run on that buffer).
 thread_local std::vector<unsigned char> t_last_cleansed;
 
+// WPC-02 (REPAIR-134): entropy-gate status provider. Defaults to
+// RAND_status(); only the test hook (stealth_prover_test_set_rand_status,
+// outside this namespace) ever swaps it, and only inside the unit suite.
+int (*g_rand_status)() = &RAND_status;
+
+#ifdef GRAPHENE_CTGRIND
+// WPC-05: declare a secret scalar held in an opaque BIGNUM (OpenSSL 1.1+
+// hides the limbs, so they cannot be marked directly). Round-trip the
+// canonical 32-byte encoding through an UNDEFINED buffer instead: the
+// V-bits propagate through BN_bin2bn's arithmetic into the limbs, and
+// every later branch/index on them is reported. Value is unchanged
+// (secrets here are already reduced mod n < 2^256, so a 32-byte pad is
+// lossless).
+void ctgrind_taint_bn( const BIGNUM* b )
+{
+   if( !b ) return;
+   unsigned char t[32];
+   BN_bn2binpad( b, t, 32 );
+   GRAPHENE_CTGRIND_SECRET( t, 32 );
+   BN_bin2bn( t, 32, const_cast<BIGNUM*>( b ) );
+   stealth_cleanse_secret( t, 32 );
+}
+#endif
+
 void cleanse_and_snapshot( unsigned char buf[32] )
 {
-   OPENSSL_cleanse( buf, 32 );
+   stealth_cleanse_secret( buf, 32 );
    t_last_cleansed.assign( buf, buf + 32 );
 }
 
@@ -73,11 +127,11 @@ bool rand_scalar_nonzero( BIGNUM* out, const BIGNUM* order, BN_CTX* ctx )
    {
       if( RAND_bytes( buf, 32 ) != 1 )
       {
-         OPENSSL_cleanse( buf, 32 );
+         stealth_cleanse_secret( buf, 32 );
          return false;
       }
       BN_bin2bn( buf, 32, out );
-      OPENSSL_cleanse( buf, 32 );
+      stealth_cleanse_secret( buf, 32 );
       BN_mod( out, out, order, ctx );
       if( !BN_is_zero( out ) )
          return true;
@@ -91,11 +145,11 @@ bool rand_scalar( BIGNUM* out, const BIGNUM* order, BN_CTX* ctx )
    unsigned char buf[32];
    if( RAND_bytes( buf, 32 ) != 1 )
    {
-      OPENSSL_cleanse( buf, 32 );
+      stealth_cleanse_secret( buf, 32 );
       return false;
    }
    BN_bin2bn( buf, 32, out );
-   OPENSSL_cleanse( buf, 32 );
+   stealth_cleanse_secret( buf, 32 );
    BN_mod( out, out, order, ctx );
    return true;
 }
@@ -136,6 +190,13 @@ bool prove_leg( const prover_ctx& pc,
                 std::vector<char>& sig_out,
                 std::string& err )
 {
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: declare the secret openings. b_s (real input blind) and
+   // b_prime (pseudo-output blind) are secret; v_s is the swap amount,
+   // public on the op109 wire, so it stays defined (no false positives).
+   ctgrind_taint_bn( b_s );
+   ctgrind_taint_bn( b_prime );
+#endif
    const size_t n = Q.size();
    EC_GROUP* g = pc.g;
    BN_CTX* ctx = pc.bctx;
@@ -387,7 +448,7 @@ bool prove_leg( const prover_ctx& pc,
          BN_bn2binpad( rd[k], buf, 32 );
          sig_out.insert( sig_out.end(), (char*)buf, (char*)buf + 32 );
       }
-      OPENSSL_cleanse( buf, 32 );
+      stealth_cleanse_secret( buf, 32 );
       for( auto x : c ) BN_clear_free( x );
       for( auto x : rb ) BN_clear_free( x );
       for( auto x : rv ) BN_clear_free( x );
@@ -398,6 +459,14 @@ bool prove_leg( const prover_ctx& pc,
    EC_POINT_free( J1 ); EC_POINT_free( J2 ); EC_POINT_free( H );
    EC_POINT_free( I ); EC_POINT_free( L ); EC_POINT_free( R );
    EC_POINT_free( T ); EC_POINT_free( M ); EC_POINT_free( P );
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: key images, pseudo-output and signatures are wire data —
+   // mark them defined at exit so downstream public comparisons and the
+   // syscall checks do not false-positive on tainted scalar arithmetic.
+   GRAPHENE_CTGRIND_PUBLIC( image_out.data(), image_out.size() );
+   GRAPHENE_CTGRIND_PUBLIC( pseudo_out.data(), pseudo_out.size() );
+   GRAPHENE_CTGRIND_PUBLIC( sig_out.data(), sig_out.size() );
+#endif
    return true;
 
 fail:
@@ -415,8 +484,28 @@ fail:
 
 } // anonymous namespace
 
+bool stealth_prover_entropy_ready()
+{
+   // One RAND_poll() attempt at first prover use (seeds from the OS if the
+   // CSPRNG is unseeded); every call then reads the status provider, so a
+   // gate that closes is never cached open and a gate that opens again
+   // recovers (WPC-02).
+   static std::once_flag poll_once;
+   std::call_once( poll_once, []{ (void)RAND_poll(); } );
+   return g_rand_status() == 1;
+}
+
+stealth_rand_status_fn stealth_prover_test_set_rand_status( stealth_rand_status_fn fn )
+{
+   const stealth_rand_status_fn prev = g_rand_status;
+   g_rand_status = fn ? fn : &RAND_status;
+   return prev;
+}
+
 fc::sha256 stealth_sample_blind()
 {
+   FC_ASSERT( stealth_prover_entropy_ready(),
+              "prover RNG unseeded — refusing to sample a blind (WPC-02)" );
    prover_ctx pc;
    FC_ASSERT( pc.ok, "prover EC init failed" );
    BIGNUM* b = BN_new();
@@ -429,7 +518,12 @@ fc::sha256 stealth_sample_blind()
    FC_ASSERT( ok, "prover RNG failed: refusing to sample a blind" );
    fc::sha256 out;
    std::copy( buf, buf + 32, (char*)out.data() );
-   OPENSSL_cleanse( buf, 32 );
+   stealth_cleanse_secret( buf, 32 );
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: a fresh blinding factor is secret by definition — declare it
+   // so every consumer inherits the taint through the ctgrind run.
+   GRAPHENE_CTGRIND_SECRET( out.data(), 32 );
+#endif
    return out;
 }
 
@@ -472,6 +566,12 @@ bool stealth_prove_pool_ring( uint8_t version, uint8_t alt_version,
    if( msg_main32.size() != 32 || msg_alt32.size() != 32 )
    {
       err = "messages must be 32 bytes";
+      return false;
+   }
+   // WPC-02: refuse before any RAND_bytes draw if the CSPRNG is unseeded.
+   if( !stealth_prover_entropy_ready() )
+   {
+      err = "prover RNG unseeded (entropy gate, WPC-02)";
       return false;
    }
 
@@ -639,6 +739,12 @@ bool bp_prove_attempt( const prover_ctx& pc,
                        const fc::sha256& blind, uint64_t value,
                        std::vector<char>& proof_out )
 {
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: the blinding factor is the only secret here — `value` is
+   // public (v_out = amount − composite fee, both plaintext on the op109
+   // wire), so its bit decomposition stays defined (no false positives).
+   GRAPHENE_CTGRIND_SECRET( blind.data(), 32 );
+#endif
    EC_GROUP* g = pc.g;
    BN_CTX* ctx = pc.bctx;
    const BIGNUM* order = pc.order;
@@ -854,7 +960,7 @@ bool bp_prove_attempt( const prover_ctx& pc,
       {
          unsigned char cb[32]; bp_bin32( cb, challenge.get() );
          tstate.assign( cb, cb + 32 );
-         OPENSSL_cleanse( cb, 32 );
+         stealth_cleanse_secret( cb, 32 );
       }
       own_bn challenge_inv = new_bn();
       if( !challenge_inv ||
@@ -1000,12 +1106,16 @@ bool bp_prove_attempt( const prover_ctx& pc,
    bp_bin32( buf, r1.get() ); proof_out.insert( proof_out.end(), (char*)buf, (char*)buf + 32 );
    bp_bin32( buf, s1.get() ); proof_out.insert( proof_out.end(), (char*)buf, (char*)buf + 32 );
    bp_bin32( buf, d1.get() ); proof_out.insert( proof_out.end(), (char*)buf, (char*)buf + 32 );
-   OPENSSL_cleanse( buf, 32 );
+   stealth_cleanse_secret( buf, 32 );
    for( size_t j = 0; j < ROUNDS; ++j )
    {
       proof_out.insert( proof_out.end(), Lb[j].begin(), Lb[j].end() );
       proof_out.insert( proof_out.end(), Rb[j].begin(), Rb[j].end() );
    }
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: the range proof is wire data — public at the prover's exit.
+   GRAPHENE_CTGRIND_PUBLIC( proof_out.data(), proof_out.size() );
+#endif
    return true;
 }
 
@@ -1015,6 +1125,12 @@ bool stealth_prove_bp_plus_m1( const fc::ecc::commitment_type& C,
    const fc::sha256& blind, uint64_t value,
    std::vector<char>& proof_out, std::string& err )
 {
+   // WPC-02: refuse before any RAND_bytes draw if the CSPRNG is unseeded.
+   if( !stealth_prover_entropy_ready() )
+   {
+      err = "prover RNG unseeded (entropy gate, WPC-02)";
+      return false;
+   }
    prover_ctx pc;
    if( !pc.ok )
    {
@@ -1055,7 +1171,7 @@ fc::sha256 stealth_compute_pool_excess( const fc::sha256& blind_P,
    BN_clear_free( a ); BN_clear_free( b ); BN_clear_free( e );
    fc::sha256 out;
    std::copy( buf, buf + 32, (char*)out.data() );
-   OPENSSL_cleanse( buf, 32 );
+   stealth_cleanse_secret( buf, 32 );
    return out;
 }
 
@@ -1071,6 +1187,17 @@ bool stealth_prove_value_pin( const fc::ecc::commitment_type& P,
       err = "pin amount must be positive";
       return false;
    }
+   // WPC-02: refuse before any RAND_bytes draw if the CSPRNG is unseeded.
+   if( !stealth_prover_entropy_ready() )
+   {
+      err = "prover RNG unseeded (entropy gate, WPC-02)";
+      return false;
+   }
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: blind_P is the secret; P, amount and pool id are public
+   // (op109 wire) and stay defined.
+   GRAPHENE_CTGRIND_SECRET( blind_P.data(), 32 );
+#endif
    prover_ctx pc;
    if( !pc.ok )
    {
@@ -1147,7 +1274,7 @@ bool stealth_prove_value_pin( const fc::ecc::commitment_type& P,
    unsigned char sbuf[32];
    BN_bn2binpad( s, sbuf, 32 );
    s_out.assign( (char*)sbuf, 32 );
-   OPENSSL_cleanse( sbuf, 32 );
+   stealth_cleanse_secret( sbuf, 32 );
    // Zeroization snapshot: post-cleanse copy of the one-time nonce k.
    {
       unsigned char k32[32];
@@ -1157,6 +1284,11 @@ bool stealth_prove_value_pin( const fc::ecc::commitment_type& P,
    EC_POINT_free( Tp );
    BN_clear_free( bp ); BN_clear_free( k );
    BN_clear_free( e ); BN_clear_free( s );
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: (T, s) is wire data — public at the prover's exit.
+   GRAPHENE_CTGRIND_PUBLIC( T_out.data(), T_out.size() );
+   GRAPHENE_CTGRIND_PUBLIC( s_out.data(), s_out.size() );
+#endif
    return true;
 }
 

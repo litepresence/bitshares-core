@@ -70,6 +70,7 @@
 #include <openssl/ec.h>
 #include <openssl/bn.h>
 #include <openssl/obj_mac.h>
+#include <openssl/rand.h>
 
 #include "../common/database_fixture.hpp"
 
@@ -11560,6 +11561,113 @@ BOOST_AUTO_TEST_CASE( wallet_prover_pool_value_triple )
          []( unsigned char c ) { return c == 0; } ),
          "prover secret buffer was not cleansed" );
    }
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- R9-I7 / WPC-02 (REPAIR-134): prover entropy gate. While OpenSSL's
+// CSPRNG reports unseeded (RAND_status() != 1) EVERY RNG-using prover
+// entry point refuses: a proof built on weak entropy would mint
+// predictable blinds / signing nonces (recoverable keys). TDD RED:
+// pre-implementation the gate symbols are undeclared (compile fail). The
+// abort branch is driven through the RAND_status stand-in because
+// interposing on OpenSSL itself is not practical inside chain_test; the
+// real-RAND_status success path is asserted first so the gate cannot be
+// "green" by never letting proving start.
+BOOST_AUTO_TEST_CASE( wpc02_entropy_gate_fail_closed )
+{ try {
+   const uint8_t V = GRAPHENE_STEALTH_PROOF_V2;
+   const uint8_t VA = GRAPHENE_STEALTH_PROOF_V1;
+   // Seeded environment: gate open and proving proceeds.
+   BOOST_REQUIRE_EQUAL( RAND_status(), 1 );
+   BOOST_REQUIRE( graphene::chain::stealth_prover_entropy_ready() );
+   BOOST_CHECK_NO_THROW( graphene::chain::stealth_sample_blind() );
+
+   // Close the gate (stand-in reports an unseeded RNG).
+   const graphene::chain::stealth_rand_status_fn prev =
+      graphene::chain::stealth_prover_test_set_rand_status(
+         +[]() -> int { return 0; } );
+   BOOST_CHECK( !graphene::chain::stealth_prover_entropy_ready() );
+   // (a) sampler throws rather than return a weak blind...
+   BOOST_CHECK_THROW( graphene::chain::stealth_sample_blind(), fc::exception );
+   // (b) value pin fails closed with a reason (no proof, no throw)...
+   {
+      fc::ecc::commitment_type P; // zero bytes: never reached, the gate is first
+      std::vector<char> T33;
+      std::string s32, err;
+      BOOST_CHECK( !graphene::chain::stealth_prove_value_pin(
+         P, 1, 1, fc::sha256(), T33, s32, err ) );
+      BOOST_CHECK( !err.empty() );
+   }
+   // (c) BP+ range prover fails closed...
+   {
+      std::vector<char> proof;
+      std::string err;
+      BOOST_CHECK( !graphene::chain::stealth_prove_bp_plus_m1(
+         fc::ecc::commitment_type(), fc::sha256(), 1, proof, err ) );
+      BOOST_CHECK( !err.empty() );
+   }
+   // (d) ring prover fails closed (well-formed args, so the GATE — not
+   // argument validation — is what rejects)...
+   {
+      std::vector<fc::ecc::commitment_type> ring(
+         GRAPHENE_STEALTH_RING_TARGET );
+      const std::string m( 32, '\0' );
+      graphene::chain::stealth_pool_ring_proof out;
+      std::string err;
+      BOOST_CHECK( !graphene::chain::stealth_prove_pool_ring(
+         V, VA, ring, 0, fc::sha256(), 1, fc::sha256(), m, m, out, err ) );
+      BOOST_CHECK( !err.empty() );
+   }
+   // Restore: the gate re-opens and proving recovers (checked per call).
+   graphene::chain::stealth_prover_test_set_rand_status( prev );
+   BOOST_CHECK( graphene::chain::stealth_prover_entropy_ready() );
+   BOOST_CHECK_NO_THROW( graphene::chain::stealth_sample_blind() );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- R9-I7 / WPC-04 (REPAIR-143): the builder's blinds (bP/bOut) are
+// adopted by an RAII secret_buffer whose destructor cleanses + fences
+// them, so EVERY exit from the proving scope — normal return or
+// FC_ASSERT unwind — zeroizes the blind (no per-assert zeroize call to
+// forget). The guard adopts storage by reference precisely so this test
+// can read the bytes AFTER the destructor ran (an owning wrapper's
+// destroyed storage is unreadable without undefined behaviour). TDD RED:
+// secret_buffer undeclared (compile fail).
+BOOST_AUTO_TEST_CASE( wpc04_secret_buffer_zeroizes_on_unwind )
+{ try {
+   const auto all_zero = []( const unsigned char* b, size_t n )
+      { return std::all_of( b, b + n, []( unsigned char c ){ return c == 0; } ); };
+
+   // (a) FC_ASSERT unwind path — the exact failure mode WPC-04 names:
+   // the throw propagates OUT of the guard's scope, so the destructor
+   // runs during unwinding, not on a normal scope exit.
+   fc::sha256 blind = graphene::chain::stealth_sample_blind();
+   const unsigned char* raw = (const unsigned char*)blind.data();
+   BOOST_REQUIRE( !all_zero( raw, 32 ) ); // a real blind, not zeros
+   bool unwound = false;
+   try {
+      const graphene::chain::secret_buffer guard( blind );
+      BOOST_CHECK( !all_zero( raw, 32 ) ); // live (uncleansed) while guarding
+      FC_ASSERT( false, "synthetic unwind after the blind was sampled" );
+      BOOST_FAIL( "unreachable" );
+   } catch( const fc::assert_exception& e ) {
+      unwound = true;
+      // fc::exception::what() is the bare placeholder ("unspecified"); the
+      // assert's own text is in the detail string (log messages).
+      BOOST_CHECK( e.to_detail_string().find(
+         "synthetic unwind after the blind was sampled" ) != std::string::npos );
+   }
+   BOOST_REQUIRE( unwound );
+   BOOST_CHECK_MESSAGE( all_zero( raw, 32 ),
+      "secret_buffer did not zeroize the adopted blind on FC_ASSERT unwind" );
+
+   // (b) Normal scope exit cleanses too (same destructor).
+   fc::sha256 blind2 = graphene::chain::stealth_sample_blind();
+   const unsigned char* raw2 = (const unsigned char*)blind2.data();
+   BOOST_REQUIRE( !all_zero( raw2, 32 ) );
+   {
+      const graphene::chain::secret_buffer guard2( blind2 );
+      BOOST_CHECK( !all_zero( raw2, 32 ) );
+   }
+   BOOST_CHECK( all_zero( raw2, 32 ) );
 } FC_CAPTURE_AND_RETHROW() }
 
 // ---- G2-3 wallet (Step 3, TDD RED): database_api::get_stealth_outputs

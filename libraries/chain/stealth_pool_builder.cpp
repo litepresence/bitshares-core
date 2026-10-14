@@ -83,6 +83,12 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
    FC_ASSERT( ring_size >= GRAPHENE_STEALTH_RING_TARGET &&
               ring_size <= GRAPHENE_STEALTH_RING_MAX,
               "G2 ring size must be 16..32 (no thin-pool emergency leg)" );
+   // WPC-02 (REPAIR-134): refuse before the first RAND_bytes draw (the
+   // Fisher-Yates shuffles and the real-position draw below) when the
+   // CSPRNG is unseeded — a weakly shuffled or weakly positioned ring is
+   // exactly the fingerprint the shuffles exist to prevent.
+   FC_ASSERT( stealth_prover_entropy_ready(),
+              "Prover RNG unseeded — refusing to sample a ring (WPC-02)" );
 
    const uint32_t head_block = db.head_block_num();
    const fc::time_point_sec head_time = db.head_block_time();
@@ -357,9 +363,17 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
       db, amount_to_sell.asset_id, input_opening.commitment );
 
    // (6) Fresh blinds + commitments (fc::ecc::blind uses the consensus
-   // G/H bases — the same commitments the verifiers recompute).
-   const fc::sha256 bP = stealth_sample_blind();
-   const fc::sha256 bOut = stealth_sample_blind();
+   // G/H bases — the same commitments the verifiers recompute). WPC-04
+   // (REPAIR-143): each blind is adopted by an RAII secret_buffer whose
+   // destructor cleanses + fences it — guards are declared right after the
+   // blinds and destroyed before them, so EVERY exit from here down
+   // (value-pin / BP+ / ring FC_ASSERT unwinds, op.validate() throw, or
+   // the normal return) zeroizes bP/bOut. The destructor is the single
+   // zeroize site: there is no unwind path to forget.
+   fc::sha256 bP = stealth_sample_blind();
+   fc::sha256 bOut = stealth_sample_blind();
+   const secret_buffer bP_guard( bP );
+   const secret_buffer bOut_guard( bOut );
    const fc::ecc::commitment_type P = fc::ecc::blind( bP, (uint64_t)a );
    const fc::ecc::commitment_type Cout =
       fc::ecc::blind( bOut, (uint64_t)v_out );

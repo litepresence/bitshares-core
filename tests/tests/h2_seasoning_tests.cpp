@@ -10,8 +10,10 @@
  *   verifier unset, incomplete); the create helper refuses duplicates.
  * - Verifier op (tag 98, price leg): committee-gated like oracle_unfreeze,
  *   sets the bit once with the verifier identity recorded; double-set,
- *   non-committee, unknown-pair, and pre-price posts are refused. Dual
- *   gating (evaluator + proposal visitor) and the fee-vote gate are pinned.
+ *   non-committee, unknown-pair, and pre-price posts are refused. AC-16 adds
+ *   the independence gate: the pair's issuer and its vault authority (within
+ *   the bounded authority walk) cannot attest it. Dual gating (evaluator +
+ *   proposal visitor) and the fee-vote gate are pinned.
  * - Sweep: covered sweeps fold minimums and leave the start alone; any
  *   sweep with vault < 2.0 or oracle < 1.0 resets the start (continuous
  *   hold, never cumulative). The clock reads head-block time and H2 bonded
@@ -272,6 +274,26 @@ void h2s_verify(
    PUSH_TX( f.db, tx );
 }
 
+/// AC-16: push the attestation and return the refusal text ("" when
+/// accepted), so the finding-specific independence message is pinned rather
+/// than a bare throw.
+string h2s_verify_outcome(
+      database_fixture& f, account_id_type verifier, const fc::ecc::private_key& key,
+      asset_id_type pair )
+{
+   seasoning_verify_operation op;
+   op.verifier = verifier;
+   op.pair     = pair;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   try { PUSH_TX( f.db, tx ); }
+   catch( const fc::exception& e ) { return e.to_string(); }
+   return string();
+}
+
 /// One maintenance sweep, then return. Jumps just past the next maintenance
 /// boundary (fast-forward: intermediate slots are missed, one sweep lands).
 void h2s_run_maintenance( database_fixture& f )
@@ -437,19 +459,22 @@ BOOST_AUTO_TEST_CASE( verifier_sets_bit_once_only )
       tx.sign( alice_private_key, db.get_chain_id() );
       GRAPHENE_REQUIRE_THROW( PUSH_TX( db, tx ), fc::exception );
    }
+   // AC-16: alice (the pair's issuer AND its vault authority) is no longer an
+   // admissible verifier -- the attestation now seats carol (below).
+   h2s_make_committee_member( *this, carol );
 
    // Committee attestation sets the bit with identity recorded.
-   h2s_verify( *this, alice_id, alice_private_key, cp.pair );
+   h2s_verify( *this, carol_id, carol_private_key, cp.pair );
    BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).verifier_set, true );
-   BOOST_CHECK( h2s_find_record( *this, cp.pair ).verifier == alice_id );
+   BOOST_CHECK( h2s_find_record( *this, cp.pair ).verifier == carol_id );
 
    // Double-set refused, same verifier...
-   BOOST_CHECK_THROW( h2s_verify( *this, alice_id, alice_private_key, cp.pair ),
+   BOOST_CHECK_THROW( h2s_verify( *this, carol_id, carol_private_key, cp.pair ),
                       fc::exception );
    // ...and rotating verifier (no anonymous overwrite).
    BOOST_CHECK_THROW( h2s_verify( *this, bob_id, bob_private_key, cp.pair ),
                       fc::exception );
-   BOOST_CHECK( h2s_find_record( *this, cp.pair ).verifier == alice_id );
+   BOOST_CHECK( h2s_find_record( *this, cp.pair ).verifier == carol_id );
 } FC_LOG_AND_RETHROW() }
 
 /// Pre-price the verifier op is refused at the evaluator gate...
@@ -666,10 +691,14 @@ BOOST_AUTO_TEST_CASE( unbound_pair_never_completes )
    generate_block();
    set_expiration( db, trx );
 
-   ACTORS( (alice)(bob) );
+   ACTORS( (alice)(bob)(carol) );
    fund( alice, asset( 5000000000000LL ) );
    fund( bob, asset( 5000000000000LL ) );
+   fund( carol, asset( 100000000000LL ) );
    h2s_make_committee_member( *this, alice );
+   // AC-16: the verifier must be independent of the pair -- carol is neither
+   // the pair's issuer nor inside its vault-authority walk.
+   h2s_make_committee_member( *this, carol );
    const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
    const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
    const asset_id_type pair = h2s_create_uia( *this, alice_id, alice_private_key, "SEASU" );
@@ -678,7 +707,7 @@ BOOST_AUTO_TEST_CASE( unbound_pair_never_completes )
    h2s_lock_vault_bond( *this, alice_id, alice_private_key, vid,
          h2s_make_cdd_vesting( *this, alice_id, alice_private_key, H2S_VAULT_RAW ) );
    h2s_set_books( *this, vid, H2S_VAULT_RAW / 2 );
-   h2s_verify( *this, alice_id, alice_private_key, pair );
+   h2s_verify( *this, carol_id, carol_private_key, pair );
    const fc::time_point_sec genesis = h2s_find_record( *this, pair ).genesis_time;
 
    generate_blocks( genesis + GRAPHENE_H2_SEASONING_WINDOW_SEC + 86400 );
@@ -698,10 +727,14 @@ BOOST_AUTO_TEST_CASE( complete_flag_end_to_end_on_real_time_travel )
    generate_block();
    set_expiration( db, trx );
 
-   ACTORS( (alice)(bob) );
+   ACTORS( (alice)(bob)(carol) );
    fund( alice, asset( 8000000000000LL ) );
    fund( bob, asset( 8000000000000LL ) );
+   fund( carol, asset( 100000000000LL ) );
    h2s_make_committee_member( *this, alice );
+   // AC-16: independent verifier (neither the pair's issuer nor in its
+   // vault-authority walk); bob stays the bonded producer.
+   h2s_make_committee_member( *this, carol );
    const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
    const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
    const h2s_covered_pair good = h2s_make_covered_pair(
@@ -716,7 +749,7 @@ BOOST_AUTO_TEST_CASE( complete_flag_end_to_end_on_real_time_travel )
          "SEAST", "SEAST.USD", bts_ref, usd_ref );
    h2s_set_books( *this, good.vault, H2S_VAULT_RAW / 2 );
    h2s_set_books( *this, twin.vault, H2S_VAULT_RAW / 2 );
-   h2s_verify( *this, alice_id, alice_private_key, good.pair );
+   h2s_verify( *this, carol_id, carol_private_key, good.pair );
    const fc::time_point_sec start = h2s_find_record( *this, good.pair ).window_start;
 
    // The bonded-live gate needs now < producer-bond unlock, and each publish
@@ -762,17 +795,21 @@ BOOST_AUTO_TEST_CASE( complete_predicate_against_hand_set_state )
    generate_block();
    set_expiration( db, trx );
 
-   ACTORS( (alice)(bob) );
+   ACTORS( (alice)(bob)(carol) );
    fund( alice, asset( 5000000000000LL ) );
    fund( bob, asset( 5000000000000LL ) );
+   fund( carol, asset( 100000000000LL ) );
    h2s_make_committee_member( *this, alice );
+   // AC-16: independent verifier (neither the pair's issuer nor in its
+   // vault-authority walk).
+   h2s_make_committee_member( *this, carol );
    const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
    const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
    const h2s_covered_pair cp = h2s_make_covered_pair(
          *this, alice_id, alice_private_key, bob_id, bob_private_key,
          "SEASC", "SEASC.USD", bts_ref, usd_ref );
    h2s_set_books( *this, cp.vault, H2S_VAULT_RAW / 2 );
-   h2s_verify( *this, alice_id, alice_private_key, cp.pair );
+   h2s_verify( *this, carol_id, carol_private_key, cp.pair );
    BOOST_CHECK( !h2_seasoning_complete( db, cp.pair ) );
 
    const fc::time_point_sec backdate = db.head_block_time()
@@ -789,6 +826,55 @@ BOOST_AUTO_TEST_CASE( complete_predicate_against_hand_set_state )
    h2s_run_maintenance( *this );
    BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).complete, true );
    BOOST_CHECK( h2_seasoning_complete( db, cp.pair ) );
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// AC-16 (round-9): an attestation cannot be issued by a party to the pair
+// ---------------------------------------------------------------------------
+
+/// RED: the verifier op only checked committee membership, so the pair's own
+/// issuer AND its vault authority could "independently" verify it. The gate
+/// below walks both graphs (the same bounded authority walk the challenge
+/// self-dealing ban uses) and refuses either leg fail-closed.
+BOOST_AUTO_TEST_CASE( related_party_verifier_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 5000000000000LL ) );
+   fund( bob, asset( 5000000000000LL ) );
+   fund( carol, asset( 100000000000LL ) );
+   h2s_make_committee_member( *this, alice );
+   h2s_make_committee_member( *this, bob );
+   h2s_make_committee_member( *this, carol );
+   const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   (void)bts_ref; (void)usd_ref;
+
+   // Pair A: issuer = alice, vault authority = alice -> alice refused on the
+   // issuer leg; an independent seat (carol) attests the same record.
+   const asset_id_type pair_a = h2s_create_uia( *this, alice_id, alice_private_key, "SEASX" );
+   h2s_register_vault( *this, alice_id, alice_private_key, pair_a,
+                       authority( 1, alice_id, 1 ) );
+   const string issuer_err = h2s_verify_outcome( *this, alice_id, alice_private_key, pair_a );
+   BOOST_CHECK_MESSAGE( issuer_err.find( "issuer" ) != std::string::npos,
+                        "AC-16 issuer-side verifier not refused: " << issuer_err );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair_a ).verifier_set, false );
+   h2s_verify( *this, carol_id, carol_private_key, pair_a );
+   BOOST_CHECK( h2s_find_record( *this, pair_a ).verifier == carol_id );
+
+   // Pair B: issuer = alice, vault authority = bob -> bob (seated, but the
+   // vault's authority) refused on the vault-authority leg.
+   generate_block();
+   const asset_id_type pair_b = h2s_create_uia( *this, alice_id, alice_private_key, "SEASY" );
+   h2s_register_vault( *this, alice_id, alice_private_key, pair_b,
+                       authority( 1, bob_id, 1 ) );
+   const string auth_err = h2s_verify_outcome( *this, bob_id, bob_private_key, pair_b );
+   BOOST_CHECK_MESSAGE( auth_err.find( "vault authority" ) != std::string::npos,
+                        "AC-16 vault-authority-side verifier not refused: " << auth_err );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair_b ).verifier_set, false );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

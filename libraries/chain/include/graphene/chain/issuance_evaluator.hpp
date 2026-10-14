@@ -238,6 +238,19 @@ namespace graphene { namespace chain {
      */
     void h2_issue_ensure_bands( std::vector<share_type>& bands );
 
+    /**
+     * NC-08 (round-9): the band partition is a consensus invariant. Refuses
+     * (fail-closed) unless @p r holds exactly GRAPHENE_H2_ISSUE_N_BANDS
+     * entries on BOTH band legs AND the leg sums equal the totals they
+     * partition: sum(band_bts) == bts_balance, sum(band_stable) ==
+     * stable_supply. Called at the end of every reserve writer (mint, redeem,
+     * exit request, batch settle, absorb, halt revert, wind-down refund and
+     * sweep) so a writer that moves a total without its band halts the block
+     * instead of publishing a partition that pays out of thin air. Read-only:
+     * a refusal never repairs the object.
+     */
+    void h2_issue_verify_bands( const reserve_object& r );
+
    /// @return the offset pool for @p pair, or null when none exists.
    const offset_pool_object* h2_find_offset_pool( const database& d, asset_id_type pair );
 

@@ -108,6 +108,8 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
             h2_issue_ensure_bands( res.band_stable );
             res.band_stable[3] += q.face;
          } );
+         // NC-08: the refund restored a total with its band; assert both.
+         h2_issue_verify_bands( *r );
       }
       if( !r->exit_queue.empty() )
          d.modify( *r, []( reserve_object& res ) { res.exit_queue.clear(); } );
@@ -120,6 +122,10 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
          res.last_ratio_bps = 0;
          res.snapshot_block = d.head_block_num();
       } );
+      // NC-08: extinction zeroes one leg of the partition; the other leg
+      // stays (frozen liability record), so both sums must still equal their
+      // totals after the sweep.
+      h2_issue_verify_bands( *r );
       segregated += swept;
    }
    const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();

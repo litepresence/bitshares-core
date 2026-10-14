@@ -24,7 +24,9 @@
 #include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/seasoning_object.hpp>
 
+#include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_activation.hpp>
@@ -245,11 +247,35 @@ void_result seasoning_verify_evaluator::do_evaluate( const seasoning_verify_oper
    FC_ASSERT( !_record->verifier_set,
               "Pair ${p} is already verified by ${v}; double attestation refused",
               ("p", op.pair)("v", _record->verifier) );
-   const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   FC_ASSERT( member_idx.find( op.verifier ) != member_idx.end(),
-              "Verifier ${a} is not a seated committee member", ("a", op.verifier) );
+    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+    FC_ASSERT( member_idx.find( op.verifier ) != member_idx.end(),
+               "Verifier ${a} is not a seated committee member", ("a", op.verifier) );
 
-   return void_result();
+    // AC-16 (round-9): the attestation judges the pair's bonded backing, so
+    // no party to the pair may issue it -- a self-attested 90-day clock is
+    // worth nothing to a downstream USD-issuance gate. Both legs are walked
+    // with the SAME bounded authority graph the challenge self-dealing ban
+    // uses (h2_authority_graphs_overlap): the pair's ISSUER, then the VAULT's
+    // registered authority. Identity is subsumed by the walk
+    // (h2_collect_account_side inserts the root account); the explicit
+    // message per leg keeps the refuse reason readable. Fail-closed: a
+    // seasoning record exists only for a registered vault, so the lookup
+    // below cannot miss; a record with no vault row is refused outright
+    // rather than skipped.
+    FC_ASSERT( !h2_authority_graphs_overlap( d, op.verifier,
+                 authority( 1, op.pair( d ).issuer, 1 ) ),
+               "Seasoning verifier ${a} shares authority with the pair's issuer",
+               ("a", op.verifier) );
+    const auto& vault_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+    const auto vitr = vault_idx.find( op.pair );
+    FC_ASSERT( vitr != vault_idx.end(),
+               "Pair ${p} carries a seasoning record but no vault; attestation refused",
+               ("p", op.pair) );
+    FC_ASSERT( !h2_authority_graphs_overlap( d, op.verifier, vitr->vault_authority ),
+               "Seasoning verifier ${a} shares authority with the pair's vault authority",
+               ("a", op.verifier) );
+
+    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
 void_result seasoning_verify_evaluator::do_apply( const seasoning_verify_operation& op ) const

@@ -432,6 +432,54 @@ const reserve_object* h2i_find_reserve( database_fixture& f, asset_id_type pair 
    return itr == idx.end() ? nullptr : &*itr;
 }
 
+/// NC-08: exact partition sum (the verifier's own definition, recomputed
+/// independently so a wrong verifier cannot pass its own test).
+share_type h2i_band_sum( const vector<share_type>& bands )
+{
+   share_type total( 0 );
+   for( const share_type& band : bands )
+      total += band;
+   return total;
+}
+
+/// NC-08: push @p op and return the refusal text ("" when accepted), so the
+/// verifier's message is pinned rather than a bare throw (a bare throw could
+/// be any unrelated gate).
+string h2i_outcome( database_fixture& f, const graphene::protocol::operation& op,
+                    const fc::ecc::private_key& key )
+{
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   try { PUSH_TX( f.db, tx ); }
+   catch( const fc::exception& e ) { return e.to_string(); }
+   return string();
+}
+
+/**
+ * NC-08: corrupt one band leg of @p pair, run @p push against the corrupted
+ * book, then restore -- inside a scoped undo session. The pending-session
+ * rule is NOT a safe vehicle for this: a bare db.modify is permanent when no
+ * undo session is open (which is the state right after generate_block) and
+ * discarded when one is, so the corruption would leak into the final
+ * positive control. The explicit session pops back to the pre-corrupt state
+ * whatever the push did (refusal, rollback of a partial apply, or success).
+ */
+template< typename Corrupt, typename Push >
+string h2i_corrupt_and_push( database_fixture& f, asset_id_type pair,
+                             Corrupt corrupt, Push push )
+{
+   const reserve_object* r = h2i_find_reserve( f, pair );
+   BOOST_REQUIRE( r != nullptr );
+   auto session = f.db._undo_db.start_undo_session( true );
+   f.db.modify( *r, corrupt );
+   const string err = push();
+   session.undo();
+   return err;
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE( h2_issuance_tests, database_fixture )
@@ -1333,6 +1381,97 @@ BOOST_AUTO_TEST_CASE( winddown_sweeps_reserve_backing_and_refunds_queue )
    for( const share_type& b : r->band_bts )
       BOOST_CHECK( b == share_type( 0 ) );
    BOOST_CHECK_EQUAL( r->last_ratio_bps, 0u );
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// NC-08 (round-9): the band partition is a consensus invariant, not a
+// construction argument
+// ---------------------------------------------------------------------------
+
+/// RED: sum(band_bts) == bts_balance and sum(band_stable) == stable_supply
+/// were cited "by construction" at every writer and asserted at none. The
+/// verifier below (declared with the other band helpers and called at each
+/// reserve writer) turns that argument into a fail-closed invariant: corrupt
+/// either partition directly -- the exact shape of a future writer that moves
+/// a total without its band -- and every reserve-mutating apply refuses, in
+/// the writer that inherited the corruption, with the same message.
+BOOST_AUTO_TEST_CASE( band_partition_conservation_enforced_at_every_writer )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "NC08", "NC08F", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+   // Genesis book at 260% (D=260000/M=1000): headroom 130000 admits the
+   // 130000 marginal mint below, so the only gate that can refuse it is the
+   // verifier -- a 130% book has zero headroom and would refuse for the door.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 260000 ), share_type( 1000 ) );
+
+   // Positive control: the happy path holds both partitions exactly, so the
+   // corruption below is the only moving part.
+   const reserve_object* fresh = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( fresh != nullptr );
+   BOOST_REQUIRE_EQUAL( fresh->band_bts.size(), GRAPHENE_H2_ISSUE_N_BANDS );
+   BOOST_REQUIRE_EQUAL( fresh->band_stable.size(), GRAPHENE_H2_ISSUE_N_BANDS );
+   BOOST_CHECK( h2i_band_sum( fresh->band_bts ) == fresh->bts_balance );
+   BOOST_CHECK( h2i_band_sum( fresh->band_stable ) == fresh->stable_supply );
+
+   // The partition corruption is scoped (h2i_corrupt_and_push): nested undo
+   // session around corrupt+push, so the book is whole again on return
+   // whatever the writer did.
+   auto corrupt_bts = []( reserve_object& m ) { m.band_bts[3] += share_type( 1 ); };
+   auto corrupt_stable = []( reserve_object& m ) { m.band_stable[3] += share_type( 1 ); };
+   auto mint_outcome = [&]() {
+      hybrid_mint_operation op;
+      op.minter        = alice_id;
+      op.vault         = d.vault;
+      op.deposit       = asset( share_type( 130000 ), asset_id_type() );
+      op.stable_amount = share_type( 1000 );
+      op.fxr_asset     = d.fxr;
+      return h2i_outcome( *this, op, alice_private_key );
+   };
+   auto redeem_outcome = [&]() {
+      hybrid_redeem_operation op;
+      op.redeemer = alice_id;
+      op.vault    = d.vault;
+      op.burn     = asset( share_type( 100 ), d.pair );
+      return h2i_outcome( *this, op, alice_private_key );
+   };
+   auto exit_outcome = [&]() {
+      issuance_exit_request_operation op;
+      op.requester = alice_id;
+      op.vault     = d.vault;
+      op.face      = share_type( 500 );
+      return h2i_outcome( *this, op, alice_private_key );
+   };
+   auto expect_conservation_refusal = []( const string& what, const string& err ) {
+      BOOST_CHECK_MESSAGE( err.find( "conservation broken" ) != std::string::npos,
+                           what << " did not refuse the broken partition: " << err );
+   };
+
+   expect_conservation_refusal( "mint",
+         h2i_corrupt_and_push( *this, d.pair, corrupt_bts, mint_outcome ) );
+   expect_conservation_refusal( "redeem",
+         h2i_corrupt_and_push( *this, d.pair, corrupt_stable, redeem_outcome ) );
+   expect_conservation_refusal( "exit_request",
+         h2i_corrupt_and_push( *this, d.pair, corrupt_bts, exit_outcome ) );
+
+   // The refusals never repaired the partition (they never ran), and the
+   // scoping restored it exactly: one clean block later the door opens.
+   generate_block();
+   const reserve_object* r = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( h2i_band_sum( r->band_bts ) == r->bts_balance );
+   BOOST_CHECK( h2i_band_sum( r->band_stable ) == r->stable_supply );
+   BOOST_CHECK_NO_THROW( h2i_mint( *this, alice_id, alice_private_key, d,
+                                   share_type( 130000 ), share_type( 1000 ) ) );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

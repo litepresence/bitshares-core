@@ -292,6 +292,28 @@ void h2d_vote(
    PUSH_TX( f.db, tx );
 }
 
+/// GOV-R9-04: push the same vote and return the refusal text ("" when
+/// accepted). A bare BOOST_CHECK_THROW cannot tell the new party-exclusion
+/// gate from the seated/elected/already-voted gates it sits in front of, so
+/// the finding-specific message is pinned here instead.
+string h2d_vote_outcome( database_fixture& f, account_id_type voter,
+                         const fc::ecc::private_key& key,
+                         object_id_type target, uint8_t decision )
+{
+   challenge_vote_operation op;
+   op.voter    = voter;
+   op.target   = target;
+   op.decision = decision;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   try { PUSH_TX( f.db, tx ); }
+   catch( const fc::exception& e ) { return e.to_string(); }
+   return string();
+}
+
 /// Committee unfreeze through the price-leg op (throws on refusal), the exact
 /// path a single seated member pushes.
 void h2d_committee_unfreeze( database_fixture& f, account_id_type unfreezer,
@@ -1977,6 +1999,101 @@ BOOST_AUTO_TEST_CASE( h2_x02_pair_freeze_allowed_on_h2_only_oracle )
    BOOST_CHECK( *vid( db ).bound_oracle == oid );
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// GOV-R9-04 + CQ-R9-04 (round-9): neither side of a target may vote on it
+// ---------------------------------------------------------------------------
+
+/// GOV-R9-04 dispute leg: the defender (producer/owner accused) holds a seat,
+/// so pre-fix a sustained dispute could be carried by the very side it
+/// accuses -- and on exoneration/fast-reject the decisive voter collects the
+/// finder slice, so the self-dealing reward is direct.
+BOOST_AUTO_TEST_CASE( gov_r9_04_parties_may_not_vote_on_own_dispute )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   h2d_make_committee_member( *this, bob );    // the CHALLENGER holds a seat
+   h2d_make_committee_member( *this, carol );  // the DEFENDER holds a seat
+
+   const oracle_dispute_id_type did =
+         gov_r9_open_dispute( *this, bob_id, bob_private_key, carol_id, carol_private_key );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+
+   // RED: pre-fix both votes are ACCEPTED (seated + elected + not-yet-voted
+   // were the only gates), so either party could steer its own verdict and,
+   // on exonerate/fast-reject, collect the finder slice as the decisive
+   // voter. CQ-R9-04 pins the messages the defense-in-depth asserts must use.
+   const string ch_err = h2d_vote_outcome( *this, bob_id, bob_private_key,
+         object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE );
+   BOOST_CHECK_MESSAGE( ch_err.find( "may not vote" ) != std::string::npos,
+                        "GOV-R9-04 challenger vote not refused on the party gate: "
+                        << ch_err );
+   const string df_err = h2d_vote_outcome( *this, carol_id, carol_private_key,
+         object_id_type( did ), GRAPHENE_H2_DISPUTE_SUSTAIN );
+   BOOST_CHECK_MESSAGE( df_err.find( "may not vote" ) != std::string::npos,
+                        "GOV-R9-04 defender vote not refused on the party gate: "
+                        << df_err );
+   BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+   BOOST_CHECK_EQUAL( did( db ).votes.size(), 0u );
+
+   // GREEN control: an unconflicted genesis seat votes the same target.
+   const account_object& seat0 = get_account( "init0" );
+   fund( seat0, asset( 1000000 ) );
+   BOOST_CHECK_NO_THROW( h2d_vote( *this, seat0.get_id(), init_account_priv_key,
+                                   object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE ) );
+   BOOST_CHECK_EQUAL( did( db ).votes.size(), 1u );
+   BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN ); // 1 vote: no quorum
+} FC_LOG_AND_RETHROW() }
+
+/// GOV-R9-04 vault-challenge leg: the target carries no defender field, so
+/// the defender side is the vault's own authority graph. A seated challenger
+/// or a seated holder of the vault authority is refused.
+BOOST_AUTO_TEST_CASE( gov_r9_04_parties_may_not_vote_on_own_vault_challenge )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );  // the vault-authority side
+   h2d_make_committee_member( *this, bob );    // the challenger
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2d_register_vault( *this, alice_id, alice_private_key, vault_auth );
+   const vault_challenge_id_type cid = h2d_post_challenge(
+         *this, bob_id, bob_private_key, vid, H2D_ROUND1_RAW, H2D_FLOOR_USD_CENTS,
+         h2d_evidence( "gov-r9-04" ) );
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+
+   const string ch_err = h2d_vote_outcome( *this, bob_id, bob_private_key,
+         object_id_type( cid ), GRAPHENE_H2_DISPUTE_EXONERATE );
+   BOOST_CHECK_MESSAGE( ch_err.find( "may not vote" ) != std::string::npos,
+                        "GOV-R9-04 challenger vote not refused on the challenge party gate: "
+                        << ch_err );
+   const string df_err = h2d_vote_outcome( *this, alice_id, alice_private_key,
+         object_id_type( cid ), GRAPHENE_H2_DISPUTE_SUSTAIN );
+   BOOST_CHECK_MESSAGE( df_err.find( "may not vote" ) != std::string::npos,
+                        "GOV-R9-04 vault-authority vote not refused on the challenge party gate: "
+                        << df_err );
+   BOOST_CHECK_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+   BOOST_CHECK_EQUAL( cid( db ).votes.size(), 0u );
+
+   // GREEN control: the same unconflicted genesis seat still votes.
+   const account_object& seat0 = get_account( "init0" );
+   fund( seat0, asset( 1000000 ) );
+   BOOST_CHECK_NO_THROW( h2d_vote( *this, seat0.get_id(), init_account_priv_key,
+                                   object_id_type( cid ), GRAPHENE_H2_DISPUTE_EXONERATE ) );
+   BOOST_CHECK_EQUAL( cid( db ).votes.size(), 1u );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

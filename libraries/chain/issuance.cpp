@@ -86,6 +86,39 @@ share_type h2_issue_sat_add( share_type a, share_type b )
    return share_type( int64_t( uint64_t( sum ) ) );
 }
 
+/// NC-08 (round-9): the band partition is a CONSENSUS invariant, not a
+/// construction argument. Every reserve writer must leave
+/// sum(band_bts) == bts_balance AND sum(band_stable) == stable_supply; this
+/// is the single fail-closed check those writers share (external linkage:
+/// vault_lifecycle_evaluator.cpp's wind-down writers call it too). Both
+/// vectors must hold exactly GRAPHENE_H2_ISSUE_N_BANDS entries first -- a
+/// partial vector is a consensus bug and is refused, never silently
+/// zeroed -- so the sums below are exact over the whole partition. Called at
+/// the end of each writer, it is defense in depth: the invariants still hold
+/// by construction today, and any writer that forgets its band leg (or a
+/// future one that never learned it) halts instead of publishing a partition
+/// that could pay out of thin air.
+void h2_issue_verify_bands( const reserve_object& r )
+{
+   FC_ASSERT( r.band_bts.size() == protocol::GRAPHENE_H2_ISSUE_N_BANDS
+              && r.band_stable.size() == protocol::GRAPHENE_H2_ISSUE_N_BANDS,
+              "Band partition must hold exactly N_BANDS entries on both legs; "
+              "a partial vector is a consensus bug, never silently zeroed" );
+   share_type bts_sum( 0 ), stable_sum( 0 );
+   for( const share_type& band : r.band_bts )
+      bts_sum += band;
+   for( const share_type& band : r.band_stable )
+      stable_sum += band;
+   FC_ASSERT( bts_sum == r.bts_balance,
+              "Band partition conservation broken: sum(band_bts) ${s} != "
+              "bts_balance ${b}",
+              ("s", bts_sum)("b", r.bts_balance) );
+   FC_ASSERT( stable_sum == r.stable_supply,
+              "Band partition conservation broken: sum(band_stable) ${s} != "
+              "stable_supply ${b}",
+              ("s", stable_sum)("b", r.stable_supply) );
+}
+
 namespace {
 
 using boost::multiprecision::uint256_t;
@@ -190,7 +223,13 @@ share_type h2_issue_door_used( const reserve_object* reserve, uint32_t head_bloc
 void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
 {
    h2_issue_ensure_bands( bands );
-   static const uint32_t order[7] = { 3, 4, 2, 5, 1, 6, 0 };
+   // NC-07 (round-9): the table is sized by DEDUCTION, never by an explicit
+   // N_BANDS bound: a fixed-size `order[7]` stays well-formed when the band
+   // count is raised (its tail is silently zero-filled, and band 0 would be
+   // hit twice), while the form below turns that bump into a compile error.
+   static const uint32_t order[] = { 3, 4, 2, 5, 1, 6, 0 };
+   static_assert( sizeof( order ) / sizeof( order[0] ) == GRAPHENE_H2_ISSUE_N_BANDS,
+                  "Band spend order must cover exactly GRAPHENE_H2_ISSUE_N_BANDS bands" );
    share_type remaining = amount;
    for( uint32_t k = 0; k < GRAPHENE_H2_ISSUE_N_BANDS && remaining > share_type( 0 ); ++k )
    {
@@ -360,6 +399,9 @@ void h2_issue_absorb_pair( database& d, const reserve_object& reserve,
    {
       if( reserve.uncovered_shortfall != share_type( 0 ) )
          d.modify( reserve, []( reserve_object& r ) { r.uncovered_shortfall = share_type( 0 ); } );
+      // NC-08: no partition write here, but the invariant is still asserted
+      // so a reader cannot carry a broken partition through the covered path.
+      h2_issue_verify_bands( reserve );
       return;
    }
    const share_type shortfall = h2_offset_shortfall_bts(
@@ -402,6 +444,8 @@ void h2_issue_absorb_pair( database& d, const reserve_object& reserve,
    const share_type uncovered = shortfall - take;
    if( reserve.uncovered_shortfall != uncovered )
       d.modify( reserve, [&uncovered]( reserve_object& r ) { r.uncovered_shortfall = uncovered; } );
+   // NC-08: the take above moved balance and its band together.
+   h2_issue_verify_bands( reserve );
    (void)vault;
 }
 
@@ -639,6 +683,8 @@ void h2_issue_maintenance( database& d )
             } );
             reserve = h2_find_reserve( d, pair );
             FC_ASSERT( reserve != nullptr, "Issuance reserve vanished inside exit settle" );
+            // NC-08: the bts leg was spent exactly (face burned at request).
+            h2_issue_verify_bands( *reserve );
          }
          // net == 0: dust-forfeit (face already burned at request; the
          // request-time dust gate makes this unreachable except under a
@@ -744,6 +790,8 @@ void h2_issue_on_pair_halt( database& d, asset_id_type pair )
           } );
          reserve = h2_find_reserve( d, pair );
          FC_ASSERT( reserve != nullptr, "Issuance reserve vanished inside halt revert" );
+         // NC-08: the revert moved both totals with their bands together.
+         h2_issue_verify_bands( *reserve );
       }
       reserve = h2_find_reserve( d, pair );
       if( reserve != nullptr )
@@ -1280,6 +1328,8 @@ object_id_type hybrid_mint_evaluator::do_apply( const hybrid_mint_operation& op 
    d.modify( *_vault, [&op]( vault_object& v ) {
       v.outstanding += op.stable_amount;
    } );
+   // NC-08: the writer held both partitions; assert it, don't argue it.
+   h2_issue_verify_bands( *reserve );
    return object_id_type( reserve->id );
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -1476,6 +1526,8 @@ object_id_type hybrid_redeem_evaluator::do_apply( const hybrid_redeem_operation&
          r.snapshot_block = head_block;
       } );
    }
+   // NC-08: both partitions were spent exactly (bts payout, stable burn).
+   h2_issue_verify_bands( *_reserve );
    return object_id_type( escrow.id );
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -1790,6 +1842,8 @@ object_id_type issuance_exit_request_evaluator::do_apply( const issuance_exit_re
       req.validate();
       r.exit_queue.push_back( req );
    } );
+   // NC-08: the stable leg was spent with the burn above (no BTS leg here).
+   h2_issue_verify_bands( *reserve );
    return object_id_type( reserve->id );
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 

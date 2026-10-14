@@ -465,6 +465,15 @@ void h2_apply_challenge_resolution( database& d, const vault_challenge_object& c
    d.modify( core_data, [&burn]( asset_dynamic_data_object& data ) {
       data.current_supply -= burn;
    } );
+   // CQ-R9-04 (defense in depth, round-9): GOV-R9-04 refuses a party vote
+   // before recording, so a decisive voter below cannot be the challenger.
+   // Assert it at the money anyway: the finder slice is a capped payment
+   // ($83.75) to whoever decides, and a future call site or a reordered gate
+   // must never pay a party to decide its own target. The SUSTAIN branch
+   // above pays the vindicated CHALLENGER by design (not a decisive voter)
+   // and is deliberately outside this assert.
+   FC_ASSERT( decisive_voter != c.challenger,
+              "Decisive voter is the challenger; finder self-payment refused" );
    d.adjust_balance( decisive_voter, asset( finder, asset_id_type() ) );
    d.modify( c, [&resolution, &decisive_voter]( vault_challenge_object& m ) {
       m.finder = decisive_voter;
@@ -546,6 +555,12 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
    d.modify( core_data, [&burn]( asset_dynamic_data_object& data ) {
       data.current_supply -= burn;
    } );
+   // CQ-R9-04 (defense in depth, round-9): same self-payment ban as the
+   // challenge track -- neither party may collect the finder slice as the
+   // decisive voter. The SUSTAIN branch above pays the vindicated challenger
+   // by design and stays outside this assert.
+   FC_ASSERT( decisive_voter != x.challenger && decisive_voter != x.defender,
+              "Decisive voter is a party to the dispute; finder self-payment refused" );
    d.adjust_balance( decisive_voter, asset( finder, asset_id_type() ) );
    d.modify( x, [&resolution, &decisive_voter]( oracle_dispute_object& m ) {
       m.finder = decisive_voter;
@@ -566,7 +581,7 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
 
 void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operation& op )
 { try {
-   const database& d = db();
+   database& d = db();
 
    // Shared primitives (H2e): judgment machinery built once, usable by both
    // tracks. Ordering asserted inside.
@@ -599,11 +614,44 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
    // deciding set and shrink supermajority_of(N) below an attacker's reach.
    // The elected set is the gate; this check is additive and fail-closed --
    // the lookup above still identifies the committee_member_object.
-   const auto& elected = d.get_global_properties().active_committee_members;
-   FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
-              "Voter ${a} is registered but not on the elected committee",
-              ("a", op.voter) );
-   const auto& votes = ( _challenge != nullptr ) ? _challenge->votes : _dispute->votes;
+    const auto& elected = d.get_global_properties().active_committee_members;
+    FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+               "Voter ${a} is registered but not on the elected committee",
+               ("a", op.voter) );
+    // GOV-R9-04 (round-9): neither side of the target may vote on it. The
+    // challenge track names its challenger directly and its defender is the
+    // VAULT's own authority (vault_challenge_object carries no defender
+    // field); the dispute track names both sides. The walk below is the same
+    // bounded authority-graph check challenge creation uses against the vault
+    // (h2_authority_graphs_overlap), so a committee seat that merely SHARES
+    // authority with a party is refused too -- identity alone is subsumed by
+    // the walk (h2_collect_account_side inserts the root), but the explicit
+    // identity asserts pin the finding's message and keep the refuse reason
+    // stable whatever the walk's future bounds. Fail-closed: it rejects more
+    // votes, never fewer, and the finder slice can therefore never resolve
+    // to a party on the decisive path (CQ-R9-04's self-payment half is
+    // asserted again at the payment site).
+    if( _challenge != nullptr )
+    {
+       FC_ASSERT( op.voter != _challenge->challenger,
+                  "Challenger may not vote on its own challenge" );
+       FC_ASSERT( !h2_authority_graphs_overlap( d, op.voter,
+                    _challenge->vault( d ).vault_authority ),
+                  "Voter ${a} shares authority with the challenged vault; "
+                  "the vault's authority side may not vote",
+                  ("a", op.voter) );
+    }
+    else
+    {
+       FC_ASSERT( op.voter != _dispute->challenger && op.voter != _dispute->defender,
+                  "Challenger and defender may not vote on their own dispute" );
+       FC_ASSERT( !h2_authority_graphs_overlap( d, op.voter, _dispute->challenger ),
+                  "Voter ${a} shares authority with the challenger", ("a", op.voter) );
+       FC_ASSERT( !h2_authority_graphs_overlap( d, op.voter, _dispute->defender ),
+                  "Voter ${a} shares authority with the defender (the accused producer)",
+                  ("a", op.voter) );
+    }
+    const auto& votes = ( _challenge != nullptr ) ? _challenge->votes : _dispute->votes;
    FC_ASSERT( votes.find( op.voter ) == votes.end(),
               "Committee member ${a} has already voted on this target", ("a", op.voter) );
 

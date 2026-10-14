@@ -138,8 +138,8 @@ struct stealth_deposit_event
  * writes position `head`, then `head = (head + 1) % W`, overwriting the
  * oldest when full (`count` saturates at W). `total_ever` is monotonic
  * telemetry only — never a concentration input. E_dep is computed on read
- * by exact aggregation over ≤1024 pairs (integers only); readers, never
- * `do_evaluate`, pay the O(W) scan (Phase 1 gates nothing on it).
+ * by exact aggregation over ≤1024 pairs (integers only); since A4 the op39
+ * evaluator ALSO scans (subsidy classifier in do_evaluate/do_apply), uncharged.
  * Ring-created outputs are unattributable by construction and never enter
  * here — only op39 deposits (transparent `o.from`) do. flat_map ORDERED.
  */

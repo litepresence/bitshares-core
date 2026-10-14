@@ -314,6 +314,17 @@ void_result oracle_dispute_evaluator::do_evaluate( const oracle_dispute_operatio
    FC_ASSERT( d.get_balance( op.challenger, asset_id_type() ).amount >= op.dispute_bond,
               "Dispute bond must be posted from transparent funds" );
 
+   // X-02 (R9-I4): H1-exclusion on the challenge path. An oracle referenced
+   // by any live bitasset binding prices an H1 smartcoin; dispute expiry
+   // freezes unconditionally with no committee vote, and the H1
+   // bound-consumer read guards on the same frozen flag -- the smartcoin
+   // would behave as its feeds expire. H2-bonded oracles carry no bitasset
+   // binding and stay fully disputable.
+   FC_ASSERT( !h2_oracle_referenced_by_bitasset( d, op.oracle ),
+              "Oracle ${o} is referenced by a live bitasset binding "
+              "(H1 oracle not disputable through H2 machinery)",
+              ("o", op.oracle) );
+
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

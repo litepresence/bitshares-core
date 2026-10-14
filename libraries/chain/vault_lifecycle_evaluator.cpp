@@ -490,6 +490,17 @@ void_result pair_freeze_evaluator::do_evaluate( const pair_freeze_operation& op 
                  "Vault ${v} is canonically bound to oracle ${b}; freezing ${o} refused",
                  ("v", op.vault)("b", *vault->bound_oracle)("o", op.oracle) );
 
+   // X-02 (R9-I4): the committee must not pin a legacy-priced oracle either.
+   // An oracle referenced by any live bitasset binding prices an H1
+   // smartcoin; the pin plus the automatic tripwire freeze (stage DEBT)
+   // nulls the H1 feeds through the same frozen flag the bound-consumer
+   // read guards on. H2-bonded oracles carry no bitasset binding and pin
+   // exactly as before.
+   FC_ASSERT( !h2_oracle_referenced_by_bitasset( d, op.oracle ),
+              "Oracle ${o} is referenced by a live bitasset binding "
+              "(H1 oracle not pinnable through H2 freeze machinery)",
+              ("o", op.oracle) );
+
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

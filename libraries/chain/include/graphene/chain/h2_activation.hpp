@@ -24,6 +24,7 @@
 #pragma once
 
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/types.hpp>
 
 #include <fc/time.hpp>
 
@@ -83,5 +84,17 @@ void h2_require_price_leg( const fc::time_point_sec& now );
  * bonded custody, so unbonded inputs can never move bonded medians.
  */
 bool h2_pair_has_h1_binding( const asset_object& pair, const database& d );
+
+/**
+ * @return whether @p oid is referenced by any live bitasset binding: some
+ * market-issued asset's current options name it through the explicit
+ * price_oracle_binding or the legacy expiry-free price_oracle_id. X-02
+ * (R9-I4): such an oracle prices an H1 smartcoin, so H2 freeze machinery
+ * (oracle_dispute, pair_freeze) must never reach it -- dispute expiry
+ * freezes unconditionally, and the H1 bound-consumer read guards on the
+ * same frozen flag, so a frozen legacy oracle would null H1 feeds.
+ * H2-bonded oracles carry no bitasset binding and report false.
+ */
+bool h2_oracle_referenced_by_bitasset( const database& d, oracle_id_type oid );
 
 } } // graphene::chain

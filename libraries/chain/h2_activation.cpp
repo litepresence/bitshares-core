@@ -87,4 +87,18 @@ bool h2_pair_has_h1_binding( const asset_object& pair, const database& d )
           .price_oracle_binding.valid();
 }
 
+bool h2_oracle_referenced_by_bitasset( const database& d, oracle_id_type oid )
+{
+   const auto& bitasset_idx = d.get_index_type<asset_bitasset_data_index>().indices();
+   for( const auto& bad : bitasset_idx )
+   {
+      const auto& ext = bad.options.extensions.value;
+      if( ext.price_oracle_id.valid() && *ext.price_oracle_id == oid )
+         return true;
+      if( ext.price_oracle_binding.valid() && ext.price_oracle_binding->oracle_id == oid )
+         return true;
+   }
+   return false;
+}
+
 } } // graphene::chain

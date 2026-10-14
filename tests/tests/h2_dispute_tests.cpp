@@ -43,6 +43,7 @@
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
 
 #include "../common/database_fixture.hpp"
@@ -329,6 +330,137 @@ oracle_dispute_id_type gov_r9_open_dispute( database_fixture& f,
    const fc::time_point_sec accused = oid( f.db ).history.back().first;
    return h2d_post_dispute( f, challenger, challenger_key, oid, defender, accused, 0,
                             h2d_evidence( "gov-r9" ) );
+}
+
+/// X-02 (R9-I4) setup: the full T7c H1 shape — a mapped UIA backing home,
+/// the MIA's own 1:1 reference mapping, then an explicit
+/// price_oracle_binding naming @p oid with a far-future consensus expiry.
+/// Orientation rule: the oracle's base is the smartcoin's own reference,
+/// its quote the backing asset's reference.
+asset_id_type h2x02_bind_h1_smartcoin(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
+      const string& symbol, reference_asset_id_type debt_ref,
+      reference_asset_id_type backing_ref, oracle_id_type oid )
+{
+   const asset_id_type coll_id = h2d_create_uia( f, issuer, key, symbol + "COLL" );
+   {
+      asset_update_operation uop;
+      uop.issuer          = issuer;
+      uop.asset_to_update = coll_id;
+      uop.new_options     = coll_id( f.db ).options;
+      reference_mapping cm;
+      cm.reference        = backing_ref;
+      cm.asset_amount     = 1;
+      cm.reference_amount = 1;
+      uop.new_options.extensions.value.reference_asset_mapping = cm;
+      signed_transaction tx;
+      tx.operations.push_back( uop );
+      f.db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( f.db, tx );
+      tx.sign( key, f.db.get_chain_id() );
+      PUSH_TX( f.db, tx );
+   }
+   const asset_id_type mia_id =
+         f.create_bitasset( symbol, issuer, 100, charge_market_fee, 4, coll_id ).get_id();
+   {
+      asset_update_bitasset_operation mop;
+      mop.issuer          = issuer;
+      mop.asset_to_update = mia_id;
+      mop.new_options     = mia_id( f.db ).bitasset_data( f.db ).options;
+      reference_mapping m;
+      m.reference        = debt_ref;
+      m.asset_amount     = 1;
+      m.reference_amount = 1;
+      mop.new_options.extensions.value.reference_asset_mapping = m;
+      signed_transaction tx;
+      tx.operations.push_back( mop );
+      f.db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( f.db, tx );
+      tx.sign( key, f.db.get_chain_id() );
+      PUSH_TX( f.db, tx );
+   }
+   {
+      asset_update_bitasset_operation bop;
+      bop.issuer          = issuer;
+      bop.asset_to_update = mia_id;
+      bop.new_options     = mia_id( f.db ).bitasset_data( f.db ).options;
+      price_oracle b;
+      b.oracle_id     = oid;
+      b.series        = 0;
+      b.expiry_height = f.db.head_block_num() + 1000000000;
+      bop.new_options.extensions.value.price_oracle_binding = b;
+      signed_transaction tx;
+      tx.operations.push_back( bop );
+      f.db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( f.db, tx );
+      tx.sign( key, f.db.get_chain_id() );
+      PUSH_TX( f.db, tx );
+   }
+   BOOST_REQUIRE( mia_id( f.db ).bitasset_data( f.db ).options.extensions.value
+                  .price_oracle_binding.valid() );
+   return mia_id;
+}
+
+/// X-02 sibling shape: the legacy expiry-free price_oracle_id path. Same
+/// mapping discipline; single-series oracle only (no series choice).
+asset_id_type h2x02_bind_h1_smartcoin_legacy(
+      database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
+      const string& symbol, reference_asset_id_type debt_ref,
+      reference_asset_id_type backing_ref, oracle_id_type oid )
+{
+   const asset_id_type coll_id = h2d_create_uia( f, issuer, key, symbol + "COLL" );
+   {
+      asset_update_operation uop;
+      uop.issuer          = issuer;
+      uop.asset_to_update = coll_id;
+      uop.new_options     = coll_id( f.db ).options;
+      reference_mapping cm;
+      cm.reference        = backing_ref;
+      cm.asset_amount     = 1;
+      cm.reference_amount = 1;
+      uop.new_options.extensions.value.reference_asset_mapping = cm;
+      signed_transaction tx;
+      tx.operations.push_back( uop );
+      f.db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( f.db, tx );
+      tx.sign( key, f.db.get_chain_id() );
+      PUSH_TX( f.db, tx );
+   }
+   const asset_id_type mia_id =
+         f.create_bitasset( symbol, issuer, 100, charge_market_fee, 4, coll_id ).get_id();
+   {
+      asset_update_bitasset_operation mop;
+      mop.issuer          = issuer;
+      mop.asset_to_update = mia_id;
+      mop.new_options     = mia_id( f.db ).bitasset_data( f.db ).options;
+      reference_mapping m;
+      m.reference        = debt_ref;
+      m.asset_amount     = 1;
+      m.reference_amount = 1;
+      mop.new_options.extensions.value.reference_asset_mapping = m;
+      signed_transaction tx;
+      tx.operations.push_back( mop );
+      f.db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( f.db, tx );
+      tx.sign( key, f.db.get_chain_id() );
+      PUSH_TX( f.db, tx );
+   }
+   {
+      asset_update_bitasset_operation bop;
+      bop.issuer          = issuer;
+      bop.asset_to_update = mia_id;
+      bop.new_options     = mia_id( f.db ).bitasset_data( f.db ).options;
+      bop.new_options.extensions.value.price_oracle_id = oid;
+      signed_transaction tx;
+      tx.operations.push_back( bop );
+      f.db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( f.db, tx );
+      tx.sign( key, f.db.get_chain_id() );
+      PUSH_TX( f.db, tx );
+   }
+   BOOST_REQUIRE( mia_id( f.db ).bitasset_data( f.db ).options.extensions.value
+                  .price_oracle_id.valid() );
+   return mia_id;
 }
 
 } // namespace
@@ -1689,6 +1821,162 @@ BOOST_AUTO_TEST_CASE( h2_gov_r9_02_unfreeze_refused_without_cleared_dispute )
       PUSH_TX( db, tx );
    }
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+} FC_LOG_AND_RETHROW() }
+
+/// X-02 / R9-I4: H2 freeze machinery must never reach an H1-only oracle. An
+/// oracle referenced by a live bitasset binding prices an H1 smartcoin;
+/// dispute expiry freezes unconditionally with no committee vote, and the H1
+/// bound-consumer read guards on the same frozen flag -- the smartcoin would
+/// behave as its feeds expire. RED pre-fix: the dispute opens against the
+/// legacy-priced oracle and the freeze leaks through both binding fields.
+BOOST_AUTO_TEST_CASE( h2_x02_dispute_refused_on_h1_bound_oracle )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   // Oracle quoted USD/BTS: base is the smartcoin's own reference, quote the
+   // backing asset's reference (bind-time orientation rule). Producer carol,
+   // one published aggregate so the accused time is retained.
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "X02D.USD", usd_ref, bts_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   // The H1 smartcoin: mapped backing, mapped debt, explicit binding. The
+   // oracle is now H1-consumed; H2 dispute machinery must refuse it.
+   const asset_id_type mia = h2x02_bind_h1_smartcoin(
+         *this, alice_id, alice_private_key, "X02SMART", usd_ref, bts_ref, oid );
+   BOOST_REQUIRE( mia( db ).bitasset_data( db ).options.extensions.value
+                  .price_oracle_binding->oracle_id == oid );
+
+   // The dispute is otherwise fully valid: funded challenger, live producer,
+   // retained history. The refusal isolates the H1 exclusion, nothing else.
+   BOOST_CHECK_THROW(
+         h2d_post_dispute( *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+                           h2d_evidence( "x02-h1" ) ),
+         fc::exception );
+   BOOST_CHECK_EQUAL( oid( db ).open_disputes, 0u );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+} FC_LOG_AND_RETHROW() }
+
+/// X-02 GREEN control: an H2-only oracle (no bitasset binding of either
+/// field) stays fully disputable. The H1-exclusion must never break the H2
+/// dispute path.
+BOOST_AUTO_TEST_CASE( h2_x02_dispute_allowed_on_h2_only_oracle )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 3000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "X02G.USD", bts_ref, usd_ref, opts );
+   h2d_publish( *this, oid, carol_id, carol_private_key, 100 );
+   const fc::time_point_sec accused = oid( db ).history.back().first;
+
+   const oracle_dispute_id_type did = h2d_post_dispute(
+         *this, bob_id, bob_private_key, oid, carol_id, accused, 0,
+         h2d_evidence( "x02-h2" ) );
+   BOOST_CHECK( did( db ).oracle == oid );
+   BOOST_CHECK_EQUAL( oid( db ).open_disputes, 1u );
+} FC_LOG_AND_RETHROW() }
+
+/// X-02 / R9-I4 pair leg: the committee must not pin a legacy-priced oracle
+/// through pair_freeze either. A pin plus the automatic tripwire freeze
+/// (stage DEBT) nulls the H1 feeds through the same frozen flag. The vault's
+/// pair here is a plain UIA, so the X-01 pair-level exclusion passes and the
+/// refusal isolates the oracle-level H1 exclusion (legacy price_oracle_id
+/// shape, covering the second lookup field).
+BOOST_AUTO_TEST_CASE( h2_x02_pair_freeze_refused_on_h1_bound_oracle )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice) );
+   fund( alice, asset( 30000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "X02F.USD", usd_ref, bts_ref, opts );
+   const asset_id_type mia = h2x02_bind_h1_smartcoin_legacy(
+         *this, alice_id, alice_private_key, "X02LEG", usd_ref, bts_ref, oid );
+   BOOST_REQUIRE( mia( db ).bitasset_data( db ).options.extensions.value
+                  .price_oracle_id.valid() );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2d_register_vault( *this, alice_id, alice_private_key, vault_auth );
+
+   pair_freeze_operation op;
+   op.freezer = alice_id;
+   op.vault   = vid;
+   op.oracle  = oid;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( alice_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   BOOST_CHECK( !vid( db ).bound_oracle.valid() );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+} FC_LOG_AND_RETHROW() }
+
+/// X-02 GREEN control: pinning an H2-only oracle (no bitasset binding)
+/// still works; freeze semantics for H2-bonded oracles are unchanged.
+BOOST_AUTO_TEST_CASE( h2_x02_pair_freeze_allowed_on_h2_only_oracle )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice) );
+   fund( alice, asset( 30000000000000LL ) );
+   h2d_make_committee_member( *this, alice );
+   const auto bts_ref = h2d_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   const oracle_id_type oid =
+         h2d_make_oracle( *this, alice_id, alice_private_key, "X02P.USD", bts_ref, usd_ref, opts );
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2d_register_vault( *this, alice_id, alice_private_key, vault_auth );
+
+   pair_freeze_operation op;
+   op.freezer = alice_id;
+   op.vault   = vid;
+   op.oracle  = oid;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, tx );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   BOOST_CHECK( *vid( db ).bound_oracle == oid );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

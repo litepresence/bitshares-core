@@ -23,6 +23,8 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/exceptions.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -2737,7 +2739,7 @@ BOOST_AUTO_TEST_CASE( v1_stealth_transfer_refused_post_sunset )
    // so the sunset gate is what rejects.
    ACTORS( (alice)(bob) );
    upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
-   create_committee_member( alice ); create_committee_member( bob );
+   create_and_seat_committee_member( alice ); create_and_seat_committee_member( bob );
    generate_block();
    for( auto voter : { std::make_pair( alice.id, alice_private_key ),
                        std::make_pair( bob.id, bob_private_key ) } )
@@ -3235,8 +3237,8 @@ BOOST_AUTO_TEST_CASE( per_asset_halt_scope )
    ACTORS( (alice)(bob)(carol)(dan) );
    upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
    upgrade_to_lifetime_member( carol ); upgrade_to_lifetime_member( dan );
-   create_committee_member( alice ); create_committee_member( bob );
-   create_committee_member( carol ); create_committee_member( dan );
+   create_and_seat_committee_member( alice ); create_and_seat_committee_member( bob );
+   create_and_seat_committee_member( carol ); create_and_seat_committee_member( dan );
    generate_block();
    const asset_object& core = asset_id_type()(db);
    const asset_id_type core_id = core.get_id();
@@ -3364,8 +3366,8 @@ BOOST_AUTO_TEST_CASE( freeze_blind_committee_backup )
    ACTORS( (alice)(bob)(carol)(dan) );
    upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
    upgrade_to_lifetime_member( carol );
-   create_committee_member( alice ); create_committee_member( bob );
-   create_committee_member( carol );
+   create_and_seat_committee_member( alice ); create_and_seat_committee_member( bob );
+   create_and_seat_committee_member( carol );
    generate_block();
    BOOST_CHECK( !stealth_blind_halted( db ) );
    auto cast_vote = [&]( const account_object& who, const private_key_type& key, bool freeze ) {
@@ -3414,6 +3416,99 @@ BOOST_AUTO_TEST_CASE( freeze_blind_committee_backup )
       BOOST_CHECK( !stealth_vote_fresh( now, now - GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC - 1 ) );
    }
 } FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// GOV-R9-01 (round-9 REPAIR-33): committee gates sit on the ELECTED set
+// ---------------------------------------------------------------------------
+
+/// RED: committee_member_create is permissionless (is_lifetime_member + op-29
+/// fee) and registry rows are never pruned, so registry membership alone is a
+/// sybil door into op105 (freeze-blind) and op107 (parity review). The registry
+/// lookup must still FIND the fresh member — the elected set is what refuses
+/// the attestation.
+BOOST_AUTO_TEST_CASE( gov_r9_01_fresh_registrant_cannot_attest )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (alice) );
+   upgrade_to_lifetime_member( alice );
+   create_committee_member( alice );
+   generate_block();
+
+   const auto& cidx = db.get_index_type<committee_member_index>().indices().get<graphene::chain::by_account>();
+   const auto reg = cidx.find( alice.get_id() );
+   BOOST_REQUIRE( reg != cidx.end() );
+   const auto& elected = db.get_global_properties().active_committee_members;
+   const bool is_elected =
+         std::find( elected.begin(), elected.end(), reg->get_id() ) != elected.end();
+   BOOST_TEST_MESSAGE( "GOV-R9-01: registry=" << cidx.size()
+         << " elected=" << elected.size() << " fresh_registrant_elected=" << is_elected );
+   BOOST_CHECK( !is_elected );
+
+   {
+      freeze_blind_operation fz;
+      fz.voter = alice.get_id();
+      fz.freeze = true;
+      fz.reason = "gov-r9";
+      signed_transaction tx; tx.operations.push_back( fz );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+   {
+      parity_review_operation r;
+      r.voter = alice.get_id();
+      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      r.note = "gov-r9";
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+   }
+} FC_LOG_AND_RETHROW() }
+
+/// GREEN: an elected genesis seat (in active_committee_members from the first
+/// maintenance) still reaches both gates — the check is additive.
+BOOST_AUTO_TEST_CASE( gov_r9_01_elected_seat_still_attests )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   const account_object& seat0 = get_account( "init0" );
+   fund( seat0, asset( 1000000 ) );
+   const auto& cidx = db.get_index_type<committee_member_index>().indices().get<graphene::chain::by_account>();
+   const auto seat0_reg = cidx.find( seat0.get_id() );
+   BOOST_REQUIRE( seat0_reg != cidx.end() );
+   const auto& elected = db.get_global_properties().active_committee_members;
+   BOOST_REQUIRE( std::find( elected.begin(), elected.end(), seat0_reg->get_id() ) != elected.end() );
+
+   {
+      freeze_blind_operation fz;
+      fz.voter = seat0.get_id();
+      fz.freeze = true;
+      fz.reason = "gov-r9 elected";
+      signed_transaction tx; tx.operations.push_back( fz );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( init_account_priv_key, db.get_chain_id() );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, tx ) );
+   }
+   {
+      parity_review_operation r;
+      r.voter = seat0.get_id();
+      r.kind = GRAPHENE_STEALTH_REVIEW_PARITY;
+      r.note = "gov-r9 elected";
+      signed_transaction tx; tx.operations.push_back( r );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( init_account_priv_key, db.get_chain_id() );
+      BOOST_CHECK_NO_THROW( PUSH_TX( db, tx ) );
+   }
+} FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( turnstile_migration )
 { try {
@@ -3481,7 +3576,7 @@ BOOST_AUTO_TEST_CASE( turnstile_migration )
    // needs no subsidy: the sunset gate throws before any fee logic.
    ACTORS( (alice)(bob) );
    upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
-   create_committee_member( alice ); create_committee_member( bob );
+   create_and_seat_committee_member( alice ); create_and_seat_committee_member( bob );
    generate_block();
    for( auto voter : { std::make_pair( alice.id, alice_private_key ),
                        std::make_pair( bob.id, bob_private_key ) } )
@@ -4938,7 +5033,7 @@ BOOST_AUTO_TEST_CASE( parity_missed_review_defaults )
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_PARITY_REPORT_INTERVAL_SEC, 7776000u );
    ACTORS( (alice)(bob)(dan) );
    upgrade_to_lifetime_member( alice ); upgrade_to_lifetime_member( bob );
-   create_committee_member( alice ); create_committee_member( bob );
+   create_and_seat_committee_member( alice ); create_and_seat_committee_member( bob );
    generate_block();
    const asset_object& core = asset_id_type()(db);
    const asset_id_type core_id = core.get_id();
@@ -5170,7 +5265,7 @@ BOOST_AUTO_TEST_CASE( parity_alarms_computed_and_queryable )
    set_expiration( db, trx ); // H1 pattern (oracle_tests): ACTORS/trx go stale across the jump
    ACTORS( (alice)(dan) );
    upgrade_to_lifetime_member( alice );
-   create_committee_member( alice );
+   create_and_seat_committee_member( alice );
    generate_block();
    const asset_object& core = asset_id_type()(db);
    const asset_id_type core_id = core.get_id();

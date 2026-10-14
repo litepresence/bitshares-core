@@ -877,7 +877,18 @@ void_result freeze_blind_evaluator::do_evaluate( const freeze_blind_operation& o
               "Freeze-blind votes are not allowed until the stealth hardfork" );
    // Only elected committee members may vote.
    const auto& cidx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   FC_ASSERT( cidx.find( o.voter ) != cidx.end(), "Freeze-blind voter is not a committee member" );
+   const auto member_itr = cidx.find( o.voter );
+   FC_ASSERT( member_itr != cidx.end(), "Freeze-blind voter is not a committee member" );
+   // GOV-R9-01: committee_member_create is permissionless (op-29, LTM only)
+   // and registry rows are never pruned, so registry membership alone is a
+   // sybil door into the halt. The stake-elected set is the gate; this check
+   // is additive and fail-closed -- the lookup above still identifies the
+   // committee_member_object.
+   {
+      const auto& elected = d.get_global_properties().active_committee_members;
+      FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+                 "Freeze-blind voter is registered but not on the elected committee" );
+   }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 
@@ -1851,7 +1862,17 @@ void_result parity_review_evaluator::do_evaluate( const parity_review_operation&
               o.kind == GRAPHENE_STEALTH_REVIEW_SET_REPORT,
               "Unknown parity review kind" );
    const auto& cidx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   FC_ASSERT( cidx.find( o.voter ) != cidx.end(), "Parity review voter is not a committee member" );
+   const auto member_itr = cidx.find( o.voter );
+   FC_ASSERT( member_itr != cidx.end(), "Parity review voter is not a committee member" );
+   // GOV-R9-01: a parity attestation moves the review clocks and permits (never
+   // spends) subsidies, so a permissionless registry row must not be a
+   // mandate. Only the elected set attests; additive and fail-closed, the
+   // registry lookup above is retained.
+   {
+      const auto& elected = d.get_global_properties().active_committee_members;
+      FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+                 "Parity review voter is registered but not on the elected committee" );
+   }
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) }
 

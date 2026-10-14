@@ -46,6 +46,7 @@
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/htlc.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
@@ -1659,6 +1660,239 @@ BOOST_AUTO_TEST_CASE( vesting_withdraw_pre_unlock_overdraw_refused )
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+} FC_LOG_AND_RETHROW() }
+
+/// R9-I9 / H2-09: the documented recovery path ("fresh re-registration" after
+/// wind-down) actually exists in consensus. Adversarial shape: expiry-freeze
+/// (cartel-abstention inconclusive finding) -> committee resolve -> settle the
+/// whole frozen-liability book -> re-register the SAME pair -> mint again.
+/// Guards pinned along the way: while claims are open the pair stays closed
+/// (the live register still owns it); after settlement the terminal vault
+/// object is REMOVED, the wind-down book survives its source vault, and the
+/// fresh vault mints through the issuance door.
+BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   // Original vault on the default pair; bob holds the authority (so bob can
+   // re-register and mint later), alice seats the committee leg that resolves.
+   authority vault_auth( 1, bob_id, 1 );
+   const asset_id_type pair = h2c_default_pair( *this, bob_id, bob_private_key );
+   const vault_id_type vid = h2c_register_vault(
+         *this, bob_id, bob_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair );
+   const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   // 200% cover: the vault stays maintenance-healthy while the challenge
+   // window lapses, so only the expiry sweep moves it (R5C test shape).
+   generate_block();
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW / 2 );
+
+   // Expiry-freeze: carol challenges; nobody votes; the window lapses
+   // fail-closed (EXPIRED_FROZEN, vault frozen, challenge count drained).
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "no-quorum" ) );
+   generate_blocks( cid( db ).deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+   BOOST_REQUIRE_EQUAL( vid( db ).frozen, true );
+
+   // A seated member resolves: exit-only wind-down (R5C fail-closed split).
+   vault_resolve_operation rop;
+   rop.resolver  = alice_id;
+   rop.challenge = cid;
+   signed_transaction rtx; rtx.operations.push_back( rop );
+   db.current_fee_schedule().set_fee( rtx.operations.back() );
+   set_expiration( db, rtx );
+   rtx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, rtx );
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
+   BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
+   const winddown_vault_id_type wdid { wd_idx.begin()->id };
+   BOOST_REQUIRE( wdid( db ).source_vault == vid );
+   BOOST_REQUIRE( wdid( db ).claimed_total != wdid( db ).total_claims );
+
+   // Guard: re-registration while claims are OPEN stays refused (the wound
+   // down book still owns the pair until settlement).
+   BOOST_CHECK_THROW( h2c_register_vault(
+         *this, bob_id, bob_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair ), fc::exception );
+
+   // Settle the whole frozen-liability book in one senior claim (fully
+   // backed: the haircut leg pays before the pro-rata cap binds).
+   winddown_claim_operation sop;
+   sop.claimant     = carol_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = H2C_VAULT_RAW / 2; // == total_claims
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction stx; stx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( carol_private_key, db.get_chain_id() );
+   PUSH_TX( db, stx );
+   BOOST_REQUIRE( wdid( db ).claimed_total == wdid( db ).total_claims );
+   const share_type carried_shell = vid( db ).forfeit_pool_balance;
+   BOOST_REQUIRE( carried_shell > share_type( 0 ) );
+
+   // Recovery path (R9-I9): fresh registration replaces the terminal vault
+   // object on the same pair.
+   const vault_id_type vid2 = h2c_register_vault(
+         *this, bob_id, bob_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair );
+   BOOST_CHECK( vid2 != vid );
+   BOOST_CHECK( db.find( vid ) == nullptr );
+   BOOST_CHECK( vid2( db ).vault_pair == pair );
+   BOOST_CHECK_EQUAL( vid2( db ).outstanding.value, 0 );
+   BOOST_CHECK_EQUAL( vid2( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   BOOST_CHECK_EQUAL( vid2( db ).frozen, false );
+   // The terminal vault's forfeit shell carries to the fresh vault (supply
+   // must stay counted across the removal; see vault_evaluator do_apply).
+   BOOST_CHECK_EQUAL( vid2( db ).forfeit_pool_balance.value, carried_shell.value );
+   // The wind-down book survives its source vault: claims history is never
+   // rewritten by re-registration (the claim path already tolerates the
+   // missing source; nothing else consumes a terminal vault object).
+   BOOST_CHECK( wdid( db ).source_vault == vid );
+   BOOST_CHECK( wdid( db ).claimed_total == wdid( db ).total_claims );
+   // Further claims against the settled book are still refused (next_claimed
+   // would break the frozen-liability ceiling).
+   winddown_claim_operation xop = sop;
+   xop.claimant = alice_id; // fresh claimant: only the ceiling can refuse
+   signed_transaction xtx; xtx.operations.push_back( xop );
+   db.current_fee_schedule().set_fee( xtx.operations.back() );
+   set_expiration( db, xtx );
+   xtx.sign( alice_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, xtx ), fc::exception );
+
+   // The re-registered vault can mint again. Bond the fresh book, pin the
+   // canonical oracle binding (first freeze), reopen the door (issuance
+   // suite open-door precedent: the pin persists; the sweep freeze flags are
+   // surgically reopened so the test has a live price leg), then mint.
+   const auto bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "BT9", 5 );
+   const auto usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "USD9", 4 );
+   oracle_options opts;
+   opts.producers[ bob_id ] = oracle_producer_entry( 1 );
+   const oracle_id_type oid = h2c_make_oracle(
+         *this, alice_id, alice_private_key, "R9I9.USD", bts_ref, usd_ref, opts );
+   const auto ovest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_ORACLE_RAW );
+   h2c_lock_producer_bond( *this, bob_id, bob_private_key, oid, ovest,
+                           H2C_ORACLE_RAW, H2C_ORACLE_USD_CENTS );
+   generate_block();
+   const auto vest2 = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid2, vest2,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   h2c_freeze( *this, alice_id, alice_private_key, vid2, oid );
+   BOOST_REQUIRE( vid2( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid2( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   h2c_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_REQUIRE( h2_read_pair_price( db, vid2( db ), 0, db.head_block_time() ).valid() );
+
+   const asset_id_type fxr = h2c_create_uia( *this, alice_id, alice_private_key, "R9I9F" );
+   hybrid_mint_operation mop;
+   mop.minter        = bob_id; // vault-authority member; deposit from bob's BTS
+   mop.vault         = vid2;
+   mop.deposit       = asset( 130000, asset_id_type() );
+   mop.stable_amount = share_type( 1000 );
+   mop.fxr_asset     = fxr;
+   signed_transaction mtx; mtx.operations.push_back( mop );
+   db.current_fee_schedule().set_fee( mtx.operations.back() );
+   set_expiration( db, mtx );
+   mtx.sign( bob_private_key, db.get_chain_id() );
+   PUSH_TX( db, mtx );
+   BOOST_CHECK( vid2( db ).outstanding == share_type( 1000 ) );
+   BOOST_CHECK( db.get_balance( bob_id, pair ).amount == share_type( 1000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// R9-I9 second settlement shape: the wind-down reached COMPLETE (the
+/// segregated bond exhausted exactly -- pro-rata-bound book where the full
+/// claim face pays out the whole seized slice). COMPLETE must admit
+/// re-registration exactly like the claimed-total leg pinned above.
+BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( dave, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   authority vault_auth( 1, bob_id, 1 );
+   const asset_id_type pair = h2c_create_uia( *this, bob_id, bob_private_key, "R9I9C" );
+   const vault_id_type vid = h2c_register_vault(
+         *this, bob_id, bob_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair );
+   const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+
+   // Expiry at zero book (maintenance-healthy: zero outstanding always
+   // meets), so only the expiry sweep moves the challenge.
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "no-quorum" ) );
+   generate_blocks( cid( db ).deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+
+   // Load the doomed book DOUBLE the segregated slice, then resolve: a
+   // full-face senior claim pays exactly the segregated bond (pro-rata leg
+   // binds below the haircut), driving paid_total to segregated_bond and
+   // the wind-down state to COMPLETE.
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW * 2 );
+   vault_resolve_operation rop;
+   rop.resolver  = alice_id;
+   rop.challenge = cid;
+   signed_transaction rtx; rtx.operations.push_back( rop );
+   db.current_fee_schedule().set_fee( rtx.operations.back() );
+   set_expiration( db, rtx );
+   rtx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, rtx );
+   const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
+   BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
+   const winddown_vault_id_type wdid { wd_idx.begin()->id };
+   BOOST_REQUIRE( wdid( db ).total_claims == H2C_VAULT_RAW * 2 );
+   BOOST_REQUIRE( wdid( db ).segregated_bond == H2C_VAULT_RAW );
+
+   winddown_claim_operation sop;
+   sop.claimant     = dave_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = H2C_VAULT_RAW * 2;
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction stx; stx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( dave_private_key, db.get_chain_id() );
+   PUSH_TX( db, stx );
+   BOOST_REQUIRE_EQUAL( wdid( db ).state, GRAPHENE_H2_WINDDOWN_COMPLETE );
+   BOOST_REQUIRE( wdid( db ).paid_total == wdid( db ).segregated_bond );
+   const share_type carried_shell = vid( db ).forfeit_pool_balance;
+   BOOST_REQUIRE( carried_shell > share_type( 0 ) );
+
+   // COMPLETE admits the fresh registration; the terminal object is removed.
+   const vault_id_type vid2 = h2c_register_vault(
+         *this, bob_id, bob_private_key, vault_auth,
+         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair );
+   BOOST_CHECK( vid2 != vid );
+   BOOST_CHECK( db.find( vid ) == nullptr );
+   BOOST_CHECK( vid2( db ).vault_pair == pair );
+   BOOST_CHECK_EQUAL( vid2( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   BOOST_CHECK( wdid( db ).state == GRAPHENE_H2_WINDDOWN_COMPLETE );
+   BOOST_CHECK_EQUAL( vid2( db ).forfeit_pool_balance.value, carried_shell.value );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

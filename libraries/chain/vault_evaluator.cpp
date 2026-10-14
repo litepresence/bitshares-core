@@ -26,6 +26,8 @@
 #include <graphene/chain/bond_object.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
+#include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 
 #include <graphene/chain/asset_object.hpp>
@@ -39,6 +41,32 @@
 #include <fc/uint128.hpp>
 
 namespace graphene { namespace chain {
+
+namespace {
+
+/// R9-I9 (H2-09): whether @p vault's wind-down book is settled — every unit
+/// of the frozen-liability book has been claimed. Two equivalent readings,
+/// both admission-grade: the wind-down reached COMPLETE (segregated bond
+/// exhausted exactly; fires when the full claim face pays out the whole
+/// seized slice), or claimed_total caught total_claims (COMPLETE can lag by
+/// truncation dust on the payout floor, and a fully-backed book never
+/// exhausts its segregated slice at all — the haircut remainder is
+/// protocol-retained — so COMPLETE alone would re-bar those pairs forever).
+/// A vault in wind-down always has exactly one winddown_vault_object (no
+/// second wind-down: resolve and the maintenance sweep both refuse).
+bool h2_winddown_book_settled( const database& d, vault_id_type vault )
+{
+   const auto& wd_idx = d.get_index_type<winddown_vault_index>()
+                          .indices().get<by_winddown_vault>();
+   const auto range = wd_idx.equal_range( vault );
+   for( auto itr = range.first; itr != range.second; ++itr )
+      if( itr->state == GRAPHENE_H2_WINDDOWN_COMPLETE
+          || itr->claimed_total == itr->total_claims )
+         return true;
+   return false; // no wind-down row: fail closed, never settled
+}
+
+} // namespace
 
 void_result vault_register_evaluator::do_evaluate( const vault_register_operation& op ) const
 { try {
@@ -113,9 +141,27 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
 
    // One live vault set per pair (inventory OQ-03 reversible minimum): parallel
    // sets per pair are a later task's multi-set rule, never a silent duplicate.
-   const auto& pair_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
-   FC_ASSERT( pair_idx.find( op.pair ) == pair_idx.end(),
-              "Pair ${a} already has a live vault set", ("a", op.pair) );
+   // R9-I9 (H2-09): a TERMINAL vault does not occupy the pair forever. The
+   // documented recovery path after wind-down is fresh re-registration, so a
+   // pair whose existing vault sits in wind-down with every claim settled may
+   // register again (do_apply then removes the terminal object — the only
+   // vault_object removal in consensus). Until settlement the refusal stands:
+   // open claims must never lose their segregated source. Every other state
+   // (HEALTHY, TOPUP, missing wind-down book) keeps the original live-set
+   // refusal byte-for-byte.
+   {
+      const auto& pair_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+      const auto existing = pair_idx.find( op.pair );
+      if( existing != pair_idx.end() )
+      {
+         FC_ASSERT( existing->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN,
+                    "Pair ${a} already has a live vault set", ("a", op.pair) );
+         FC_ASSERT( h2_winddown_book_settled( d, vault_id_type( existing->id ) ),
+                    "Pair ${a} carries a wound-down vault whose claims are not "
+                    "settled; re-registration refused until the wind-down "
+                    "completes", ("a", op.pair) );
+      }
+   }
 
    // Recovery suspends new debt (H2d): while the system scope sits below
    // 150%, registering a new vault (new debt capacity) is refused. Exits
@@ -131,7 +177,36 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
 object_id_type vault_register_evaluator::do_apply( const vault_register_operation& op ) const
 { try {
    database& d = db();
-   const auto& new_vault = d.create<vault_object>( [&op]( vault_object& v ) {
+   // R9-I9: clear a settled terminal vault off the pair index BEFORE the new
+   // row lands (by_vault_pair is ordered_unique on pair). do_evaluate admits
+   // only settled wind-down books; the maintenance-state re-assert below is
+   // fail-closed defense in depth — apply must never remove a live book, so
+   // a drifted evaluate gate can never cascade into a live-vault removal.
+   // Post-removal dangling references are all pre-tolerated: winddown_claim
+   // falls back to same-asset math on a missing source vault (and a settled
+   // book refuses further claims at the liability ceiling anyway),
+   // vault_bond_release refuses on a missing owner vault, and the maintenance
+   // / recovery / seasoning sweeps iterate live vaults only.
+   share_type carried_forfeit( 0 );
+   {
+      const auto& pair_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+      const auto existing = pair_idx.find( op.pair );
+      if( existing != pair_idx.end() )
+      {
+         FC_ASSERT( existing->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN,
+                    "Refusing to remove a non-winddown vault at re-registration" );
+         // The terminal vault's forfeit pool (the 15% slice of expired
+         // challenge bonds) is supply-visible escrow with no other home: the
+         // H2d sweep only drains BOUND vaults through their oracle's reward
+         // pool, and a terminal vault's binding never advances. Carrying the
+         // shell onto the pair's fresh vault keeps it counted and sweepable
+         // (never crosses pairs, never burns, no invented recipient); removal
+         // alone would silently destroy the escrow and unbalance supply.
+         carried_forfeit = existing->forfeit_pool_balance;
+         d.remove( *existing );
+      }
+   }
+   const auto& new_vault = d.create<vault_object>( [&op, &carried_forfeit]( vault_object& v ) {
       v.vault_pair           = op.pair;
       v.vault_authority      = op.vault_authority;
       v.min_bond             = op.min_bond;
@@ -141,13 +216,19 @@ object_id_type vault_register_evaluator::do_apply( const vault_register_operatio
       v.challenge_window_sec = op.challenge_window_sec;
       v.outstanding          = share_type( 0 );
       v.frozen               = false;
+      v.forfeit_pool_balance = carried_forfeit;
    } );
    // Gateway-leg activation for the pair starts its 90-day BTC seasoning
    // clock (BSIP-1 section 5) in the same atomic step: no vault without a
-   // clock, no clock without a vault. Uniqueness of the vault per pair
-   // (checked in do_evaluate) implies uniqueness of the record; the create
-   // helper re-asserts it.
-   h2_create_seasoning_record( d, op.pair, d.head_block_time() );
+   // clock, no clock without a vault. R9-I9: the clock is PAIR-level — a
+   // re-registered pair inherits its standing record (it already seasoned
+   // under the old vault; restarting the window on recovery would re-brick
+   // the pair for 90 days with no adversary required), so only a first-time
+   // pair opens the window here. The create helper re-asserts uniqueness.
+   const auto& season_idx = d.get_index_type<seasoning_record_index>()
+                              .indices().get<by_seasoning_pair>();
+   if( season_idx.find( op.pair ) == season_idx.end() )
+      h2_create_seasoning_record( d, op.pair, d.head_block_time() );
    return object_id_type( new_vault.id );
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

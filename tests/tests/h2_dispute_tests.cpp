@@ -27,6 +27,8 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+
 #include <graphene/chain/account_object.hpp>
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/bond_object.hpp>
@@ -87,7 +89,7 @@ string h2d_evidence( const string& tag )
 void h2d_make_committee_member( database_fixture& f, const account_object& account )
 {
    f.upgrade_to_lifetime_member( account );
-   f.create_committee_member( account );
+   f.create_and_seat_committee_member( account );
 }
 
 reference_asset_id_type h2d_create_reference(
@@ -287,6 +289,30 @@ void h2d_vote(
    set_expiration( f.db, tx );
    tx.sign( key, f.db.get_chain_id() );
    PUSH_TX( f.db, tx );
+}
+
+/// GOV-R9-01 setup: opens a live oracle dispute so a permissionless fresh
+/// registrant and an elected genesis seat can be asked to vote on the very
+/// same target. Reference creation is itself committee-gated, so it is done
+/// by genesis seat init0: the setup is byte-identical pre- and post-fix and
+/// only the vote assertion can move.
+oracle_dispute_id_type gov_r9_open_dispute( database_fixture& f,
+      account_id_type challenger, const fc::ecc::private_key& challenger_key,
+      account_id_type defender, const fc::ecc::private_key& defender_key )
+{
+   const account_object& seat0 = f.get_account( "init0" );
+   const auto bts_ref = h2d_create_reference( f, seat0.get_id(), f.init_account_priv_key,
+                                              "BTS", 5 );
+   const auto usd_ref = h2d_create_reference( f, seat0.get_id(), f.init_account_priv_key,
+                                              "USD", 4 );
+   oracle_options opts;
+   opts.producers[defender] = oracle_producer_entry( 1 );
+   const oracle_id_type oid = h2d_make_oracle( f, seat0.get_id(), f.init_account_priv_key,
+                                               "GOVR9", bts_ref, usd_ref, opts );
+   h2d_publish( f, oid, defender, defender_key, 100 );
+   const fc::time_point_sec accused = oid( f.db ).history.back().first;
+   return h2d_post_dispute( f, challenger, challenger_key, oid, defender, accused, 0,
+                            h2d_evidence( "gov-r9" ) );
 }
 
 } // namespace
@@ -1421,6 +1447,80 @@ BOOST_AUTO_TEST_CASE( owner_cannot_clear_open_or_expiry_freeze )
       PUSH_TX( db, tx );
       BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
    }
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// GOV-R9-01 (round-9 REPAIR-33): committee gates sit on the ELECTED set
+// ---------------------------------------------------------------------------
+
+/// RED: registration is permissionless (is_lifetime_member + op-29 fee, see
+/// committee_member_create_evaluator::do_evaluate) and registry rows are never
+/// pruned, so the registry alone is a sybil door: K fresh registrations grow N
+/// and shrink supermajority_of(N) until a sybil army carries every dispute.
+/// The registry lookup below must still FIND the fresh member (it identifies
+/// the committee_member_object); what refuses the vote is the elected set.
+BOOST_AUTO_TEST_CASE( gov_r9_01_registered_but_not_elected_cannot_vote )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+
+   // Permissionless registration ONLY — deliberately not h2d_make_committee_member,
+   // which seats the member. The sybil case is a registrant with no seat.
+   upgrade_to_lifetime_member( alice );
+   create_committee_member( alice );
+   const oracle_dispute_id_type did =
+         gov_r9_open_dispute( *this, bob_id, bob_private_key, carol_id, carol_private_key );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+
+   const auto& member_idx = db.get_index_type<committee_member_index>().indices().get<by_account>();
+   const auto reg = member_idx.find( alice_id );
+   BOOST_REQUIRE( reg != member_idx.end() );
+   const auto& elected = db.get_global_properties().active_committee_members;
+   const bool is_elected = std::find( elected.begin(), elected.end(), reg->get_id() ) != elected.end();
+   BOOST_TEST_MESSAGE( "GOV-R9-01: registry=" << member_idx.size()
+         << " elected=" << elected.size() << " fresh_registrant_elected=" << is_elected );
+   BOOST_CHECK( !is_elected );
+
+   // RED: pre-fix this vote is ACCEPTED — the registry lookup is the only gate.
+   BOOST_CHECK_THROW( h2d_vote( *this, alice_id, alice_private_key,
+                                object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE ),
+                      fc::exception );
+   BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+} FC_LOG_AND_RETHROW() }
+
+/// GREEN: the elected path must not break — a genesis seat (in
+/// active_committee_members from the first maintenance) still votes.
+BOOST_AUTO_TEST_CASE( gov_r9_01_elected_seat_still_votes )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+
+   h2d_make_committee_member( *this, alice );
+   const oracle_dispute_id_type did =
+         gov_r9_open_dispute( *this, bob_id, bob_private_key, carol_id, carol_private_key );
+
+   const account_object& seat0 = get_account( "init0" );
+   fund( seat0, asset( 1000000 ) );
+   const auto& member_idx = db.get_index_type<committee_member_index>().indices().get<by_account>();
+   const auto seat0_reg = member_idx.find( seat0.get_id() );
+   BOOST_REQUIRE( seat0_reg != member_idx.end() );
+   const auto& elected = db.get_global_properties().active_committee_members;
+   BOOST_REQUIRE( std::find( elected.begin(), elected.end(), seat0_reg->get_id() ) != elected.end() );
+   BOOST_CHECK_NO_THROW( h2d_vote( *this, seat0.get_id(), init_account_priv_key,
+                                   object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE ) );
+   BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN ); // 1 vote: no quorum
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

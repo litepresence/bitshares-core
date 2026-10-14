@@ -39,6 +39,8 @@
 #include <fc/io/raw.hpp>
 #include <fc/uint128.hpp>
 
+#include <algorithm>
+
 namespace graphene { namespace chain {
 
 namespace {
@@ -558,8 +560,18 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
 
    const auto& member_idx = d.get_index_type<committee_member_index>()
                                .indices().get<by_account>();
-   FC_ASSERT( member_idx.find( op.voter ) != member_idx.end(),
+   const auto member_itr = member_idx.find( op.voter );
+   FC_ASSERT( member_itr != member_idx.end(),
               "Voter ${a} is not a seated committee member", ("a", op.voter) );
+   // GOV-R9-01: the registry is permissionless (op-29, LTM only) and its rows
+   // are never pruned, so membership alone lets K sybil registrations grow the
+   // deciding set and shrink supermajority_of(N) below an attacker's reach.
+   // The elected set is the gate; this check is additive and fail-closed --
+   // the lookup above still identifies the committee_member_object.
+   const auto& elected = d.get_global_properties().active_committee_members;
+   FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+              "Voter ${a} is registered but not on the elected committee",
+              ("a", op.voter) );
    const auto& votes = ( _challenge != nullptr ) ? _challenge->votes : _dispute->votes;
    FC_ASSERT( votes.find( op.voter ) == votes.end(),
               "Committee member ${a} has already voted on this target", ("a", op.voter) );

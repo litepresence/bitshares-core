@@ -416,8 +416,18 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    // Committee 2/3 execution path: the resolver proves seated membership (the
    // vote already proved the supermajority behind the sustain decision).
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   FC_ASSERT( member_idx.find( op.resolver ) != member_idx.end(),
+   const auto member_itr = member_idx.find( op.resolver );
+   FC_ASSERT( member_itr != member_idx.end(),
               "Resolver ${a} is not a seated committee member", ("a", op.resolver) );
+   // GOV-R9-01: the wind-down path is reachable without a vote, so registry
+   // membership alone would hand any sybil registrant a unilateral trigger.
+   // The elected set gates it; additive and fail-closed, registry lookup kept.
+   {
+      const auto& elected = d.get_global_properties().active_committee_members;
+      FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+                 "Resolver ${a} is registered but not on the elected committee",
+                 ("a", op.resolver) );
+   }
    const vault_object* vault = d.find( _challenge->vault );
    FC_ASSERT( nullptr != vault, "Challenged vault no longer exists" );
    FC_ASSERT( vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
@@ -448,8 +458,18 @@ void_result pair_freeze_evaluator::do_evaluate( const pair_freeze_operation& op 
    FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );
    FC_ASSERT( nullptr != d.find( op.oracle ), "Oracle ${o} does not exist", ("o", op.oracle) );
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   FC_ASSERT( member_idx.find( op.freezer ) != member_idx.end(),
+   const auto member_itr = member_idx.find( op.freezer );
+   FC_ASSERT( member_itr != member_idx.end(),
               "Freezer ${a} is not a seated committee member", ("a", op.freezer) );
+   // GOV-R9-01: a freeze pins the canonical pair<->oracle binding and taps the
+   // debt, so a permissionless registry row must not be a mandate. Only the
+   // elected set freezes; additive, fail-closed, registry lookup retained.
+   {
+      const auto& elected = d.get_global_properties().active_committee_members;
+      FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+                 "Freezer ${a} is registered but not on the elected committee",
+                 ("a", op.freezer) );
+   }
    // X-01 H1-exclusion at the freeze door (defense in depth behind
    // vault_register): an H1-priced pair can never be pinned into H2 bonded
    // custody, so unbonded inputs can never move bonded medians.

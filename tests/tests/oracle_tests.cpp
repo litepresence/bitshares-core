@@ -47,7 +47,7 @@ oracle_series rseries( oracle_series_kind kind, oracle_series_rounding rounding 
 void rev2_make_committee_member( database_fixture& f, const account_object& account )
 {
    f.upgrade_to_lifetime_member( account );
-   f.create_committee_member( account );
+   f.create_and_seat_committee_member( account );
 }
 
 /// Creates a reference asset, returning its id. Caller must satisfy the creation gate

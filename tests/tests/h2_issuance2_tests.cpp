@@ -103,7 +103,7 @@ void h2j_make_committee_member( database_fixture& f, const account_object& accou
    const auto& idx = f.db.get_index_type<committee_member_index>()
                      .indices().get<by_account>();
    if( idx.find( account.get_id() ) == idx.end() )
-      f.create_committee_member( live );
+      f.create_and_seat_committee_member( live );
 }
 
 reference_asset_id_type h2j_create_reference(

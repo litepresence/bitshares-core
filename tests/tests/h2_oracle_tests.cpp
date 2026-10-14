@@ -116,7 +116,7 @@ string h2e_evidence( const string& tag )
 void h2e_make_committee_member( database_fixture& f, const account_object& account )
 {
    f.upgrade_to_lifetime_member( account );
-   f.create_committee_member( account );
+   f.create_and_seat_committee_member( account );
 }
 
 reference_asset_id_type h2e_create_reference(

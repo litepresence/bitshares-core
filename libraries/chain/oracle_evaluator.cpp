@@ -37,6 +37,8 @@
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 
+#include <algorithm>
+
 namespace graphene { namespace chain {
 
 namespace {
@@ -67,7 +69,14 @@ bool may_create_reference_asset( const database& d, account_id_type account )
    if( account == GRAPHENE_COMMITTEE_ACCOUNT )
       return true;
    const auto& idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   return idx.find( account ) != idx.end();
+   const auto itr = idx.find( account );
+   if( itr == idx.end() )
+      return false;
+   // GOV-R9-01: registry rows are permissionless (op-29, LTM only) and never
+   // pruned, so registry membership alone is a sybil door. The gate is the
+   // stake-elected set; the lookup above still identifies the member object.
+   const auto& elected = d.get_global_properties().active_committee_members;
+   return std::find( elected.begin(), elected.end(), itr->get_id() ) != elected.end();
 }
 
 /**
@@ -477,8 +486,18 @@ void_result oracle_unfreeze_evaluator::do_evaluate( const oracle_unfreeze_operat
    _oracle = d.find( op.oracle );
    FC_ASSERT( nullptr != _oracle, "Oracle ${o} does not exist", ("o", op.oracle) );
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-   FC_ASSERT( member_idx.find( op.unfreezer ) != member_idx.end(),
+   const auto member_itr = member_idx.find( op.unfreezer );
+   FC_ASSERT( member_itr != member_idx.end(),
               "Unfreezer ${a} is not a seated committee member", ("a", op.unfreezer) );
+   // GOV-R9-01: permissionless registry membership is not a mandate to clear a
+   // freeze; only the elected set may. Additive, fail-closed, registry lookup
+   // retained (it identifies the member object).
+   {
+      const auto& elected = d.get_global_properties().active_committee_members;
+      FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+                 "Unfreezer ${a} is registered but not on the elected committee",
+                 ("a", op.unfreezer) );
+   }
     FC_ASSERT( _oracle->options.frozen,
                "Oracle ${o} is not frozen; unfreeze is a no-op refused", ("o", op.oracle) );
     // Clearing after resolution only: an open dispute must resolve (or expire)

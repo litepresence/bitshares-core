@@ -55,6 +55,9 @@ class seasoning_record_object : public abstract_object<seasoning_record_object, 
       bool           verifier_set = false; ///< Independent-verifier bit; once-only, never cleared
       account_id_type verifier;        ///< Recorded verifier identity; valid iff verifier_set
       bool           complete = false; ///< Recomputed every sweep; the future issuance gate reads it
+      uint64_t       breach_count = 0; ///< Monotonic breaching-sweep count (AC-15c); never cleared
+                                       ///< so a third party can reconstruct ungated days from
+                                       ///< (breach_count, window_start, genesis_time) alone
 };
 
 struct by_seasoning_pair; ///< seasoning records by pair (unique)

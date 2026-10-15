@@ -21,11 +21,14 @@
 #include <graphene/chain/account_object.hpp>
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/issuance_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
@@ -34,6 +37,7 @@
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/fee_schedule.hpp>
 #include <graphene/protocol/issuance_ops.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
@@ -281,6 +285,11 @@ struct h2i_door
    oracle_id_type oracle;
 };
 
+void h2i_season_pair(
+      database_fixture& f,
+      const account_object& bob, const fc::ecc::private_key& bob_key,
+      const h2i_door& d );
+
 /**
  * Full door setup: committee seat, references, bonded oracle (producer bond
  * + live publish at H2I_BASE/H2I_QUOTE), UIA pair + FXR junior, vault bound
@@ -337,6 +346,9 @@ h2i_door h2i_open_door(
    d.pair = pair;
    d.fxr = fxr;
    d.oracle = oid;
+   // AC-08: every door pair seasons at open (h2j twin); pre-existing mints
+   // exercise the seasoned path unchanged.
+   h2i_season_pair( f, bob, bob_key, d );
    return d;
 }
 
@@ -374,6 +386,52 @@ void h2i_mint_throws(
    set_expiration( f.db, tx );
    tx.sign( key, f.db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( f.db, tx ), fc::exception );
+}
+
+/**
+ * AC-08 test fixture (h2j_season_pair twin): season @p d's pair so the mint
+ * door admits -- independent verifier (bob is neither the pair's issuer nor
+ * in its vault-authority walk) plus the 90-day production clock via backdate
+ * (hand-set twin precedent, no test-only constants). Coverage holds by
+ * construction (full-size vault bond vs tiny books reads saturated).
+ */
+void h2i_season_pair(
+      database_fixture& f,
+      const account_object& bob, const fc::ecc::private_key& bob_key,
+      const h2i_door& d )
+{
+   // Idempotent seat (h2j_make_committee_member twin: the opener seats
+   // alice unconditionally, and multi-door tests re-enter this helper with
+   // the same bob -- a bare create would double-seat).
+   {
+      const account_object& live = bob.get_id()( f.db );
+      if( !live.is_lifetime_member() )
+         f.upgrade_to_lifetime_member( live );
+      const auto& idx = f.db.get_index_type<committee_member_index>()
+                           .indices().get<by_account>();
+      if( idx.find( bob.get_id() ) == idx.end() )
+         f.create_and_seat_committee_member( live );
+   }
+   seasoning_verify_operation vop;
+   vop.verifier = bob.get_id();
+   vop.pair     = d.pair;
+   signed_transaction vtx;
+   vtx.operations.push_back( vop );
+   f.db.current_fee_schedule().set_fee( vtx.operations.back() );
+   set_expiration( f.db, vtx );
+   vtx.sign( bob_key, f.db.get_chain_id() );
+   PUSH_TX( f.db, vtx );
+   f.generate_block();
+   const auto& idx = f.db.get_index_type<seasoning_record_index>()
+                        .indices().get<by_seasoning_pair>();
+   const auto itr = idx.find( d.pair );
+   BOOST_REQUIRE( itr != idx.end() );
+   const fc::time_point_sec backdate = f.db.head_block_time()
+         - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+   f.db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+      m.window_start = backdate;
+   } );
+   BOOST_REQUIRE( h2_seasoning_complete( f.db, d.pair ) );
 }
 
 vesting_balance_id_type h2i_redeem(

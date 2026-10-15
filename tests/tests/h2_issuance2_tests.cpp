@@ -26,6 +26,8 @@
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/issuance_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -35,6 +37,7 @@
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/fee_schedule.hpp>
 #include <graphene/protocol/issuance_ops.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
@@ -289,6 +292,11 @@ struct h2j_door
    oracle_id_type oracle;
 };
 
+void h2j_season_pair(
+      database_fixture& f,
+      const account_object& bob, const fc::ecc::private_key& bob_key,
+      const h2j_door& d );
+
 h2j_door h2j_open_door(
       database_fixture& f,
       const account_object& alice, const fc::ecc::private_key& alice_key,
@@ -337,6 +345,10 @@ h2j_door h2j_open_door(
    d.pair = pair;
    d.fxr = fxr;
    d.oracle = oid;
+   // AC-08: every door pair seasons at open, so the pre-existing mint cases
+   // below exercise the seasoned path unchanged (the unseasoned refusal is
+   // pinned once, in seasoning_gate_refuses_unseasoned_mint_ac08).
+   h2j_season_pair( f, bob, bob_key, d );
    return d;
 }
 
@@ -374,6 +386,44 @@ void h2j_mint_throws(
    set_expiration( f.db, tx );
    tx.sign( key, f.db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( f.db, tx ), fc::exception );
+}
+
+/**
+ * AC-08 test fixture: season @p d's pair so the mint door admits. Three
+ * legs, mirroring the hand-set twin precedent in h2_seasoning_tests:
+ * independent verifier (bob is neither the pair's issuer nor in its
+ * vault-authority walk -- both name alice -- so the AC-16 gate admits him),
+ * then the 90-day production clock via backdate (no test-only constants:
+ * GRAPHENE_H2_SEASONING_WINDOW_SEC). Coverage holds by construction (vault
+ * bond 1.34e12 vs tiny books reads saturated). Sealing generate_block calls
+ * follow the h2s_set_books pending-session precedent.
+ */
+void h2j_season_pair(
+      database_fixture& f,
+      const account_object& bob, const fc::ecc::private_key& bob_key,
+      const h2j_door& d )
+{
+   h2j_make_committee_member( f, bob );
+   seasoning_verify_operation vop;
+   vop.verifier = bob.get_id();
+   vop.pair     = d.pair;
+   signed_transaction vtx;
+   vtx.operations.push_back( vop );
+   f.db.current_fee_schedule().set_fee( vtx.operations.back() );
+   set_expiration( f.db, vtx );
+   vtx.sign( bob_key, f.db.get_chain_id() );
+   PUSH_TX( f.db, vtx );
+   f.generate_block();
+   const auto& idx = f.db.get_index_type<seasoning_record_index>()
+                        .indices().get<by_seasoning_pair>();
+   const auto itr = idx.find( d.pair );
+   BOOST_REQUIRE( itr != idx.end() );
+   const fc::time_point_sec backdate = f.db.head_block_time()
+         - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+   f.db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+      m.window_start = backdate;
+   } );
+   BOOST_REQUIRE( h2_seasoning_complete( f.db, d.pair ) );
 }
 
 vesting_balance_id_type h2j_redeem(
@@ -2545,6 +2595,89 @@ BOOST_AUTO_TEST_CASE( h2_iss_r9_07_fresh_pin_admits )
    // Lock scope: issuer-direct issue on the PAIR still admits post-pin.
    h2j_pilot_issue( *this, alice_id, alice_private_key, d.pair, alice_id,
                     share_type( 1 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// AC-08 (T4): the mint door is seasoning-gated (BSIP-1 section 5). An
+/// unseasoned pair refuses naming seasoning; the same mint admits once the
+/// pair seasons (independent verifier + 90-day clock + coverage). The
+/// un-seasoning below resets the continuous-hold start to head-block time,
+/// proving the gate reads live clock state rather than a one-time flag.
+BOOST_AUTO_TEST_CASE( seasoning_gate_refuses_unseasoned_mint_ac08 )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSEAS", "HYSEASF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "S" );
+   // Un-season: the opener seasons every door, so restart the hold at head
+   // time (sealed into a block first, h2s_set_books precedent).
+   generate_block();
+   {
+      const auto& idx = db.get_index_type<seasoning_record_index>()
+                           .indices().get<by_seasoning_pair>();
+      const auto itr = idx.find( d.pair );
+      BOOST_REQUIRE( itr != idx.end() );
+      const fc::time_point_sec fresh = db.head_block_time();
+      db.modify( *itr, [&fresh]( seasoning_record_object& m ) {
+         m.window_start = fresh;
+      } );
+   }
+   BOOST_REQUIRE( !h2_seasoning_complete( db, d.pair ) );
+
+   // Refusal side first: the mint names seasoning, never another gate.
+   {
+      hybrid_mint_operation op;
+      op.minter        = alice_id;
+      op.vault         = d.vault;
+      op.deposit       = asset( share_type( 140000 ), asset_id_type() );
+      op.stable_amount = share_type( 1000 );
+      op.fxr_asset     = d.fxr;
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      db.current_fee_schedule().set_fee( tx.operations.back() );
+      set_expiration( db, tx );
+      tx.sign( alice_private_key, db.get_chain_id() );
+      try { PUSH_TX( db, tx ); }
+      catch( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE( e.to_string().find( "seasoning" ) != std::string::npos,
+               "unseasoned mint refused off-gate: " << e.to_string() );
+      }
+      catch( ... ) { BOOST_FAIL( "unseasoned mint refused without an fc::exception" ); }
+      BOOST_CHECK_MESSAGE( h2j_find_reserve( *this, d.pair ) == nullptr,
+            "unseasoned mint was ACCEPTED: the door must stay shut before seasoning" );
+   }
+
+   // Seasoned: the same mint admits (fixture satisfiable in-test: verifier
+   // + backdated 90-day clock + saturated coverage, no consensus change).
+   // The verifier bit is once-only and survives the un-seasoning above, so
+   // re-seasoning only rewinds the continuous-hold start (no second verify:
+   // double attestation is refused by construction).
+   generate_block();
+   {
+      const auto& idx = db.get_index_type<seasoning_record_index>()
+                           .indices().get<by_seasoning_pair>();
+      const auto itr = idx.find( d.pair );
+      BOOST_REQUIRE( itr != idx.end() );
+      const fc::time_point_sec backdate = db.head_block_time()
+            - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+      db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+         m.window_start = backdate;
+      } );
+   }
+   BOOST_REQUIRE( h2_seasoning_complete( db, d.pair ) );
+   h2j_mint( *this, alice_id, alice_private_key, d,
+             share_type( 140000 ), share_type( 1000 ) );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->bts_balance == share_type( 140000 ) );
+   BOOST_CHECK( r->stable_supply == share_type( 1000 ) );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

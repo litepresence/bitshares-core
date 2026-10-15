@@ -62,16 +62,16 @@ namespace graphene { namespace chain {
     */
    void process_h2_seasoning( database& d );
 
-   /**
-    * @return whether the pair's seasoning is complete: 90 days elapsed
-    * since the (re)start AND full-window minimums intact AND the
-    * independent-verifier bit set.
-    *
-    * FUTURE ISSUANCE GATE: the tranched issuance phase's mint evaluators
-    * will call this to refuse USD issuance on unseasoned pairs. No callers
-    * yet except tests -- the predicate is pinned here so the gate and the
-    * sweep cannot drift apart.
-    */
+    /**
+     * @return whether the pair's seasoning is complete: 90 days elapsed
+     * since the (re)start AND full-window minimums intact AND the
+     * independent-verifier bit set.
+     *
+     * USD-ISSUANCE STAGING GATE (AC-08, BSIP-1 section 5): the tranched
+     * issuance phase's mint evaluator calls this to refuse USD issuance on
+     * unseasoned pairs (hybrid_mint_evaluator::do_evaluate). The predicate
+     * is pinned here so the gate and the sweep cannot drift apart.
+     */
    bool h2_seasoning_complete( const database& d, asset_id_type pair );
 
 } } // graphene::chain

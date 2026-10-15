@@ -37,6 +37,8 @@
 #include <fc/io/raw.hpp>
 #include <fc/uint128.hpp>
 
+#include <limits>
+
 namespace graphene { namespace chain {
 
 namespace {
@@ -147,6 +149,7 @@ void h2_create_seasoning_record( database& d, asset_id_type pair,
       r.min_oracle_bps = H2_SEASONING_BPS_SATURATE;
       r.verifier_set = false;
       r.complete = false;
+      r.breach_count = 0;
    } );
 }
 
@@ -210,11 +213,17 @@ void process_h2_seasoning( database& d )
          // CONTINUOUS-HOLD, not cumulative: any breaching sweep restarts the
          // 90-day clock at head-block time and reopens the minimums at the
          // current (breaching) values. Partial-window cover cannot bank.
+         // AC-15c: the breach is COUNTED, never erased -- breach_count rises
+         // monotonically (saturating at uint64 max, never wrapping) and is
+         // never cleared by covered sweeps, so a third party can reconstruct
+         // the ungated days from (breach_count, window_start, genesis_time).
          d.modify( *ritr, [&]( seasoning_record_object& r ) {
             r.window_start = now;
             r.min_vault_bps = cur_vault_bps;
             r.min_oracle_bps = cur_oracle_bps;
             r.complete = false;
+            if( r.breach_count < std::numeric_limits<uint64_t>::max() )
+               ++r.breach_count;
          } );
       }
    }
@@ -301,6 +310,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::seasoning_record_object, (graph
                     (verifier_set)
                     (verifier)
                     (complete)
+                    (breach_count)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::seasoning_record_object )

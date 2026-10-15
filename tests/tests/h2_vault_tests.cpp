@@ -41,17 +41,22 @@
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
 #include <graphene/protocol/htlc.hpp>
 #include <graphene/protocol/issuance_ops.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
 
 #include "../common/database_fixture.hpp"
+
+#include <limits>
 
 using namespace graphene::chain;
 using namespace graphene::chain::test;
@@ -1797,6 +1802,54 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
    h2c_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    BOOST_REQUIRE( h2_read_pair_price( db, vid2( db ), 0, db.head_block_time() ).valid() );
+
+   // AC-08: the re-registered pair inherits its standing seasoning record
+   // (R9-I9: the window does NOT restart on recovery), but the record never
+   // completed in-test (no verifier, clock fresh) -- season it here so the
+   // mint below exercises the seasoned path. Verifier is alice: the pair's
+   // issuer and vault authority are both bob, so seated alice is independent
+   // under AC-16.
+   //
+   // Hand-set swept state (both legs, documented): this pair spent its whole
+   // pre-recovery life UNBOUND across many maintenance crossings, and every
+   // unbound sweep is a recorded breach reset with min_oracle_bps reopened
+   // at 0. Covered folds only ever take min(old, cur), so a 0 minimum never
+   // recovers through any public path -- backdating the start alone cannot
+   // season this pair. The minimums below therefore reconstruct the
+   // creation-open state (saturating, the same values a first covered sweep
+   // folds on a promptly-bound production pair) that the unbound era
+   // destroyed; the breach_count is deliberately LEFT in place, so the
+   // ungated history stays reconstructable. No mint assert below is touched.
+   // CONCERN (T4 report): one breaching sweep permanently bricks a pair's
+   // seasoning under these fold semantics -- see the task report.
+   {
+      seasoning_verify_operation vop;
+      vop.verifier = alice_id;
+      vop.pair     = pair;
+      signed_transaction vtx; vtx.operations.push_back( vop );
+      db.current_fee_schedule().set_fee( vtx.operations.back() );
+      set_expiration( db, vtx );
+      vtx.sign( alice_private_key, db.get_chain_id() );
+      PUSH_TX( db, vtx );
+   }
+   generate_block();
+   {
+      const auto& idx = db.get_index_type<seasoning_record_index>()
+                           .indices().get<by_seasoning_pair>();
+      const auto itr = idx.find( pair );
+      BOOST_REQUIRE( itr != idx.end() );
+      const fc::time_point_sec backdate = db.head_block_time()
+            - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+      db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+         m.window_start = backdate;
+         // Saturating-bps open (== H2_SEASONING_BPS_SATURATE, local to
+         // seasoning.cpp): the creation-open state, so the next covered
+         // fold takes current coverages verbatim.
+         m.min_vault_bps = std::numeric_limits<uint32_t>::max();
+         m.min_oracle_bps = std::numeric_limits<uint32_t>::max();
+      } );
+   }
+   BOOST_REQUIRE( h2_seasoning_complete( db, pair ) );
 
    const asset_id_type fxr = h2c_create_uia( *this, alice_id, alice_private_key, "R9I9F" );
    hybrid_mint_operation mop;

@@ -33,6 +33,7 @@
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
@@ -958,6 +959,17 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
    FC_ASSERT( _vault->vault_pair != asset_id_type(),
               "The bond asset is never its own stable: reflexive mint refused" );
    FC_ASSERT( pair_asset->can_create_new_supply(), "Pair asset can create no new supply" );
+
+   // Seasoning gate (AC-08, BSIP-1 section 5 staging): no senior prints on
+   // an unseasoned pair. The pair must hold vault coverage >= 2.0 and
+   // oracle coverage >= 1.0 continuously for the 90-day window with the
+   // independent-verifier bit set. Fail-closed: a missing record reads
+   // incomplete, never open. Placed after the price leg so pre-price
+   // refusals still name the hardfork gate (H1-03 vacuity preserved).
+   FC_ASSERT( h2_seasoning_complete( d, _vault->vault_pair ),
+              "Pair ${p} is not seasoned: 90-day coverage with an independent "
+              "verifier is required before issuance",
+              ("p", _vault->vault_pair) );
 
    // Junior token: pinned at reserve creation (first-freeze precedent),
    // matched thereafter. Same non-reflexive shape: neither the pair nor

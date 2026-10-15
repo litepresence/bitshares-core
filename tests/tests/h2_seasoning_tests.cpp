@@ -877,4 +877,48 @@ BOOST_AUTO_TEST_CASE( related_party_verifier_refused )
    BOOST_CHECK_EQUAL( h2s_find_record( *this, pair_b ).verifier_set, false );
 } FC_LOG_AND_RETHROW() }
 
+BOOST_AUTO_TEST_CASE( breach_count_monotonic_ac15c )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 5000000000000LL ) );
+   fund( bob, asset( 5000000000000LL ) );
+   h2s_make_committee_member( *this, alice );
+   const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   const h2s_covered_pair cp = h2s_make_covered_pair(
+         *this, alice_id, alice_private_key, bob_id, bob_private_key,
+         "SEASC15", "SEASC15.USD", bts_ref, usd_ref );
+   // Genesis: no breach observed yet.
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).breach_count, 0u );
+   // Half-book liabilities: vault 2.0x / oracle 1.5x integer-exact.
+   h2s_set_books( *this, cp.vault, H2S_VAULT_RAW / 2 );
+
+   // Covered sweep: no breach counted, start untouched.
+   h2s_run_maintenance( *this );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).breach_count, 0u );
+
+   // Breach: full-book liabilities read vault 1.0x / oracle 0.75x.
+   h2s_set_books( *this, cp.vault, H2S_VAULT_RAW );
+   h2s_run_maintenance( *this );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).breach_count, 1u );
+   const fc::time_point_sec restarted = h2s_find_record( *this, cp.pair ).window_start;
+
+   // Restored coverage resumes without clearing the count: the breach stays
+   // reconstructable (count 1 + window_start > genesis proves ungated days).
+   h2s_set_books( *this, cp.vault, H2S_VAULT_RAW / 2 );
+   h2s_run_maintenance( *this );
+   BOOST_CHECK( h2s_find_record( *this, cp.pair ).window_start == restarted );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).breach_count, 1u );
+
+   // Second breach: the counter advances again, never resets.
+   h2s_set_books( *this, cp.vault, H2S_VAULT_RAW );
+   h2s_run_maintenance( *this );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, cp.pair ).breach_count, 2u );
+   BOOST_CHECK( h2s_find_record( *this, cp.pair ).window_start > restarted );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

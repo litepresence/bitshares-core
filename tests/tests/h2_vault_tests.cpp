@@ -1525,8 +1525,11 @@ BOOST_AUTO_TEST_CASE( vault_challenge_refused_against_winddown_vault )
    BOOST_CHECK_EQUAL( sib( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
 } FC_LOG_AND_RETHROW() }
 
-/// pair_freeze closes the protocol door AND the debt tap in one atomic apply:
-/// after one op the vault blocks mints and the oracle stops promoting.
+/// pair_freeze binds in one atomic apply and closes the protocol door AND
+/// the debt tap only over live debt: at zero outstanding the binding pins
+/// with the door open (R11R2 first-mint reachability); with debt on the book
+/// the same op still shuts both. After one op the oracle stops promoting
+/// exactly when the door closes.
 BOOST_AUTO_TEST_CASE( pair_freeze_closes_door_and_debt_atomically )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
@@ -1561,9 +1564,10 @@ BOOST_AUTO_TEST_CASE( pair_freeze_closes_door_and_debt_atomically )
    BOOST_CHECK_EQUAL( vid( db ).frozen, false );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
 
-   // Committee freeze closes both in one atomic apply: PUSH_TX applies
-   // without producing a block, so both flags flip with no intervening block
-   // in which the door could read closed while debt reads open (or reverse).
+   // Committee freeze at zero debt binds without closing in one atomic
+   // apply: PUSH_TX applies without producing a block, so the pin and the
+   // (unmoved) flags land with no intervening block in which the door could
+   // read closed while debt reads open (or reverse).
    const uint32_t block_before = db.head_block_num();
    pair_freeze_operation op;
    op.freezer = alice_id;
@@ -1574,9 +1578,29 @@ BOOST_AUTO_TEST_CASE( pair_freeze_closes_door_and_debt_atomically )
    set_expiration( db, tx );
    tx.sign( alice_private_key, db.get_chain_id() );
    PUSH_TX( db, tx );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   BOOST_CHECK( *vid( db ).bound_oracle == oid );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
+   BOOST_CHECK_EQUAL( db.head_block_num(), block_before );
+
+   // The same op over live debt still shuts both: book the vault (sealed
+   // into a block first per the pending-session rule), then re-freeze in a
+   // fresh block (same-block repeats are duplicate transactions).
+   generate_block();
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW / 2 );
+   generate_block();
+   pair_freeze_operation op2;
+   op2.freezer = alice_id;
+   op2.vault   = vid;
+   op2.oracle  = oid;
+   signed_transaction tx2; tx2.operations.push_back( op2 );
+   db.current_fee_schedule().set_fee( tx2.operations.back() );
+   set_expiration( db, tx2 );
+   tx2.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, tx2 );
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
    BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
-   BOOST_CHECK_EQUAL( db.head_block_num(), block_before );
 } FC_LOG_AND_RETHROW() }
 
 /// Sub-vault bound: at most 64 bond locks per vault (tBTC per-deposit lesson);

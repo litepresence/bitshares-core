@@ -1171,7 +1171,9 @@ BOOST_AUTO_TEST_CASE( rotate_requires_full_old_threshold_weight )
 
 /// Canonical pair<->oracle binding: the first pair_freeze pins it; any later
 /// freeze naming a different oracle is refused; re-freezing the bound pair
-/// stays atomic.
+/// stays atomic. R11R2: the bind no longer closes the door at zero debt --
+/// the pin lands with the door and the debt tap open (close-race freeze only
+/// over live debt).
 BOOST_AUTO_TEST_CASE( pair_freeze_pins_canonical_binding_and_enforces_it )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
@@ -1194,12 +1196,13 @@ BOOST_AUTO_TEST_CASE( pair_freeze_pins_canonical_binding_and_enforces_it )
          *this, alice_id, alice_private_key, vault_auth );
 
    BOOST_CHECK( !vid( db ).bound_oracle.valid() );
-   // First freeze pins the binding and still closes both atomically.
+   // First freeze pins the binding; at zero debt the door and the debt tap
+   // stay open (R11R2 bind/freeze decoupling, still one atomic apply).
    h2e_freeze( *this, alice_id, alice_private_key, vid, o1 );
    BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
    BOOST_CHECK( *vid( db ).bound_oracle == o1 );
-   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
-   BOOST_CHECK_EQUAL( o1( db ).options.frozen, true );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false );
+   BOOST_CHECK_EQUAL( o1( db ).options.frozen, false );
 
    // A later freeze naming a different oracle is refused: scope can never
    // silently swing to an unrelated debt tap.
@@ -1214,13 +1217,14 @@ BOOST_AUTO_TEST_CASE( pair_freeze_pins_canonical_binding_and_enforces_it )
    BOOST_CHECK_THROW( PUSH_TX( db, btx ), fc::exception );
    BOOST_CHECK_EQUAL( o2( db ).options.frozen, false );
 
-    // Re-freezing the bound pair is still accepted (idempotent, atomic).
+    // Re-freezing the bound pair is still accepted (idempotent, atomic);
+    // at zero debt it still binds-without-closing.
     // New block first: the identical freeze in the same block is the identical
     // transaction and is refused as a duplicate, not as economics.
     generate_block();
     h2e_freeze( *this, alice_id, alice_private_key, vid, o1 );
-   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
-   BOOST_CHECK_EQUAL( o1( db ).options.frozen, true );
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false );
+   BOOST_CHECK_EQUAL( o1( db ).options.frozen, false );
 } FC_LOG_AND_RETHROW() }
 
 /// H1 pairs excluded from H2 medians: pools on vault-less pairs never sample,

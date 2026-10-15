@@ -153,6 +153,20 @@ void h2_create_seasoning_record( database& d, asset_id_type pair,
    } );
 }
 
+void h2_reseed_seasoning_on_bind( database& d, asset_id_type pair )
+{
+   const seasoning_record_object* r = h2_find_seasoning( d, pair );
+   if( r == nullptr )
+      return;
+   const auto now = d.head_block_time();
+   d.modify( *r, [&now]( seasoning_record_object& m ) {
+      m.window_start = now;
+      m.min_vault_bps = H2_SEASONING_BPS_SATURATE;
+      m.min_oracle_bps = H2_SEASONING_BPS_SATURATE;
+      m.complete = false;
+   } );
+}
+
 void process_h2_seasoning( database& d )
 {
    if( !HARDFORK_H2_GATEWAY_PASSED( d.head_block_time() ) )
@@ -172,21 +186,26 @@ void process_h2_seasoning( database& d )
       bool oracle_ok = false;
       if( vitr != pair_idx.end() )
       {
+         // R11R2: an unbound pair names no bonded price series, so the
+         // oracle leg cannot be measured -- and measuring it as zero would
+         // poison min_oracle_bps to 0 with no recovery (covered sweeps fold
+         // min(), so the poison sticks forever past binding and no
+         // consensus path reaches first mint). The record is skipped
+         // outright until the bind reseeds it (pair_freeze first pin): no
+         // window move, no minimums touch, no breach counted. The
+         // completion helper fail-closes unbound pairs, so the skip can
+         // never read open.
+         if( !vitr->bound_oracle.valid() )
+            continue;
          debt = vitr->outstanding;
          cur_vault_bps = h2_seasoning_coverage_bps(
                h2_seasoning_vault_backing( d, vault_id_type( vitr->id ) ), debt );
          vault_ok = cur_vault_bps >= GRAPHENE_H2_SEASONING_VAULT_MIN_BPS;
-         // The oracle leg needs the canonical binding (pinned by the first
-         // pair_freeze): an unbound pair names no bonded price series, so it
-         // cannot show oracle coverage >= 1.0 and the clock cannot accrue.
-         // The window therefore floats to binding -- documented, not
-         // incidental: every pre-binding sweep is a recorded breach reset.
-         if( vitr->bound_oracle.valid() )
-         {
-            cur_oracle_bps = h2_seasoning_coverage_bps(
-                  h2_seasoning_oracle_backing( d, *vitr->bound_oracle ), debt );
-            oracle_ok = cur_oracle_bps >= GRAPHENE_H2_SEASONING_ORACLE_MIN_BPS;
-         }
+         // Bound here (unbound records skipped above): measure the oracle leg
+         // through the canonical binding pinned by the first pair_freeze.
+         cur_oracle_bps = h2_seasoning_coverage_bps(
+               h2_seasoning_oracle_backing( d, *vitr->bound_oracle ), debt );
+         oracle_ok = cur_oracle_bps >= GRAPHENE_H2_SEASONING_ORACLE_MIN_BPS;
       }
       // A missing vault is unreachable (records are created with their
       // vault, which is never deleted); treated as a dual breach so the
@@ -233,6 +252,14 @@ bool h2_seasoning_complete( const database& d, asset_id_type pair )
 {
    const seasoning_record_object* r = h2_find_seasoning( d, pair );
    if( r == nullptr )
+      return false;
+   // R11R2 fail-closed: an unbound pair names no bonded price series, so it
+   // never reads complete no matter what the swept minimums say (pre-bind
+   // sweeps are skipped outright, leaving the saturating genesis minimums in
+   // place -- without this the skip would read open after 90 days).
+   const auto& vault_idx = d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+   const auto vitr = vault_idx.find( pair );
+   if( vitr == vault_idx.end() || !vitr->bound_oracle.valid() )
       return false;
    const auto now = d.head_block_time();
    return ( now >= r->window_start + GRAPHENE_H2_SEASONING_WINDOW_SEC )

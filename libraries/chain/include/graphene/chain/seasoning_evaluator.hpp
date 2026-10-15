@@ -48,24 +48,38 @@ namespace graphene { namespace chain {
     * `vault_register` apply step (gateway-leg activation for the pair).
     */
    void h2_create_seasoning_record( database& d, asset_id_type pair,
-                                    time_point_sec now );
+                                     time_point_sec now );
 
    /**
-    * Seasoning sweep (H2-gated no-op pre-gateway): for every record, folds
-    * the current vault/oracle coverages into the full-window minimums and
-    * recomputes `complete`. Any sweep with vault coverage < 2.0 or oracle
-    * coverage < 1.0 marks breach: the window restarts at head-block time
-    * and the minimums reopen at the current (breaching) values. Reads H2
-    * bonded state only -- H1 inputs are absent by construction, so H1
-    * freezes can neither pause nor extend the clock. Runs after the H2d
-    * oracle sweep in perform_chain_maintenance().
+    * Reseeds the pair's seasoning record at canonical binding (first
+    * pair_freeze pin): the window restarts at head-block time and both
+    * minimums reopen at saturation, so the first bound sweep folds the
+    * current coverages verbatim. No-op when the pair carries no record
+    * (records are created with their vault, which is never deleted).
+    * breach_count is preserved, never cleared; complete is recomputed by
+    * the next sweep. Called from the pair_freeze apply step.
     */
-   void process_h2_seasoning( database& d );
+   void h2_reseed_seasoning_on_bind( database& d, asset_id_type pair );
+
+    /**
+     * Seasoning sweep (H2-gated no-op pre-gateway): for every record, folds
+     * the current vault/oracle coverages into the full-window minimums and
+     * recomputes `complete`. Any sweep with vault coverage < 2.0 or oracle
+     * coverage < 1.0 marks breach: the window restarts at head-block time
+     * and the minimums reopen at the current (breaching) values. Records on
+     * unbound pairs are skipped outright (R11R2: no binding names no series;
+     * the bind reseeds the clock) -- a missing vault still fails closed as a
+     * dual breach. Reads H2 bonded state only -- H1 inputs are absent by
+     * construction, so H1 freezes can neither pause nor extend the clock.
+     * Runs after the H2d oracle sweep in perform_chain_maintenance().
+     */
+    void process_h2_seasoning( database& d );
 
     /**
      * @return whether the pair's seasoning is complete: 90 days elapsed
      * since the (re)start AND full-window minimums intact AND the
-     * independent-verifier bit set.
+     * independent-verifier bit set. Unbound pairs never read complete
+     * (R11R2 fail-closed: no binding names no bonded price series).
      *
      * USD-ISSUANCE STAGING GATE (AC-08, BSIP-1 section 5): the tranched
      * issuance phase's mint evaluator calls this to refuse USD issuance on

@@ -682,9 +682,11 @@ BOOST_AUTO_TEST_CASE( h1_freeze_and_publish_storm_cannot_move_clock )
 } FC_LOG_AND_RETHROW() }
 
 /// No binding, no clock: an unbound pair names no bonded price series, so
-/// every sweep is a recorded breach reset (oracle minimum reads 0) and the
-/// pair can never complete -- even verified, even after 90 days. The window
-/// floats to binding by construction.
+/// every sweep skips its record outright (R11R2: no window move, no
+/// minimums touch, no breach counted -- measuring the oracle leg as zero
+/// would poison the minimums past binding) and the pair can never complete
+/// while unbound (the helper fail-closes) -- even verified, even after 90
+/// days. The window floats to binding by construction: the bind reseeds it.
 BOOST_AUTO_TEST_CASE( unbound_pair_never_completes )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
@@ -712,8 +714,13 @@ BOOST_AUTO_TEST_CASE( unbound_pair_never_completes )
 
    generate_blocks( genesis + GRAPHENE_H2_SEASONING_WINDOW_SEC + 86400 );
    h2s_run_maintenance( *this );
-   BOOST_CHECK( h2s_find_record( *this, pair ).window_start > genesis );
-   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair ).min_oracle_bps, 0u );
+   // Skipped outright: the start never moved, the saturating genesis
+   // minimums are untouched, no breach was counted -- and the pair still
+   // never completes while unbound.
+   BOOST_CHECK( h2s_find_record( *this, pair ).window_start == genesis );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair ).min_vault_bps, 0xFFFFFFFFu );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair ).min_oracle_bps, 0xFFFFFFFFu );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair ).breach_count, 0u );
    BOOST_CHECK_EQUAL( h2s_find_record( *this, pair ).complete, false );
    BOOST_CHECK( !h2_seasoning_complete( db, pair ) );
 } FC_LOG_AND_RETHROW() }

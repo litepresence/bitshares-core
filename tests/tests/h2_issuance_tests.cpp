@@ -1532,4 +1532,210 @@ BOOST_AUTO_TEST_CASE( band_partition_conservation_enforced_at_every_writer )
                                    share_type( 130000 ), share_type( 1000 ) ) );
 } FC_LOG_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// R11R2 (AC-R11-01/02, PC-R11-01/02): first-mint reachability -- door race +
+// seasoning poison. Both legs run on public ops only with zero DB surgery,
+// over live 91-day head-block-time travel with a daily publish.
+// ---------------------------------------------------------------------------
+
+/// R11R2 leg (a), door race: register -> pair_freeze -> sweep -> mint. The
+/// freeze was the sole bound_oracle writer and co-set frozen=true, while mint
+/// needs the bound price and refuses frozen doors -- so no consensus path
+/// reached first mint (suites reopened the flags by surgery). Post-fix the
+/// bind at zero debt leaves the door and the debt tap open, and this path
+/// reaches a real mint.
+BOOST_AUTO_TEST_CASE( r11r2_first_mint_reachable_after_zero_debt_bind )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2i_make_committee_member( *this, alice );
+   h2i_make_committee_member( *this, bob );
+   const auto bts_ref = h2i_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2i_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[ bob_id ] = oracle_producer_entry( 1 );
+   // 120-day print lifetime: the 91-day hold below must read live throughout.
+   opts.value_lifetime_sec = 120 * 86400;
+   const oracle_id_type oid = h2i_make_oracle(
+         *this, alice_id, alice_private_key, "R11R2A.USD", bts_ref, usd_ref, opts );
+   const auto obvest = h2i_make_cdd_vesting( *this, bob_id, bob_private_key, H2I_ORACLE_RAW );
+   h2i_lock_producer_bond( *this, bob_id, bob_private_key, oid, obvest,
+                           H2I_ORACLE_RAW, GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS );
+
+   const asset_id_type pair = h2i_create_uia( *this, alice_id, alice_private_key, "R11R2A" );
+   const asset_id_type fxr = h2i_create_uia( *this, alice_id, alice_private_key, "R11R2AF" );
+   const vault_id_type vid = h2i_register_vault(
+         *this, alice_id, alice_private_key, authority( 1, alice_id, 1 ),
+         H2I_VAULT_RAW, H2I_VAULT_USD_CENTS, pair );
+   const auto vbvest = h2i_make_cdd_vesting( *this, bob_id, bob_private_key, H2I_VAULT_RAW );
+   h2i_lock_vault_bond( *this, bob_id, bob_private_key, vid, vbvest,
+                        H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // Bind at zero outstanding: the pin lands, the door and the debt tap stay open.
+   h2i_freeze( *this, alice_id, alice_private_key, vid, oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   BOOST_CHECK( *vid( db ).bound_oracle == oid );
+   BOOST_CHECK_MESSAGE( !vid( db ).frozen,
+         "R11R2(a): zero-debt bind shut the vault door" );
+   BOOST_CHECK_MESSAGE( !oid( db ).options.frozen,
+         "R11R2(a): zero-debt bind froze the debt tap" );
+
+   h2i_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_CHECK_MESSAGE(
+         h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid(),
+         "R11R2(a): no bonded live price after bind+publish" );
+
+   // Independent verifier: bob is neither the pair's issuer nor in its
+   // vault-authority walk (h2i_season_pair precedent).
+   {
+      seasoning_verify_operation vop;
+      vop.verifier = bob_id;
+      vop.pair     = pair;
+      signed_transaction vtx;
+      vtx.operations.push_back( vop );
+      db.current_fee_schedule().set_fee( vtx.operations.back() );
+      set_expiration( db, vtx );
+      vtx.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, vtx );
+   }
+
+   // Live 91-day hold: the daily publish keeps the bonded-live set ahead of
+   // its advancing unlock; every hop crosses maintenance (real sweeps).
+   // Seal setup into a block first: the pre-loop publish above and the day-1
+   // publish below would otherwise share head time and collide as duplicates.
+   generate_block();
+   for( int day = 1; day <= 91; ++day )
+   {
+      h2i_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+      generate_blocks( db.head_block_time() + 86400 );
+   }
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+
+   BOOST_CHECK_MESSAGE( h2_seasoning_complete( db, pair ),
+         "R11R2(a): pair not seasoned after 91 bound covered days" );
+
+   hybrid_mint_operation mop;
+   mop.minter        = alice_id;
+   mop.vault         = vid;
+   mop.deposit       = asset( share_type( 260000 ), asset_id_type() );
+   mop.stable_amount = share_type( 1000 );
+   mop.fxr_asset     = fxr;
+   const string err = h2i_outcome( *this, mop, alice_private_key );
+   BOOST_CHECK_MESSAGE( err.empty(),
+         "R11R2(a): first mint refused after zero-debt bind: " << err );
+   BOOST_CHECK( db.get_balance( alice_id, pair ).amount == share_type( 1000 ) );
+   BOOST_CHECK( h2i_find_reserve( *this, pair ) != nullptr );
+} FC_LOG_AND_RETHROW() }
+
+/// R11R2 leg (b), seasoning poison: register -> maintenance sweep ->
+/// pair_freeze -> covered sweeps -> mint. Any pre-bind sweep poisoned
+/// min_oracle_bps to 0 with circular recovery (covered sweeps fold min(), so
+/// the poison stuck forever past binding). Post-fix the unbound sweep is
+/// skipped outright and the bind reseeds the clock, so this path mints.
+BOOST_AUTO_TEST_CASE( r11r2_pre_bind_sweep_does_not_poison_seasoning )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2i_make_committee_member( *this, alice );
+   h2i_make_committee_member( *this, bob );
+   const auto bts_ref = h2i_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2i_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[ bob_id ] = oracle_producer_entry( 1 );
+   opts.value_lifetime_sec = 120 * 86400;
+   const oracle_id_type oid = h2i_make_oracle(
+         *this, alice_id, alice_private_key, "R11R2B.USD", bts_ref, usd_ref, opts );
+   const auto obvest = h2i_make_cdd_vesting( *this, bob_id, bob_private_key, H2I_ORACLE_RAW );
+   h2i_lock_producer_bond( *this, bob_id, bob_private_key, oid, obvest,
+                           H2I_ORACLE_RAW, GRAPHENE_H2_ORACLE_MIN_BOND_USD_CENTS );
+
+   const asset_id_type pair = h2i_create_uia( *this, alice_id, alice_private_key, "R11R2B" );
+   const asset_id_type fxr = h2i_create_uia( *this, alice_id, alice_private_key, "R11R2BF" );
+   const vault_id_type vid = h2i_register_vault(
+         *this, alice_id, alice_private_key, authority( 1, alice_id, 1 ),
+         H2I_VAULT_RAW, H2I_VAULT_USD_CENTS, pair );
+   const auto vbvest = h2i_make_cdd_vesting( *this, bob_id, bob_private_key, H2I_VAULT_RAW );
+   h2i_lock_vault_bond( *this, bob_id, bob_private_key, vid, vbvest,
+                        H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   auto find_record = [&]( asset_id_type p ) -> const seasoning_record_object& {
+      const auto& idx = db.get_index_type<seasoning_record_index>()
+                           .indices().get<by_seasoning_pair>();
+      const auto itr = idx.find( p );
+      BOOST_REQUIRE( itr != idx.end() );
+      return *itr;
+   };
+   const fc::time_point_sec genesis = find_record( pair ).genesis_time;
+
+   // A maintenance sweep lands while the pair is still unbound. Post-fix it
+   // is skipped outright: no window move, no minimums touch, no breach
+   // counted (0xFFFFFFFF = the saturating genesis minimums).
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   BOOST_CHECK( find_record( pair ).window_start == genesis );
+   BOOST_CHECK_EQUAL( find_record( pair ).min_vault_bps, 0xFFFFFFFFu );
+   BOOST_CHECK_EQUAL( find_record( pair ).min_oracle_bps, 0xFFFFFFFFu );
+   BOOST_CHECK_EQUAL( find_record( pair ).breach_count, 0u );
+
+   // Bind: pins the oracle, reseeds the clock to the bind head time with
+   // reopened minimums, and leaves the zero-debt door open.
+   h2i_freeze( *this, alice_id, alice_private_key, vid, oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   BOOST_CHECK( find_record( pair ).window_start == db.head_block_time() );
+   BOOST_CHECK_EQUAL( find_record( pair ).min_vault_bps, 0xFFFFFFFFu );
+   BOOST_CHECK_EQUAL( find_record( pair ).min_oracle_bps, 0xFFFFFFFFu );
+   BOOST_CHECK_EQUAL( find_record( pair ).breach_count, 0u );
+   BOOST_CHECK_MESSAGE( !vid( db ).frozen,
+         "R11R2(b): zero-debt bind shut the vault door" );
+   BOOST_CHECK_MESSAGE( !oid( db ).options.frozen,
+         "R11R2(b): zero-debt bind froze the debt tap" );
+
+   h2i_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   {
+      seasoning_verify_operation vop;
+      vop.verifier = bob_id;
+      vop.pair     = pair;
+      signed_transaction vtx;
+      vtx.operations.push_back( vop );
+      db.current_fee_schedule().set_fee( vtx.operations.back() );
+      set_expiration( db, vtx );
+      vtx.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, vtx );
+   }
+   // Seal setup into a block first (same-head duplicate rule, see leg (a)).
+   generate_block();
+   for( int day = 1; day <= 91; ++day )
+   {
+      h2i_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+      generate_blocks( db.head_block_time() + 86400 );
+   }
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+
+   BOOST_CHECK_MESSAGE( h2_seasoning_complete( db, pair ),
+         "R11R2(b): pair not seasoned after bind + 91 covered days" );
+
+   hybrid_mint_operation mop;
+   mop.minter        = alice_id;
+   mop.vault         = vid;
+   mop.deposit       = asset( share_type( 260000 ), asset_id_type() );
+   mop.stable_amount = share_type( 1000 );
+   mop.fxr_asset     = fxr;
+   const string err = h2i_outcome( *this, mop, alice_private_key );
+   BOOST_CHECK_MESSAGE( err.empty(),
+         "R11R2(b): first mint refused after bind + covered hold: " << err );
+   BOOST_CHECK( db.get_balance( alice_id, pair ).amount == share_type( 1000 ) );
+   BOOST_CHECK( h2i_find_reserve( *this, pair ) != nullptr );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -36,6 +36,7 @@
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 
@@ -513,22 +514,41 @@ void_result pair_freeze_evaluator::do_evaluate( const pair_freeze_operation& op 
 void_result pair_freeze_evaluator::do_apply( const pair_freeze_operation& op ) const
 { try {
    database& d = db();
-   // Atomic by construction: both flags flip in this single apply step, so no
-   // block can ever observe the door closed with debt still open.
+   // Atomic by construction: the pin and any flag flips land in this single
+   // apply step, so no block can ever observe a half-bound freeze.
    const vault_object& vault = op.vault(d);
+   // R11R2: the canonical bind is decoupled from the close-race freeze. The
+   // first freeze pins the binding either way, but the door (and the debt
+   // tap) close only over live debt: at zero outstanding there is nothing to
+   // protect, and closing would brick first mint (mint needs the bound price
+   // while refusing frozen doors, with no consensus reopen for a healthy
+   // pair). Captured before the halt transition below, so debt present at
+   // freeze time always closes even if the transition settles the book.
+   const bool live_debt = ( vault.outstanding > share_type( 0 ) );
+   const bool first_pin = !vault.bound_oracle.valid();
    // ISSUANCE-2 REVERT-vs-ABSORB on halt entry (issuance pairs only; legacy
    // pairs return inside with no state touched): runs BEFORE the freeze
    // flags below because the transition reads the bonded price, and a
    // frozen oracle reads absent (fail-closed hold). Unvested door outputs
    // REVERT, market shortfalls ABSORB from the offset pool first.
    h2_issue_on_pair_halt( d, vault.vault_pair );
-   d.modify( vault, [&op]( vault_object& v ) {
-      v.frozen = true;
+   d.modify( vault, [&op, live_debt]( vault_object& v ) {
+      if( live_debt )
+         v.frozen = true;
       if( !v.bound_oracle.valid() )
          v.bound_oracle = op.oracle; // first freeze pins the canonical binding
    } );
-   const oracle_object& oracle = op.oracle(d);
-   d.modify( oracle, []( oracle_object& o ) { o.options.frozen = true; } );
+   if( live_debt )
+   {
+      const oracle_object& oracle = op.oracle(d);
+      d.modify( oracle, []( oracle_object& o ) { o.options.frozen = true; } );
+   }
+   // R11R2: the bind reseeds the pair's seasoning clock (window restarts at
+   // bind head time, minimums reopen at saturation): pre-bind sweeps are
+   // skipped outright, so without this the 90-day hold would measure from
+   // registration instead of from bound coverage.
+   if( first_pin )
+      h2_reseed_seasoning_on_bind( d, vault.vault_pair );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 

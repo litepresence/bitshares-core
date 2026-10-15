@@ -1597,7 +1597,9 @@ blind_confirmation wallet_api::transfer_from_blind( const string& from_blind_acc
    from_blind.inputs.push_back( {conf.outputs.back().decrypted_memo.commitment, authority() } );
    from_blind.fee  = fees.calculate_fee( from_blind, asset_obj->options.core_exchange_rate );
 
-   idump( (from_blind) );
+    // WPC-06: never dump the whole op -- transfer_from_blind_operation
+    // carries blinding_factor. Log non-secret routing context only.
+    idump( ("from_blind_spend")(from_blind.fee)(from_blind.amount)(from_blind.to) );
    conf.trx.operations.push_back(from_blind);
    ilog( "about to validate" );
    conf.trx.validate();
@@ -1757,18 +1759,22 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    fc::sha256 to_blind_factor;
    if( change.amount > 0 )
    {
-      idump(("to_blind_factor")(blind_factor) );
+       // WPC-06: blind_factor is secret -- log routing context only.
+       idump(("to_blind_with_change")(amount)(change) );
       blinding_factors.push_back( blind_factor );
       change_blind_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() - 1 );
-      wdump(("change_blind_factor")(change_blind_factor) );
+       // WPC-06: change_blind_factor is secret -- log amount only.
+       wdump(("change_blind_computed")(change) );
    }
    else // change == 0
    {
       blind_tr.outputs.resize(1);
-      blind_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() );
-      idump(("to_sum_blind_factor")(blind_factor) );
+       blind_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() );
+       // WPC-06: intermediate blind sum deleted (redundant with the
+       // no-change marker below; the scalar itself is never logged).
       blinding_factors.push_back( blind_factor );
-      idump(("nochange to_blind_factor")(blind_factor) );
+       // WPC-06: blind_factor is secret -- log routing context only.
+       idump(("to_blind_no_change")(amount) );
    }
    fc::ecc::public_key from_pub_key = from_auth_base;
    fc::ecc::public_key to_pub_key = to_auth_base;
@@ -1776,7 +1782,9 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    blind_output to_out;
    to_out.owner       = to_temp ? authority() : authority( 1, public_key_type( to_pub_key.child( child ) ), 1 );
    to_out.commitment  = fc::ecc::blind( blind_factor, amount.amount.value );
-   idump(("to_out.blind")(blind_factor)(to_out.commitment) );
+    // WPC-06: blind_factor is secret -- the commitment is public
+    // (on-chain) and is the only loggable part of this output.
+    idump(("to_out.commitment")(to_out.commitment) );
 
 
    if( blind_tr.outputs.size() > 1 )

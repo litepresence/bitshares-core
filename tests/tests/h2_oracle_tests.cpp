@@ -558,6 +558,25 @@ const recovery_state_object* h2e_find_recovery( database_fixture& f )
    return idx.empty() ? nullptr : &*idx.begin();
 }
 
+/// R11-R1 entitlement funding (public path): issues pair-token face from
+/// the pair issuer to a senior claimant. Faces must fit the $20k
+/// issuer-direct pilot cap; full-book settlements use surgery instead.
+void h2e_issue_pair_face( database_fixture& f,
+      account_id_type issuer, const fc::ecc::private_key& key,
+      account_id_type recipient, asset_id_type pair, share_type amount )
+{
+   asset_issue_operation op;
+   op.issuer           = issuer;
+   op.asset_to_issue   = asset( amount, pair );
+   op.issue_to_account = recipient;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   f.db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( f.db, tx );
+   tx.sign( key, f.db.get_chain_id() );
+   PUSH_TX( f.db, tx );
+}
+
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE( h2_oracle_tests, database_fixture )
@@ -946,8 +965,11 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    // Primary live at 100 BTS per face unit: pro-rata binds at face/100.
    h2e_publish( *this, primary, bob_id, bob_private_key, 100, 1 );
    h2e_publish( *this, backup, bob_id, bob_private_key, 200, 1 );
-   const share_type face( 1000000 );
-   const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
+    const share_type face( 1000000 );
+    // R11-R1 entitlement: carol's senior face must exist before she claims.
+    h2e_issue_pair_face( *this, alice_id, alice_private_key, carol_id,
+                         wdid( db ).pair, face );
+    const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
    winddown_claim_operation cop;
    cop.claimant     = carol_id;
    cop.winddown     = wdid;
@@ -967,8 +989,11 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    // Primary goes stale; backup stays live: the switch serves backup math.
    generate_blocks( db.head_block_time() + 90000 );
    generate_block();
-   h2e_publish( *this, backup, bob_id, bob_private_key, 200, 1 );
-   const share_type dave_before = db.get_balance( dave_id, asset_id_type() ).amount;
+    h2e_publish( *this, backup, bob_id, bob_private_key, 200, 1 );
+    // R11-R1 entitlement: dave's senior face must exist before he claims.
+    h2e_issue_pair_face( *this, alice_id, alice_private_key, dave_id,
+                         wdid( db ).pair, face );
+    const share_type dave_before = db.get_balance( dave_id, asset_id_type() ).amount;
    winddown_claim_operation dop;
    dop.claimant     = dave_id;
    dop.winddown     = wdid;
@@ -1499,9 +1524,21 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
     // New block first: the refused claim above leaves the pending undo session
     // open (same rollback hazard as the latch above).
     generate_block();
-    db.modify( *h2e_find_tripwire( *this, pairq ),
-               []( tripwire_state_object& t ) { t.redemptions_halted = false; } );
-   const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
+     db.modify( *h2e_find_tripwire( *this, pairq ),
+                []( tripwire_state_object& t ) { t.redemptions_halted = false; } );
+    // R11-R1 entitlement: carol's senior face comes from sam's pool-side
+    // holdings (pairq supply already sits AT the pilot cap, so no new
+    // issuance could fund her; a transfer moves existing face instead).
+    transfer_operation xfer;
+    xfer.from   = sam_id;
+    xfer.to     = carol_id;
+    xfer.amount = asset( share_type( 1000000 ), pairq );
+    signed_transaction xtx; xtx.operations.push_back( xfer );
+    db.current_fee_schedule().set_fee( xtx.operations.back() );
+    set_expiration( db, xtx );
+    xtx.sign( sam_private_key, db.get_chain_id() );
+    PUSH_TX( db, xtx );
+    const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
    signed_transaction htx2; htx2.operations.push_back( hop );
    db.current_fee_schedule().set_fee( htx2.operations.back() );
    set_expiration( db, htx2 );
@@ -1796,9 +1833,12 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
    // Fresh price leg for the claim itself: the loop's last publish is a full
    // window old (dual-stale at claim time), so republish like the
    // redemptions-hold precedent does before claiming.
-   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
-   generate_block();
-   const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
+    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+    generate_block();
+    // R11-R1 entitlement: carol's senior face must exist before she claims.
+    h2e_issue_pair_face( *this, alice_id, alice_private_key, carol_id,
+                         pairc, share_type( 1000000 ) );
+    const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
    signed_transaction htx2; htx2.operations.push_back( hop );
    db.current_fee_schedule().set_fee( htx2.operations.back() );
    set_expiration( db, htx2 );

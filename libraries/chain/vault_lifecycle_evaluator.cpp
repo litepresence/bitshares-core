@@ -627,6 +627,24 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
           _fxr_burn = op.claim_amount;
        }
     }
+    else
+    {
+       // R11-R1 senior entitlement (LL-R11-01): seniors prove holding.
+       // The claimant must hold >= claim face of the pair token; that
+       // face burns in do_apply (senior mirror of the junior FXR leg
+       // above, stable ledger in place of the FXR ledger).
+       FC_ASSERT( d.get_balance( op.claimant, _winddown->pair ).amount
+                  >= op.claim_amount,
+                  "Senior claims burn pair face; claimant holds "
+                  "insufficient pair balance" );
+       if( const reserve_object* reserve = h2_find_reserve( d, _winddown->pair ) )
+       {
+          FC_ASSERT( reserve->stable_supply >= op.claim_amount,
+                     "Pair-face burn exceeds the reserve stable ledger; "
+                     "mirror drift refused" );
+       }
+       _senior_burn = op.claim_amount;
+    }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -638,6 +656,7 @@ object_id_type winddown_claim_evaluator::do_apply( const winddown_claim_operatio
    // never recomputes economics, so the checked amount is the paid amount.
    const share_type payout = _payout;
    const share_type fxr_burn = _fxr_burn;
+   const share_type senior_burn = _senior_burn;
    d.adjust_balance( op.claimant, asset( payout, asset_id_type() ) );
    if( fxr_burn > share_type( 0 ) )
    {
@@ -655,6 +674,25 @@ object_id_type winddown_claim_evaluator::do_apply( const winddown_claim_operatio
       d.modify( *reserve, [&fxr_burn]( reserve_object& r ) {
          r.fxr_supply -= fxr_burn;
       } );
+   }
+   if( senior_burn > share_type( 0 ) )
+   {
+      // R11-R1: retire the senior face that just settled. The pair-token
+      // balance, its current_supply, and (on issuance pairs) the reserve
+      // stable ledger fall together (senior mirror of the junior FXR
+      // invariant the issuance suite pins).
+      d.adjust_balance( op.claimant, -asset( senior_burn, _winddown->pair ) );
+      const asset_object& pair_asset = _winddown->pair( d );
+      const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
+      d.modify( pair_dyn, [&senior_burn]( asset_dynamic_data_object& data ) {
+         data.current_supply -= senior_burn;
+      } );
+      if( const reserve_object* reserve = h2_find_reserve( d, _winddown->pair ) )
+      {
+         d.modify( *reserve, [&senior_burn]( reserve_object& r ) {
+            r.stable_supply -= senior_burn;
+         } );
+      }
    }
    const auto& new_claim = d.create<winddown_claim_object>(
          [&op, &payout]( winddown_claim_object& c ) {

@@ -310,6 +310,23 @@ void h2c_set_outstanding( database_fixture& f, vault_id_type vid, share_type amo
    f.db.modify( v, [&amount]( vault_object& m ) { m.outstanding = amount; } );
 }
 
+/// Asset-side twin of h2c_set_outstanding (R11-R1): credits pair-token face
+/// to a holder and raises current_supply together, so senior-claim
+/// entitlement checks exercise against surgery-set books the same way the
+/// liability side already does. Full-book faces sit far above the $20k
+/// issuer-direct pilot cap, so no public path could fund them in-test;
+/// test-only, no consensus path changes.
+void h2c_fund_pair_face( database_fixture& f, account_id_type holder,
+                         asset_id_type pair, share_type amount )
+{
+   f.db.adjust_balance( holder, asset( amount, pair ) );
+   const asset_object& pair_asset = pair( f.db );
+   const auto& pair_dyn = pair_asset.dynamic_asset_data_id( f.db );
+   f.db.modify( pair_dyn, [&amount]( asset_dynamic_data_object& data ) {
+      data.current_supply += amount;
+   } );
+}
+
 /// Creates a plain UIA to serve as a second vault pair (one live vault set
 /// per pair, so a cross-reserve sibling must live on another pair).
 asset_id_type h2c_create_uia(
@@ -1114,6 +1131,9 @@ BOOST_AUTO_TEST_CASE( winddown_claim_pays_seniors_first_juniors_dilute_no_cross_
    // never exceed total_claims — the H2c stand-in for per-holder frozen
    // balances, which arrive with the issuance engine): seniors take a third,
    // juniors two thirds, summing to (just under) the whole book.
+   // R11-R1 entitlement: carol's senior face must exist before she claims
+   // (asset-side twin of the surgery-set book above).
+   h2c_fund_pair_face( *this, carol_id, wdid( db ).pair, H2C_VAULT_RAW / 3 );
    const share_type senior_claim = H2C_VAULT_RAW / 3;
    const share_type senior_expect =
          share_type( senior_claim.value * ( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) / 10000 );
@@ -1164,6 +1184,98 @@ BOOST_AUTO_TEST_CASE( winddown_claim_pays_seniors_first_juniors_dilute_no_cross_
    // Sibling bond untouched by the failed vault's wind-down.
    BOOST_CHECK_EQUAL( sib_bond( db ).seized, false );
    BOOST_CHECK_EQUAL( sib( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+} FC_LOG_AND_RETHROW() }
+
+/// R11-R1 (LL-R11-01) senior entitlement: a wind-down senior claim must
+/// prove pair-face holding. A token-less account claiming the FULL frozen
+/// book is refused; a funded entitlement pays exactly once (face burned,
+/// second claim refused).
+BOOST_AUTO_TEST_CASE( r11r1_winddown_senior_claim_requires_pair_face )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(erin) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( erin, asset( 30000000000000LL ) );
+
+   // Failed vault: full-bond backing against equal liabilities (100% cover).
+   // Alice registers first, so she is the H2CPAIR issuer (funding source below).
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default( *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE( vid( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
+   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE( vid( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+   BOOST_REQUIRE( wdid( db ).total_claims == H2C_VAULT_RAW );
+   const asset_id_type pair = wdid( db ).pair;
+   BOOST_REQUIRE( pair( db ).issuer == alice_id );
+
+   // Theft probe: erin holds zero pair face but claims the whole book.
+   BOOST_CHECK( db.get_balance( erin_id, pair ).amount == share_type( 0 ) );
+   winddown_claim_operation top;
+   top.claimant     = erin_id;
+   top.winddown     = wdid;
+   top.claim_amount = wdid( db ).total_claims;
+   top.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction ttx; ttx.operations.push_back( top );
+   db.current_fee_schedule().set_fee( ttx.operations.back() );
+   set_expiration( db, ttx );
+   ttx.sign( erin_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, ttx ), fc::exception );
+   BOOST_CHECK( wdid( db ).claimed_total == share_type( 0 ) );
+
+   // Entitlement: carol is issued exactly the senior face, then claims.
+   // Pilot-scale face (AC-02): the issuer-direct path holds the same $20k
+   // cap the mint doors enforce, so entitlement funding uses a cap-fitting
+   // face while the frozen book stays full-scale (surgery-set, as before).
+   const share_type senior_claim = share_type( 1000000 );
+   const share_type senior_expect =
+         share_type( senior_claim.value * ( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) / 10000 );
+   asset_issue_operation iop;
+   iop.issuer           = alice_id;
+   iop.asset_to_issue   = asset( senior_claim, pair );
+   iop.issue_to_account = carol_id;
+   signed_transaction itx; itx.operations.push_back( iop );
+   db.current_fee_schedule().set_fee( itx.operations.back() );
+   set_expiration( db, itx );
+   itx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, itx );
+   BOOST_REQUIRE( db.get_balance( carol_id, pair ).amount == senior_claim );
+   const share_type supply_before = pair( db ).dynamic_asset_data_id( db ).current_supply;
+
+   winddown_claim_operation sop;
+   sop.claimant     = carol_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = senior_claim;
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction stx; stx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( carol_private_key, db.get_chain_id() );
+   const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
+   PUSH_TX( db, stx );
+   BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount >= carol_before + senior_expect - share_type( 100000 ) );
+   // Pays exactly once: the claimed face burns from holder and supply ...
+   BOOST_CHECK( db.get_balance( carol_id, pair ).amount == share_type( 0 ) );
+   BOOST_CHECK( pair( db ).dynamic_asset_data_id( db ).current_supply == supply_before - senior_claim );
+   // ... and the second claim by the same account is refused.
+   signed_transaction dtx; dtx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( dtx.operations.back() );
+   set_expiration( db, dtx );
+   dtx.sign( carol_private_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, dtx ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
 /// Resolve executes a sustained challenge: committee execution seizes the bond
@@ -1314,6 +1426,8 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    // Segregated economics on the expired path: a senior claim pays
    // last-good-minus-15% from the seized slice (fully backed here).
    const winddown_vault_id_type wdid { wd_idx.begin()->id };
+   // R11-R1 entitlement: dave's senior face must exist before he claims.
+   h2c_fund_pair_face( *this, dave_id, wdid( db ).pair, ( H2C_VAULT_RAW / 2 ) / 3 );
    const share_type senior_claim = ( H2C_VAULT_RAW / 2 ) / 3;
    const share_type senior_expect =
          share_type( senior_claim.value * ( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) / 10000 );
@@ -1733,10 +1847,17 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
          *this, bob_id, bob_private_key, vault_auth,
          H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, pair ), fc::exception );
 
-   // Settle the whole frozen-liability book in one senior claim (fully
-   // backed: the haircut leg pays before the pro-rata cap binds).
-   winddown_claim_operation sop;
-   sop.claimant     = carol_id;
+    // Settle the whole frozen-liability book in one senior claim (fully
+    // backed: the haircut leg pays before the pro-rata cap binds).
+    // R11-R1 entitlement: carol must hold the full book face before settling it.
+    // Flush first: the resolve above leaves the pending session open and a
+    // direct funding surgery into it would be rolled back by the next block
+    // (pending-session rule noted above); after the flush the funding
+    // commits directly and survives the re-application at later blocks.
+    generate_block();
+    h2c_fund_pair_face( *this, carol_id, wdid( db ).pair, H2C_VAULT_RAW / 2 );
+    winddown_claim_operation sop;
+    sop.claimant     = carol_id;
    sop.winddown     = wdid;
    sop.claim_amount = H2C_VAULT_RAW / 2; // == total_claims
    sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
@@ -1921,10 +2042,12 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    BOOST_REQUIRE( wdid( db ).total_claims == H2C_VAULT_RAW * 2 );
    BOOST_REQUIRE( wdid( db ).segregated_bond == H2C_VAULT_RAW );
 
-   winddown_claim_operation sop;
-   sop.claimant     = dave_id;
-   sop.winddown     = wdid;
-   sop.claim_amount = H2C_VAULT_RAW * 2;
+    // R11-R1 entitlement: dave must hold the full double-book face.
+    h2c_fund_pair_face( *this, dave_id, wdid( db ).pair, H2C_VAULT_RAW * 2 );
+    winddown_claim_operation sop;
+    sop.claimant     = dave_id;
+    sop.winddown     = wdid;
+    sop.claim_amount = H2C_VAULT_RAW * 2;
    sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
    signed_transaction stx; stx.operations.push_back( sop );
    db.current_fee_schedule().set_fee( stx.operations.back() );

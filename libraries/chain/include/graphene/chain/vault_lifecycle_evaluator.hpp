@@ -92,6 +92,11 @@ namespace graphene { namespace chain {
          /// the reserve ledger. Zero on senior claims and on legacy pairs
          /// (no reserve), whose junior path stays byte-identical.
          share_type _fxr_burn = share_type( 0 );
+         /// Pair face burned on senior claims (R11-R1): the claim face
+         /// retired from the claimant's pair-token balance and from the
+         /// asset supply (plus the reserve stable ledger on issuance
+         /// pairs). Zero on junior claims.
+         share_type _senior_burn = share_type( 0 );
    };
 
     /**

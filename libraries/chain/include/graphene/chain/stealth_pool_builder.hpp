@@ -41,7 +41,9 @@ class liquidity_pool_object;
  * with the real spent output at `real_index` (Fisher-Yates-shuffled into
  * the FULL ring under RAND_bytes, decoys and real together, so neither the
  * real's position nor the ring's member order carries the creation-window
- * structure the stratified set selection is built from — PRV-01).
+ * structure the stratified set selection is built from — PRV-01; the set
+ * itself is drawn in per-attempt shuffled bucket order with the real's
+ * window excluded, so the window set is RNG-symmetric too — PRV-R11-01).
  */
 struct stealth_sampled_ring
 {
@@ -65,14 +67,20 @@ struct stealth_sampled_ring
  * satisfy the candidate rule — a too-young real input fails closed here,
  * never in consensus) plus ring_size−1 random distinct others, drawn
  * stratified over 100-block creation windows (anti-Sybil: one slot per
- * non-empty window per pass, never an output-proportional share) and then
- * Fisher-Yates-shuffled as a FULL ring under RAND_bytes so the emitted
- * member order is uniform and independent of that window structure (the
- * real position carries no signal — PRV-01). Thin-pool skew is honored by
+ * non-empty window per pass, never an output-proportional share), visiting
+ * the non-empty windows in per-attempt shuffled key order (never ascending:
+ * an ascending visit emits the canonical oldest-windows set on the wire —
+ * PRV-R11-01) and excluding the real input's own window from the decoy draw
+ * (under randomized visitation every ring window is an equally plausible
+ * real window — PRV-R11-01), and then Fisher-Yates-shuffled as a FULL ring
+ * under RAND_bytes so the emitted member order is uniform and independent
+ * of that window structure (the real position carries no signal — PRV-01). Thin-pool skew is honored by
  * verifying the final set with stealth_check_decoy_policy at this asset's
  * live depth (the same call the evaluator makes); skew failures resample
  * with fresh randomness (bounded attempts) and throw when the pool cannot
- * supply a conformant ring (availability yields to privacy).
+ * supply a conformant ring (availability yields to privacy). Decoys are
+ * drawn only outside the real input's own window, so a pool holding fewer
+ * than ring_size−1 eligible outputs outside it cannot supply a ring either.
  *
  * @param ring_size 16..32 (G2 TARGET floor; no thin-pool emergency leg).
  * @throws fc::exception when no conformant ring exists.

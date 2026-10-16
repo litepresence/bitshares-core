@@ -10235,9 +10235,11 @@ BOOST_AUTO_TEST_CASE( poolswap_tag109_exists )
 
 // ---- G2-2 pool-swap scaffold (additive; Task-3 hunks untouched) ----
 // Two dan-issued UIAs (A = sold/blind input, B = bought/blind output) plus a
-// share asset, one constant-product pool (1M/1M), and 16 aged A-blinds
-// (4/4/4/4 skew windows + 25h age, mirroring t5_fund_pool's aged pattern so
-// the TARGET-size ring satisfies the decoy policy and pool floor).
+// share asset, one constant-product pool (1M/1M), and 20 aged A-blinds
+// (4/4/4/4/4 skew windows + 25h age, mirroring t5_fund_pool's aged pattern so
+// the TARGET-size ring satisfies the decoy policy and pool floor; five
+// windows so the R11R4 sampler — which excludes the real's whole window —
+// still finds its 15 decoys outside every window).
 struct g2_pool
 {
    asset_id_type            asset_a;
@@ -10251,9 +10253,9 @@ struct g2_pool
 // each = per-blind-output value (default 1000, the historical fixture size).
 // A caller that has to compare a routed MARKET FEE against the ~1e6-unit cost
 // anchor (the burn-rate ratio) needs a bigger output; the issuance below is
-// sized off it so the funder always covers 16 outputs + the pool deposit +
-// the fee pool (24,984,000 of slack at the default, which is exactly the 25M
-// this helper used to issue).
+// sized off it so the funder always covers 20 outputs + the pool deposit +
+// the fee pool (24,984,000 of slack on top, as before — the blind count grew
+// 16 -> 20 for R11R4, see below).
 static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
       const fc::ecc::private_key& funder_key, const std::string& tag,
       uint16_t market_fee_percent, int64_t each = 1000 )
@@ -10281,8 +10283,16 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
    // sits on the funder's balance and never enters the pool reserves the cases
    // assert. Scaled by `each` so a caller with bigger outputs still funds all
    // 16 of them.
-   f.issue_uia( funder, asset( 16 * each + 24984000, aid_a ) );
+   f.issue_uia( funder, asset( 20 * each + 24984000, aid_a ) );
    f.issue_uia( funder, asset( 3000000, aid_b ) );
+   // R11R4: 20 blinds need a 25M CORE parity seed below, and the 5%-routed
+   // seed debit is 20x the need (500M) — more than the 500M the callers
+   // place with the funder (setup fees already eat ~10 BTS of it). Top the
+   // funder from the genesis account so the seed debit cannot fail for
+   // want of dust (a plain transfer: supply-neutral under
+   // verify_asset_supplies).
+   f.transfer( account_id_type()( db ), funder,
+               asset_id_type()( db ).amount( 50000000 ) );
    f.deposit_to_liquidity_pool( funder.get_id(), pool_id,
       asset( 1000000, aid_a ), asset( 1000000, aid_b ) );
    // UIA tx fees convert through the fee pool (prepare_fee): fund A's pool
@@ -10295,7 +10305,7 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
    // attempted) is silently discarded. Blind funding runs subsidized
    // (transfer_to_blind carries a 0 fee — t5_fund_pool discipline); G2 swaps
    // themselves need no subsidy (no parity consume call).
-   g1c_seed_pool( db, funder.get_id(), asset_id_type()( db ), 16 * 1000000 + 5000000 );
+    g1c_seed_pool( db, funder.get_id(), asset_id_type()( db ), 20 * 1000000 + 5000000 );
    g2_pool p;
    p.asset_a = aid_a;
    p.asset_b = aid_b;
@@ -10321,6 +10331,11 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
       p.commits.push_back( o.commitment );
       p.blinds.push_back( B );
    };
+   // R11R4 (PRV-R11-01): 5 windows x 4 blinds. The production sampler
+   // excludes the real's whole window from the decoy draw, so EVERY blind
+   // must be spendable: the smallest outside-window complement (16 here)
+   // still covers the 15 decoys, and the 4-per-window ring counts clear the
+   // thin-pool 25% skew leg (4*4 <= 16).
    for( int i = 0; i < 4; ++i ) { fund_one( i ); f.generate_block(); }
    f.generate_blocks( 110 );
    for( int i = 4; i < 8; ++i ) { fund_one( i ); f.generate_block(); }
@@ -10328,6 +10343,8 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
    for( int i = 8; i < 12; ++i ) { fund_one( i ); f.generate_block(); }
    f.generate_blocks( 110 );
    for( int i = 12; i < 16; ++i ) { fund_one( i ); f.generate_block(); }
+   f.generate_blocks( 110 );
+   for( int i = 16; i < 20; ++i ) { fund_one( i ); f.generate_block(); }
    f.generate_blocks( db.head_block_time() + 90000 ); // +25h: decoys old
    f.generate_block();
    set_expiration( db, trx );
@@ -10484,7 +10501,7 @@ BOOST_AUTO_TEST_CASE( poolswap_happy_path )
       T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
    }
    set_expiration( db, trx );
-   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, p.asset_a ), 16u );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, p.asset_a ), 20u );
    const liquidity_pool_object& pool0 = p.pool( db );
    const int64_t bal_a0 = pool0.balance_a.value, bal_b0 = pool0.balance_b.value;
    const size_t nul_before =
@@ -10548,7 +10565,7 @@ BOOST_AUTO_TEST_CASE( poolswap_happy_path )
    }
    // Counter-asset decoy set grew by the one new output; input side unchanged.
    BOOST_CHECK_EQUAL( stealth_pool_depth( db, p.asset_b ), 1u );
-   BOOST_CHECK_EQUAL( stealth_pool_depth( db, p.asset_a ), 16u );
+   BOOST_CHECK_EQUAL( stealth_pool_depth( db, p.asset_a ), 20u );
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -11878,12 +11895,12 @@ BOOST_AUTO_TEST_CASE( wallet_stealth_outputs_enumeration )
    generate_block();
    set_expiration( db, trx );
    graphene::app::database_api api( db );
-   // Sold asset: exactly the 16 seeded blinds, all unspent, all carrying
-   // post-fork creation metadata (created_block + created_time set).
-   {
-      std::vector<blinded_balance_object> outs =
-         api.get_stealth_outputs( p.asset_a, true );
-      BOOST_REQUIRE_EQUAL( outs.size(), 16u );
+    // Sold asset: exactly the 20 seeded blinds, all unspent, all carrying
+    // post-fork creation metadata (created_block + created_time set).
+    {
+       std::vector<blinded_balance_object> outs =
+          api.get_stealth_outputs( p.asset_a, true );
+       BOOST_REQUIRE_EQUAL( outs.size(), 20u );
       for( const auto& o : outs )
       {
          BOOST_CHECK( o.asset_id == p.asset_a );
@@ -11916,8 +11933,12 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
    g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2SAMP", 0 );
    generate_block();
    set_expiration( db, trx );
-   // The only possible 16-ring here is the full set (pool holds exactly
-   // 16 aged blinds of A): sampler must return all of them, real included.
+   // R11R4 (PRV-R11-01): the pool holds 20 aged blinds over 5 windows and
+   // the sampler excludes the real's whole window: the 15 decoys come from
+   // the other 4 windows (4 each) round-robined one-per-window-per-pass, so
+   // the split is exactly 4/4/4/3 in some order, all outside the real's
+   // window (deterministic — the shuffle only permutes which window takes
+   // the 3 and the emission order).
    graphene::chain::stealth_sampled_ring smp =
       graphene::chain::stealth_sample_pool_ring(
          db, p.asset_a, p.commits[3] );
@@ -11930,6 +11951,37 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
       std::sort( sorted.begin(), sorted.end() );
       BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
                    == sorted.end() );
+   }
+   // Window split pin (R11R4 exclusion + anti-Sybil one-per-pass): the real
+   // (commits[3], first window) stands alone in its window; each of the
+   // other four windows contributes 3 or 4 decoys, totalling 15.
+   {
+      const auto& bbi =
+         db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      auto itr0 = bbi.find( p.commits[3] );
+      BOOST_REQUIRE_MESSAGE( itr0 != bbi.end(), "real not indexed" );
+      const uint32_t realW = itr0->created_block / 100;
+      std::map<uint32_t, size_t> perW;
+      for( size_t m = 0; m < smp.ring.size(); ++m )
+      {
+         if( m == smp.real_index )
+            continue;
+         auto itr = bbi.find( smp.ring[m] );
+         BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "decoy not indexed" );
+         ++perW[ itr->created_block / 100 ];
+      }
+      BOOST_REQUIRE_EQUAL( perW.size(), 4u );
+      size_t total = 0;
+      for( const auto& kv : perW )
+      {
+         BOOST_CHECK_MESSAGE( kv.first != realW,
+            "R11R4: a decoy shares the real's window" );
+         BOOST_CHECK_MESSAGE( kv.second == 3 || kv.second == 4,
+            "R11R4: window " << kv.first << " contributed " << kv.second
+            << " decoys, expected 3 or 4 (one-per-window-per-pass)" );
+         total += kv.second;
+      }
+      BOOST_CHECK_EQUAL( total, 15u );
    }
    // Evaluator membership loop, replicated: every member indexed, asset
    // match, metadata-bearing; then the decoy-policy call at live depth.
@@ -12769,11 +12821,14 @@ static std::vector<ee_bal> T_ee_deposit( database_fixture& f, account_id_type fr
    return r;
 }
 
-// Stratified draw (spec 2026-10-11-wallet §1): 56+7+7 across three windows
-// gives exactly 5+5+5 decoys per 15 picks regardless of shuffle, so with the
-// real fixed in the majority window, outside-window decoy slots == 2000 of
-// 3000 EXACTLY. Pre-change the uniform draw conforms with P≈1e-5/attempt, so
-// sampling either throws (near-certain) or fails the exact count — both RED.
+// Stratified draw (spec 2026-10-11-wallet §1), R11R4-hardened (PRV-R11-01):
+// 49+7+7+7 across four windows gives exactly 5+5+5 decoys per 15 picks
+// regardless of shuffle, all OUTSIDE the real's window (the real's window
+// is excluded from the decoy draw): with the real fixed in the first
+// window, outside-window decoy slots == 3000 of 3000 EXACTLY, split 5/5/5
+// across the other three windows every ring (one-decoy-per-window-per-pass).
+// Pre-change the uniform draw conforms with P≈1e-5/attempt, so sampling
+// either throws (near-certain) or fails the exact count — both RED.
 // (Placed after T_ee_deposit: ee_bal is complete only here.)
 BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
 { try {
@@ -12786,26 +12841,30 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
    generate_block();
    auto ok = fc::ecc::private_key::generate();
    const authority own( 1, public_key_type( ok.get_public_key() ), 1 );
-   // One pending block per batch (no window straddle); unseeded pool with
-   // exact-cost fees anchor(1) = 1M (cost path binds). Funding: 70*1M +
-   // 70*500 << 500M. ✓ Depth 70 = deep regime (≥64).
-   std::vector<fc::ecc::commitment_type> commitsA;
-   for( int i = 0; i < 56; ++i )
-   {
-      auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
-                             "wA-" + std::to_string(i), { 500 }, 1000000 );
-      BOOST_REQUIRE_EQUAL( r.size(), 1u );
-      if( i == 0 ) commitsA.push_back( r[0].commit );
-   }
-   generate_blocks( 110 ); // next 100-block window guaranteed (110 > 100)
-   for( int i = 0; i < 7; ++i )
-      T_ee_deposit( *this, dan_id, dan_private_key, own,
-                    "wB-" + std::to_string(i), { 500 }, 1000000 );
-   generate_blocks( 110 );
-   for( int i = 0; i < 7; ++i )
-      T_ee_deposit( *this, dan_id, dan_private_key, own,
-                    "wC-" + std::to_string(i), { 500 }, 1000000 );
-   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+    // One pending block per batch (no window straddle); unseeded pool with
+    // exact-cost fees anchor(1) = 1M (cost path binds). Funding: 70*1M +
+    // 70*500 << 500M. ✓ Depth 70 = deep regime (≥64).
+    std::vector<fc::ecc::commitment_type> commitsA;
+    for( int i = 0; i < 49; ++i )
+    {
+       auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
+                              "wA-" + std::to_string(i), { 500 }, 1000000 );
+       BOOST_REQUIRE_EQUAL( r.size(), 1u );
+       if( i == 0 ) commitsA.push_back( r[0].commit );
+    }
+    generate_blocks( 110 ); // next 100-block window guaranteed (110 > 100)
+    for( int i = 0; i < 7; ++i )
+       T_ee_deposit( *this, dan_id, dan_private_key, own,
+                     "wB-" + std::to_string(i), { 500 }, 1000000 );
+    generate_blocks( 110 );
+    for( int i = 0; i < 7; ++i )
+       T_ee_deposit( *this, dan_id, dan_private_key, own,
+                     "wC-" + std::to_string(i), { 500 }, 1000000 );
+    generate_blocks( 110 );
+    for( int i = 0; i < 7; ++i )
+       T_ee_deposit( *this, dan_id, dan_private_key, own,
+                     "wD-" + std::to_string(i), { 500 }, 1000000 );
+    generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
    generate_block();
    set_expiration( db, trx );
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 70u );
@@ -12818,34 +12877,51 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
       BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "member not indexed" );
       return itr->created_block / 100;
    };
-   const uint32_t realW = win_of( commitsA[0] );
-   // 200 rings around a majority-window real; count decoy slots OUTSIDE it.
-   uint32_t outside = 0, total = 0;
-   for( int s = 0; s < 200; ++s )
-   {
-      graphene::chain::stealth_sampled_ring smp =
-         graphene::chain::stealth_sample_pool_ring(
-            db, core.get_id(), commitsA[0] );
-      BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
-      BOOST_REQUIRE( smp.real_index < smp.ring.size() );
-      BOOST_CHECK( smp.ring[smp.real_index] == commitsA[0] );
-      { // distinct members (evaluator refuses duplicates)
-         std::vector<fc::ecc::commitment_type> sorted = smp.ring;
-         std::sort( sorted.begin(), sorted.end() );
-         BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
-                      == sorted.end() );
-      }
-      for( size_t m = 0; m < smp.ring.size(); ++m )
-      {
-         if( m == smp.real_index )
-            continue;
-         ++total;
-         if( win_of( smp.ring[m] ) != realW )
-            ++outside;
-      }
-   }
-   BOOST_REQUIRE_EQUAL( total, 3000u );
-   BOOST_REQUIRE_EQUAL( outside, 2000u );
+    const uint32_t realW = win_of( commitsA[0] );
+    // 200 rings around a first-window real; every decoy must sit outside it
+    // (R11R4 exclusion), split exactly 5/5/5 across the other three windows
+    // (one-decoy-per-window-per-pass over 3 eligible buckets x 7).
+    uint32_t outside = 0, total = 0;
+    std::map<uint32_t, uint32_t> perW;
+    for( int s = 0; s < 200; ++s )
+    {
+       graphene::chain::stealth_sampled_ring smp =
+          graphene::chain::stealth_sample_pool_ring(
+             db, core.get_id(), commitsA[0] );
+       BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
+       BOOST_REQUIRE( smp.real_index < smp.ring.size() );
+       BOOST_CHECK( smp.ring[smp.real_index] == commitsA[0] );
+       { // distinct members (evaluator refuses duplicates)
+          std::vector<fc::ecc::commitment_type> sorted = smp.ring;
+          std::sort( sorted.begin(), sorted.end() );
+          BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
+                       == sorted.end() );
+       }
+       std::map<uint32_t, uint32_t> one;
+       for( size_t m = 0; m < smp.ring.size(); ++m )
+       {
+          if( m == smp.real_index )
+             continue;
+          ++total;
+          const uint32_t w = win_of( smp.ring[m] );
+          if( w != realW )
+             ++outside;
+          ++one[w];
+       }
+       BOOST_REQUIRE_EQUAL( one.size(), 3u );
+       for( const auto& kv : one )
+       {
+          BOOST_CHECK_MESSAGE( kv.first != realW,
+             "R11R4: a decoy shares the real's window" );
+          BOOST_CHECK_EQUAL( kv.second, 5u );
+          perW[kv.first] += kv.second;
+       }
+    }
+    BOOST_REQUIRE_EQUAL( total, 3000u );
+    BOOST_REQUIRE_EQUAL( outside, 3000u );
+    BOOST_REQUIRE_EQUAL( perW.size(), 3u );
+    for( const auto& kv : perW )
+       BOOST_CHECK_EQUAL( kv.second, 1000u ); // 5/ring x 200 rings
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -12862,8 +12938,9 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
 // created_block is public chain state, so an observer who knows the
 // windows names the real member directly:
 //   (a) ring[0] is ALWAYS the minimum window (the first bucket's first
-//       pick, or the real — which lives in that same bucket here), so the
-//       first position is a constant, not a sample;
+//       pick — or the spliced real, which lives in that same minimum
+//       window here, alone since R11R4 excludes its window from decoys),
+//       so the first position is a constant, not a sample;
 //   (b) removing the real input's position ALWAYS leaves the canonical
 //       ascending-key round-robin of the remaining multiset — that is the
 //       attack of REPAIR-02: remove each candidate k in turn and re-run
@@ -12880,16 +12957,18 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
 // round-robin refills the lowest window every pass, so a global
 // non-decreasing-window test would be vacuous (it never holds even on
 // the defective sampler). After a Fisher-Yates of the whole ring, (a)
-// becomes a 6/16 draw and (b) collapses to ~0 (a uniform permutation of
-// the 6/5/5 multiset is the round-robin of its own multiset with
-// probability 1/2018016; matching it after a one-element removal is
-// likewise ~1e-6 per candidate position), so both assertions below are
-// RED on the unfixed sampler and GREEN once the final shuffle lands.
+// becomes a 1/16 draw (R11R4: the real stands alone in the minimum window —
+// its window contributes no decoys) and (b) collapses to ~0 (a uniform
+// permutation of the 1/5/5/5 multiset is the round-robin of its own
+// multiset with probability 1/12108096; matching it after a one-element
+// removal is likewise ~1e-7 per candidate position), so both assertions
+// below are RED on the unfixed sampler and GREEN once the final shuffle
+// lands.
 //
-// Fixture = wallet_sampler_stratifies_windows exactly (56+7+7 blinds over
-// three distinct 100-block windows, real in the first/minimum window;
-// that case's exact outside == 2000 pins the 5/5/5 round-robin split and
-// the absence of a window straddle), so this case reuses the same harness
+// Fixture = wallet_sampler_stratifies_windows exactly (49+7+7+7 blinds over
+// four distinct 100-block windows, real in the first/minimum window;
+// that case's exact outside == 3000 pins the 5/5/5 round-robin split across
+// the three non-real windows and the absence of a window straddle), so this case reuses the same harness
 // instead of inventing a second one. Real-position histogram is NOT
 // asserted: the splice index `at` was already uniform, so it is vacuous
 // against the defect — the window order is the signal.
@@ -12907,23 +12986,27 @@ BOOST_AUTO_TEST_CASE( poolswap_sampler_no_window_order_fingerprint )
    // One pending block per batch (no window straddle); unseeded pool with
    // exact-cost fees anchor(1) = 1M (cost path binds). Depth 70 = deep
    // regime (>= 64) so the decoy policy never rejects on skew.
-   std::vector<fc::ecc::commitment_type> commitsA;
-   for( int i = 0; i < 56; ++i )
-   {
-      auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
-                             "fA-" + std::to_string(i), { 500 }, 1000000 );
-      BOOST_REQUIRE_EQUAL( r.size(), 1u );
-      if( i == 0 ) commitsA.push_back( r[0].commit );
-   }
-   generate_blocks( 110 ); // next 100-block window guaranteed (110 > 100)
-   for( int i = 0; i < 7; ++i )
-      T_ee_deposit( *this, dan_id, dan_private_key, own,
-                    "fB-" + std::to_string(i), { 500 }, 1000000 );
-   generate_blocks( 110 );
-   for( int i = 0; i < 7; ++i )
-      T_ee_deposit( *this, dan_id, dan_private_key, own,
-                    "fC-" + std::to_string(i), { 500 }, 1000000 );
-   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+    std::vector<fc::ecc::commitment_type> commitsA;
+    for( int i = 0; i < 49; ++i )
+    {
+       auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
+                              "fA-" + std::to_string(i), { 500 }, 1000000 );
+       BOOST_REQUIRE_EQUAL( r.size(), 1u );
+       if( i == 0 ) commitsA.push_back( r[0].commit );
+    }
+    generate_blocks( 110 ); // next 100-block window guaranteed (110 > 100)
+    for( int i = 0; i < 7; ++i )
+       T_ee_deposit( *this, dan_id, dan_private_key, own,
+                     "fB-" + std::to_string(i), { 500 }, 1000000 );
+    generate_blocks( 110 );
+    for( int i = 0; i < 7; ++i )
+       T_ee_deposit( *this, dan_id, dan_private_key, own,
+                     "fC-" + std::to_string(i), { 500 }, 1000000 );
+    generate_blocks( 110 );
+    for( int i = 0; i < 7; ++i )
+       T_ee_deposit( *this, dan_id, dan_private_key, own,
+                     "fD-" + std::to_string(i), { 500 }, 1000000 );
+    generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
    generate_block();
    set_expiration( db, trx );
    BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 70u );
@@ -13015,6 +13098,159 @@ BOOST_AUTO_TEST_CASE( poolswap_sampler_no_window_order_fingerprint )
       "order (REPAIR-02 real-position recovery) in " << any_odd << "/"
       << samples << " rings, " << sum_odd << " matching positions total "
       "— expected 200/200 rings unfixed (RED) vs ~0 fixed (GREEN)" );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---- PRV-R11-01 (round-11 Critical, seat privacy-adversarial-audit): the
+// op109 sampler's decoy WINDOW SET must not be canonical on the wire.
+//
+// Defect (stealth_pool_builder.cpp:159-187 pre-fix): candidates are bucketed
+// by created_block/100 into a std::map and round-robined in ASCENDING
+// bucket-key order with the real's window eligible, so with >=16 non-empty
+// windows the 15 decoy windows are ALWAYS the 15 oldest non-empty windows:
+// the wire set is {15 oldest} UNION {real window} (canonical-minus/plus the
+// real's window) and the final Fisher-Yates (:214-228, R9 38c80dad) only
+// reorders it. Every member's created_block is public chain state, so a
+// passive observer names the real's window in 100% of rings (rig:
+// tooling/r11r4_window_set_rig.py DEFECTIVE window_hit_rate=1.0000 at
+// 32x2/64x3/17x2/16x1): the unique member outside the 15 oldest windows,
+// else a member of the unique doubled window.
+// Fix (spec 2026-10-15-r11 §R4): visit non-empty buckets in per-attempt
+// shuffled key order AND exclude the real's window from the decoy draw,
+// keeping one-decoy-per-window-per-pass (anti-Sybil). The posterior over the
+// 16 singleton windows is then uniform and the attack below scores at chance
+// (~1/16; rig FIXED window_hit_rate ~= 0.06 at every shape).
+//
+// Fixture: 17 windows x 2 blinds (34 deposits; depth 34 = thin regime, so a
+// conformant ring holds at most 4 per window and the all-singleton fixed
+// draw always clears the skew leg on attempt one). Real = first blind
+// (oldest window, so the canonical set is windows 0..14 deterministically).
+// RED on the unfixed sampler: exclusion violated 200/200, canonical set
+// 200/200, attacker names the real window 200/200, distinct decoy sets == 1.
+// GREEN after the fix: 0 / 0 / ~=200/16 / 16.
+BOOST_AUTO_TEST_CASE( poolswap_sampler_window_set_posterior_uniform )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()(db);
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   auto own_key = fc::ecc::private_key::generate();
+   const authority own( 1, public_key_type( own_key.get_public_key() ), 1 );
+   // Two deposits share one block (PUSH_TX seals nothing: no window
+   // straddle inside a batch); +110 blocks between batches guarantees a new
+   // 100-block window every batch (quotient advances by >= 1).
+   std::vector<fc::ecc::commitment_type> commitsA;
+   for( int w = 0; w < 17; ++w )
+   {
+      for( int i = 0; i < 2; ++i )
+      {
+         auto r = T_ee_deposit( *this, dan_id, dan_private_key, own,
+            "uW" + std::to_string(w) + "-" + std::to_string(i), { 500 }, 1000000 );
+         BOOST_REQUIRE_EQUAL( r.size(), 1u );
+         if( w == 0 && i == 0 ) commitsA.push_back( r[0].commit );
+      }
+      if( w < 16 ) generate_blocks( 110 );
+   }
+   generate_blocks( db.head_block_time() + 90000 ); // +25h: all decoys old
+   generate_block();
+   set_expiration( db, trx );
+   BOOST_REQUIRE_EQUAL( stealth_pool_depth( db, core.get_id() ), 34u );
+   const auto& bbi =
+      db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+   auto win_of = [&]( const fc::ecc::commitment_type& c ) -> uint32_t
+   {
+      auto itr = bbi.find( c );
+      BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "member not indexed" );
+      return itr->created_block / 100;
+   };
+   const uint32_t realW = win_of( commitsA[0] );
+   // Observer's canonical set: the 15 oldest non-empty windows (global,
+   // public). The real sits in the oldest window, so pre-fix the decoy set
+   // is exactly this set, every ring.
+   std::set<uint32_t> allW;
+   for( const auto& o : db.get_index_type<blinded_balance_index>().indices() )
+      if( o.asset_id == core.get_id() && o.created_block != 0 && !o.spent )
+         allW.insert( o.created_block / 100 );
+   BOOST_REQUIRE_EQUAL( allW.size(), 17u );
+   std::vector<uint32_t> canon( allW.begin(), allW.end() );
+   BOOST_REQUIRE_EQUAL( canon.size(), 17u );
+   canon.resize( 15 );
+   const int samples = 200;
+   uint32_t exclusion_hits = 0;  // decoys sharing the real's window
+   uint32_t canonical_hits = 0;  // decoy set == 15 oldest windows
+   uint32_t named = 0;           // attacker's implied window == real window
+   std::set<std::vector<uint32_t>> distinct_sets;
+   for( int s = 0; s < samples; ++s )
+   {
+      graphene::chain::stealth_sampled_ring smp =
+         graphene::chain::stealth_sample_pool_ring(
+            db, core.get_id(), commitsA[0] );
+      BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
+      BOOST_REQUIRE( smp.real_index < smp.ring.size() );
+      BOOST_CHECK( smp.ring[smp.real_index] == commitsA[0] );
+      { // distinct members (evaluator refuses duplicates)
+         std::vector<fc::ecc::commitment_type> sorted = smp.ring;
+         std::sort( sorted.begin(), sorted.end() );
+         BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
+                      == sorted.end() );
+      }
+      std::vector<uint32_t> w;
+      w.reserve( smp.ring.size() );
+      for( const auto& m : smp.ring ) w.push_back( win_of( m ) );
+      std::vector<uint32_t> decoyW;
+      for( size_t m = 0; m < smp.ring.size(); ++m )
+         if( m != smp.real_index ) decoyW.push_back( w[m] );
+      if( std::count( decoyW.begin(), decoyW.end(), realW ) > 0 )
+         ++exclusion_hits;
+      std::vector<uint32_t> dsorted = decoyW;
+      std::sort( dsorted.begin(), dsorted.end() );
+      dsorted.erase( std::unique( dsorted.begin(), dsorted.end() ),
+                     dsorted.end() );
+      distinct_sets.insert( dsorted );
+      if( dsorted == canon )
+         ++canonical_hits;
+      // The round-10 attacker: unique member outside the canonical set, else
+      // the unique doubled window, else no pointer (scores a miss here — a
+      // uniform follow-up guess hits at 1/16, counted in the rig, not here).
+      std::vector<size_t> outside;
+      for( size_t m = 0; m < w.size(); ++m )
+         if( std::find( canon.begin(), canon.end(), w[m] ) == canon.end() )
+            outside.push_back( m );
+      bool scored = false;
+      if( outside.size() == 1 )
+      {
+         if( w[outside[0]] == realW ) ++named;
+         scored = true;
+      }
+      if( !scored )
+      {
+         std::map<uint32_t, size_t> cnt;
+         for( uint32_t x : w ) ++cnt[x];
+         std::vector<uint32_t> doubled;
+         for( const auto& kv : cnt )
+            if( kv.second >= 2 ) doubled.push_back( kv.first );
+         if( doubled.size() == 1 && doubled[0] == realW ) ++named;
+      }
+   }
+   BOOST_CHECK_MESSAGE( exclusion_hits == 0,
+      "PRV-R11-01 exclusion: a decoy shared the real's window in "
+      << exclusion_hits << "/" << samples
+      << " rings — expected 200/200 unfixed (RED) vs 0 fixed (GREEN)" );
+   BOOST_CHECK_MESSAGE( canonical_hits == 0,
+      "PRV-R11-01 canonical set: the decoy window set was the 15 oldest "
+      "windows in " << canonical_hits << "/" << samples
+      << " rings — expected 200/200 unfixed (RED) vs 0 fixed (GREEN)" );
+   BOOST_CHECK_MESSAGE( named <= 20u,
+      "PRV-R11-01 posterior: the observer's implied window was the real's "
+      "in " << named << "/" << samples
+      << " rings — expected 200/200 unfixed (RED) vs ~=12 fixed (GREEN)" );
+   BOOST_CHECK_MESSAGE( distinct_sets.size() > 1,
+      "PRV-R11-01 variety: only " << distinct_sets.size()
+      << " distinct decoy window set(s) in " << samples
+      << " rings — expected 1 unfixed (RED) vs 16 fixed (GREEN)" );
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 

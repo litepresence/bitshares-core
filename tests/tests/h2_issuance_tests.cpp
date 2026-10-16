@@ -1738,4 +1738,52 @@ BOOST_AUTO_TEST_CASE( r11r2_pre_bind_sweep_does_not_poison_seasoning )
    BOOST_CHECK( h2i_find_reserve( *this, pair ) != nullptr );
 } FC_LOG_AND_RETHROW() }
 
+/// R11R3 (LEG-R11-01) legacy attach gate, hybrid_mint reserve-creation door:
+/// the first mint pins the named FXR token permanently (reserves are never
+/// removed, and asset_issue refuses pinned juniors forever), so a first mint
+/// naming somebody else's zero-supply UIA as the junior must refuse. Control:
+/// the same door mints fine on the issuer's own FXR (the refused attempt
+/// creates no reserve).
+BOOST_AUTO_TEST_CASE( r11r3_third_party_fxr_pin_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "R11R3P", "R11R3F", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // Somebody else's zero-supply UIA (bob's "legacy" token): pinning it as
+   // junior would clamp bob's issuance forever with no removal path.
+   const asset_id_type victim = h2i_create_uia( *this, bob_id, bob_private_key, "R11R3V" );
+
+   // Attack leg: alice is a vault-authority member, but she does not issue
+   // the named junior -- must refuse, and no reserve may exist afterwards.
+   hybrid_mint_operation attack;
+   attack.minter        = alice_id;
+   attack.vault         = d.vault;
+   attack.deposit       = asset( share_type( 130000 ), asset_id_type() );
+   attack.stable_amount = share_type( 1000 );
+   attack.fxr_asset     = victim;
+   const string attack_err = h2i_outcome( *this, attack, alice_private_key );
+   BOOST_CHECK_MESSAGE( !attack_err.empty(),
+         "R11R3: third-party FXR pin ADMITTED (legacy attach open)" );
+   if( !attack_err.empty() )
+      BOOST_CHECK_MESSAGE( attack_err.find( "issuer" ) != std::string::npos,
+            "third-party FXR pin refused off-gate: " << attack_err );
+   BOOST_CHECK_MESSAGE( h2i_find_reserve( *this, d.pair ) == nullptr,
+         "R11R3: refused FXR pin still created a reserve" );
+
+   // Control: the issuer's own FXR pins fine on the same door.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 130000 ), share_type( 1000 ) );
+   BOOST_REQUIRE( h2i_find_reserve( *this, d.pair ) != nullptr );
+   BOOST_CHECK( h2i_find_reserve( *this, d.pair )->fxr_asset == d.fxr );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

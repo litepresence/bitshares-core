@@ -979,9 +979,20 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
    const asset_object* fxr_asset = d.find( op.fxr_asset );
    FC_ASSERT( nullptr != fxr_asset,
               "FXR asset ${a} does not exist", ("a", op.fxr_asset) );
-   if( _creates_reserve )
-   {
-      FC_ASSERT( op.fxr_asset != _vault->vault_pair,
+    if( _creates_reserve )
+    {
+       // LEG-R11-01 legacy attach gate (FXR door): the first mint pins the
+       // named junior permanently (reserves are never removed, and
+       // asset_issue refuses pinned juniors forever), so the minter must
+       // issue the named FXR token. Otherwise any vault-authority member
+       // could pin somebody else's zero-supply UIA as junior and clamp its
+       // issuance with no removal path. Issuer consent is proven by the
+       // minter match (the minter signs the transaction as fee payer).
+       FC_ASSERT( fxr_asset->issuer == op.minter,
+                  "FXR token ${f} is issued by ${i}; reserve creation requires "
+                  "the FXR issuer as minter (third-party junior pin refused)",
+                  ("f", op.fxr_asset)("i", fxr_asset->issuer) );
+       FC_ASSERT( op.fxr_asset != _vault->vault_pair,
                  "FXR token must differ from the senior pair: reflexive junior refused" );
       FC_ASSERT( op.fxr_asset != asset_id_type(),
                  "FXR token is never the bond asset: reflexive junior refused" );

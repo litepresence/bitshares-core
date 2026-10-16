@@ -92,9 +92,20 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
    // the custody door, not filtered downstream.
    FC_ASSERT( !h2_pair_has_h1_binding( *pair_asset, d ),
               "H1-priced pairs are excluded from H2 bonded custody" );
-   FC_ASSERT( !pair_asset->is_market_issued(),
-              "Vault pairs must be vault-backed UIAs: market-issued (H1-track) "
-              "assets are excluded from bonded custody" );
+    FC_ASSERT( !pair_asset->is_market_issued(),
+               "Vault pairs must be vault-backed UIAs: market-issued (H1-track) "
+               "assets are excluded from bonded custody" );
+    // LEG-R11-01 legacy attach gate (BSIP-1 coexistence: no caps, no changes
+    // on legacy assets, permanently): the registrar must be the pair's
+    // issuer. Without this any account could bind an H2 vault to somebody
+    // else's UIA under the pilot cap, after which the pilot ceiling clamps
+    // the legacy issuer's own issuance with no unregister path. Issuer
+    // consent is proven by the registrar match (the registrar signs the
+    // transaction as fee payer).
+    FC_ASSERT( pair_asset->issuer == op.registrar,
+               "Vault pair ${a} is issued by ${i}; vault registration requires "
+               "the pair issuer as registrar (third-party legacy attach refused)",
+               ("a", op.pair)("i", pair_asset->issuer) );
     // Pilot ceiling (AC-02, consensus-enforced): the pair's standing token
     // supply must already sit at or under the $20,000 face cap when the
     // vault binds it. Without this, pre-bind issuer-direct flow (inert

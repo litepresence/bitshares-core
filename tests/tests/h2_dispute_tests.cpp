@@ -1997,8 +1997,12 @@ BOOST_AUTO_TEST_CASE( h2_x02_pair_freeze_allowed_on_h2_only_oracle )
    PUSH_TX( db, tx );
    BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
    BOOST_CHECK( *vid( db ).bound_oracle == oid );
-   BOOST_CHECK_EQUAL( vid( db ).frozen, true );
-   BOOST_CHECK_EQUAL( oid( db ).options.frozen, true );
+   // R11R2 (first-mint reachability, spec-approved at 4dd0ed22): at zero
+   // outstanding debt the bind pins but the door stays open (flags close
+   // only over live debt), so this fresh zero-debt freeze binds the H2-only
+   // oracle without freezing. Original intent kept: H2-only bind works.
+   BOOST_CHECK_EQUAL( vid( db ).frozen, false );
+   BOOST_CHECK_EQUAL( oid( db ).options.frozen, false );
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------

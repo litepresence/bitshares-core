@@ -1996,9 +1996,11 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    }
    BOOST_REQUIRE( h2_seasoning_complete( db, pair ) );
 
-   const asset_id_type fxr = h2c_create_uia( *this, alice_id, alice_private_key, "R9I9F" );
-   hybrid_mint_operation mop;
-   mop.minter        = bob_id; // vault-authority member; deposit from bob's BTS
+    // R11-R3 legacy attach gate: reserve creation requires the FXR issuer
+    // as minter, so the junior leg is issued here by the minter (bob).
+    const asset_id_type fxr = h2c_create_uia( *this, bob_id, bob_private_key, "R9I9F" );
+    hybrid_mint_operation mop;
+    mop.minter        = bob_id; // vault-authority member AND fxr issuer; deposit from bob's BTS
    mop.vault         = vid2;
    mop.deposit       = asset( 130000, asset_id_type() );
    mop.stable_amount = share_type( 1000 );
@@ -2093,6 +2095,61 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    BOOST_CHECK_EQUAL( vid2( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
    BOOST_CHECK( wdid( db ).state == GRAPHENE_H2_WINDDOWN_COMPLETE );
    BOOST_CHECK_EQUAL( vid2( db ).forfeit_pool_balance.value, carried_shell.value );
+} FC_LOG_AND_RETHROW() }
+
+/// R11R3 (LEG-R11-01) legacy attach gate, vault_register door: any account
+/// could bind an H2 vault to any legacy UIA under the pilot cap (no
+/// registrar==pair-issuer requirement), after which the pilot ceiling clamps
+/// the legacy issuer's own issuance at 20,000 face with no unregister path.
+/// Third-party registration must refuse and bind nothing; issuer
+/// self-registration on the same terms admits (control leg).
+BOOST_AUTO_TEST_CASE( r11r3_third_party_vault_register_on_legacy_uia_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   // Legacy-shaped UIA: plain non-market-issued token issued by alice with
+   // zero standing supply (under the pilot cap).
+   const asset_id_type legacy = h2c_create_uia( *this, alice_id, alice_private_key, "LEGACY1" );
+
+   // Third-party attach: bob issues nothing here -- must refuse.
+   vault_register_operation op;
+   op.registrar            = bob_id;
+   op.pair                 = legacy;
+   op.vault_authority      = authority( 1, bob_id, 1 );
+   op.min_bond             = H2C_VAULT_RAW;
+   op.min_bond_usd_cents   = H2C_VAULT_USD_CENTS;
+   op.bond_asset           = asset_id_type();
+   op.secure_ratio_bps     = 20000;
+   op.challenge_window_sec = GRAPHENE_H2_BOND_UNBOND_DELAY_SEC;
+   signed_transaction tx;
+   tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( bob_private_key, db.get_chain_id() );
+   string attack_err;
+   try { PUSH_TX( db, tx ); }
+   catch( const fc::exception& e ) { attack_err = e.to_string(); }
+   BOOST_CHECK_MESSAGE( !attack_err.empty(),
+         "R11R3: third-party vault attach ADMITTED (legacy attach open)" );
+   if( !attack_err.empty() )
+      BOOST_CHECK_MESSAGE( attack_err.find( "issuer" ) != std::string::npos,
+            "third-party attach refused off-gate: " << attack_err );
+   const auto& pair_idx = db.get_index_type<vault_index>()
+                             .indices().get<by_vault_pair>();
+   BOOST_CHECK_MESSAGE( pair_idx.find( legacy ) == pair_idx.end(),
+         "R11R3: attach bound a vault row to the legacy UIA" );
+
+   // Control: issuer self-registration on a sibling pair admits.
+   const asset_id_type own = h2c_create_uia( *this, alice_id, alice_private_key, "OWNPAIR1" );
+   const vault_id_type vid = h2c_register_vault( *this, alice_id, alice_private_key,
+         authority( 1, alice_id, 1 ), H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, own );
+   BOOST_CHECK( vid( db ).vault_pair == own );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

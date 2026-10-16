@@ -66,7 +66,9 @@ namespace graphene { namespace protocol {
       };
 
       asset           fee;
-      account_id_type registrar;        ///< Pays the fee; need not equal the vault authority
+       account_id_type registrar;        ///< Pays the fee; must be the pair asset's
+                                         ///< issuer (LEG-R11-01 legacy attach gate);
+                                         ///< need not equal the vault authority
       asset_id_type   pair;             ///< The vault-backed UIA this set secures
       authority       vault_authority;  ///< Threshold custody set
       share_type      min_bond;         ///< Raw lock floor, in bond_asset smallest units

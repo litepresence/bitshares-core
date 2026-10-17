@@ -155,15 +155,18 @@ void oracle_object::update_current_value( time_point_sec now, uint32_t delay_sec
       current_value_producer_count = 0;
       // Quorum loss clears what is about to be consumed; the raw aggregate is
       // absent and nothing is left ripening in the delay queue. (H1-FINAL-02,
-      // round-16: quorum loss is TRANSIENT -- the read path fails closed on the
-      // absent current_value + submission liveness, so the rate limiter's
-      // baseline (consumed_value, now never destroyed; the last_good pair below
-      // survives it too) stays standing and the re-entry promotion is still
-      // move-checked. Destroying the baseline here let the oracle owner paste
-      // an arbitrary-size price step in one promotion: rotate away the
-      // producers, let this branch wipe consumed_value, then the next
-      // promotion skipped the move check entirely via the first-promotion
-      // branch.)
+      // round-16: the rate limiter's baseline (consumed_value, now never
+      // destroyed; the last_good pair below survives it too) must stay standing
+      // so the re-entry promotion stays move-checked. Destroying the baseline
+      // here let the oracle owner paste an arbitrary-size price step in one
+      // promotion: rotate away the producers, let this branch wipe
+      // consumed_value, then the next promotion skipped the move check entirely
+      // via the first-promotion branch.) The hold is bounded by the read path:
+      // while the gap lasts, the bound read serves the retained consumed_value
+      // only until consumed_value_time leaves value_lifetime_sec
+      // (db_update.cpp:364-369); it never consults current_value, which stays
+      // absent for the whole gap. H2 reads additionally require the bonded
+      // live set (h2_economics.cpp:713-726).
       pending_queue.clear();
       return;
    }
@@ -371,19 +374,27 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    // spans the delay whatever the publish rate; the newest bucket refreshes its value
    // in place, keeping its timestamp (or the bucket would never close -- the same
    // argument as the history ring above).
-   // R17G (round-17, PS-R17-01): the bucket is delay/(MAX_PENDING-1), not
-   // delay/MAX_PENDING. With delay/MAX_PENDING buckets, 16 buckets span
-   // 16*floor(delay/16) <= delay, so the 17th arrival clipped the oldest entry at
-   // exactly its ripening age -- the capacity trim runs BEFORE the ripen scan
-   // below, so the just-ripe entry was erased before any scan saw it, and at
-   // every whole-hour delay (3600 default, 7200, 43200, 86400 per the PS-R17-01
-   // simulation) the queue self-erased every ripe sample and the gated pair's
-   // feed stayed null forever. With 15 smaller buckets, the full queue (16
-   // entries) spans 15*floor(delay/15) <= delay, the 16th arrival lands at/after
-   // the delay boundary with nothing clipped, the ripen scan consumes the ripe
-   // oldest entry, and the first-ever capacity trim comes one full bucket later.
+   // R17G (round-17, PS-R17-01): the divisor is (MAX_PENDING-1), not
+   // MAX_PENDING. With delay/MAX_PENDING buckets the 17th arrival clipped the
+   // oldest entry at exactly its ripening age -- the capacity trim runs BEFORE
+   // the ripen scan below, so the just-ripe entry was erased before any scan
+   // saw it, and at every whole-hour delay (3600 default, 7200, 43200, 86400
+   // per the PS-R17-01 simulation) the queue self-erased every ripe sample and
+   // the gated pair's feed stayed null forever (first promotion stalls; attack:
+   // any new pair opting into the OSM delay dead-switches at the unset
+   // default).
+   // R18 (ORC-02): the quotient is the CEILING. 15*floor(delay/15) falls up to
+   // 14 seconds (delay % 15) short of the delay, so whenever the publish
+   // cadence equals exactly floor(delay/15) seconds the 17th arrival still
+   // clips the oldest entry at its own ripening age (trim before scan, as
+   // above) and every delay with delay % 15 != 0 stalls permanently (3601,
+   // 3603, 7201, ...; the R18 replay swept the class and the t8b3 regression
+   // pins it: RED at floor(bucket), GREEN at ceil). ceil(delay/15) makes the
+   // full queue span at least the delay at every cadence, so a ripe sample
+   // always reaches the scan; whole-multiple delays keep their bucket exactly.
    const uint32_t bucket = std::max<uint32_t>(
-      1, effective_delay / ( GRAPHENE_ORACLE_GUARD_MAX_PENDING - 1 ) );
+      1, ( effective_delay + ( GRAPHENE_ORACLE_GUARD_MAX_PENDING - 2 ) )
+           / ( GRAPHENE_ORACLE_GUARD_MAX_PENDING - 1 ) );
    if( pending_queue.empty()
        || ( now - pending_queue.back().first ).to_seconds() >= int64_t( bucket ) )
       pending_queue.emplace_back( now, *current_value );
@@ -480,10 +491,10 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (reputation)
                     (open_disputes)
                     (last_dispute_time)
-                    (last_good_value)
-                    (last_good_time)
                     (forfeit_pool_balance)
                     (dispute_cleared_time)
+                    (last_good_value)
+                    (last_good_time)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::oracle_object )

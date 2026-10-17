@@ -1212,7 +1212,10 @@ BOOST_AUTO_TEST_CASE( winddown_claim_pays_seniors_first_juniors_dilute_no_cross_
    jtx.sign( dave_private_key, db.get_chain_id() );
    PUSH_TX( db, jtx );
 
-   // ... but junior claims past 2x senior-paid are refused (rmax).
+   // ... but junior claims beyond the book's room are refused; here erin's
+   // pro-rata share floors to 0 at the 85% haircut (the dust gate). The rmax
+   // binding has its own vector below:
+   // rmax_junior_dilution_fires_with_book_room_vac_r17_10 (:2707).
    winddown_claim_operation xop;
    xop.claimant     = erin_id;
    xop.winddown     = wdid;
@@ -2108,13 +2111,14 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    BOOST_CHECK( db.get_balance( bob_id, pair ).amount == share_type( 1000 ) );
 
    // VAC-R17-11 (round-17): the recovery must survive the next maintenance
-   // sweep AND a second reserve writer after it. Pre-R17A the wind-down
-   // senior claim left sum(band_stable) != stable_supply, and the first band
-   // verify after re-registration (the sweep's fold, or the next writer)
-   // halted the chain -- as written this test stopped one transaction short
-   // of that verify, asserting the surviving book as correct. Flush the
-   // mint, cross one sweep with a fresh publish live, assert the partition,
-   // then mint again on the swept book and assert it stayed exact.
+   // sweep AND a second reserve writer after it. As written this test stopped
+   // one transaction short of both: the post-recovery book was never crossed
+   // by the sweep's fold nor by a later writer, so these extensions close that
+   // lapse. (The pre-R17A band-partition regression is exercised by
+   // winddown_senior_burn_moves_bands_r17a, where a live reserve takes the
+   // senior burn through the band path -- h2_issuance2_tests.cpp:2777.)
+   // Flush the mint, cross one sweep with a fresh publish live, assert the
+   // partition, then mint again on the swept book and assert it stayed exact.
    generate_block();
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 300 );
    // Half-price republish: the genesis mint above retained the whole 130000
@@ -2258,10 +2262,13 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    // VAC-R17-11 (round-17): a COMPLETE-shape recovery must also survive the
    // next maintenance sweep and a subsequent reserve writer -- without them
    // this test asserted the surviving (re-registered, empty) book as correct
-   // and never reached the first band verify after recovery. Bond and bind
-   // the fresh vault, season the inherited record (surgery helper: backdate
-   // + verifier bit + minimums; the bound leg is live from the pin above),
-   // then mint, sweep, verify the partition, and mint again.
+   // without ever crossing it (sweep fold or second writer). (The pre-R17A
+   // band-partition regression is exercised by
+   // winddown_senior_burn_moves_bands_r17a, h2_issuance2_tests.cpp:2777, not
+   // by this recovery.) Bond and bind the fresh vault, season the inherited
+   // record (surgery helper: backdate + verifier bit + minimums; the bound leg
+   // is live from the pin above), then mint, sweep, verify the partition, and
+   // mint again.
    const auto bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "BT9C", 5 );
    const auto usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "USD9C", 4 );
    oracle_options c_opts;
@@ -2605,6 +2612,90 @@ BOOST_AUTO_TEST_CASE( r17c_expired_resolve_needs_coverage_breach_and_non_overlap
    BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
 } FC_LOG_AND_RETHROW() }
 
+/// R18-H2-04 (round-18): pin the R17-C resolver self-deal bans on this leg.
+/// The r17c case above vectors its direct-ban attempt as carol-the-challenger
+/// holding no committee row: the push dies at the seated-member gate before
+/// reaching the R17-C asserts, so the bans were code-reachable but
+/// vector-unpinned. Seat carol here for the direct ban, then walk the overlap
+/// leg with a seated relative.
+BOOST_AUTO_TEST_CASE( r18h204_resolver_selfdeal_and_overlap_bans_pinned )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   fund( dave, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, carol );
+   h2c_make_committee_member( *this, dave );
+
+   // Healthy vault, carol's-floor challenge, lapsed window (the r17c flow;
+   // state is per-case).
+   authority vault_auth( 1, bob_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default(
+         *this, bob_id, bob_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "r18h204-bans" ) );
+   generate_blocks( cid( db ).deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+
+   // Vector A: the SEATED challenger resolves her own expiry. She passes the
+   // seated-member gate; the direct ban must refuse her by name.
+   vault_resolve_operation sop;
+   sop.resolver  = carol_id;
+   sop.challenge = cid;
+   signed_transaction atx; atx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( atx.operations.back() );
+   set_expiration( db, atx );
+   atx.sign( carol_private_key, db.get_chain_id() );
+   const auto self_err = [&]() -> string {
+      try { PUSH_TX( db, atx ); } catch( const fc::exception& e ) { return e.to_string(); }
+      return string();
+   }();
+   BOOST_CHECK_MESSAGE( self_err.find( "Challenger may not resolve its own challenge" )
+            != std::string::npos,
+         "R18H204: seated challenger self-resolution not refused at the "
+         "direct ban; got: " << self_err );
+
+   // Vector B: carol's active authority now names the seated dave, so a dave
+   // resolve shares authority with the challenger through the bounded walk.
+   account_update_operation bop;
+   bop.account = carol_id;
+   bop.active  = authority( 1, public_key_type( carol_private_key.get_public_key() ), 1,
+                            dave_id, 1 );
+   signed_transaction btx; btx.operations.push_back( bop );
+   db.current_fee_schedule().set_fee( btx.operations.back() );
+   set_expiration( db, btx );
+   btx.sign( carol_private_key, db.get_chain_id() );
+   PUSH_TX( db, btx );
+
+   vault_resolve_operation rop;
+   rop.resolver  = dave_id;
+   rop.challenge = cid;
+   signed_transaction rtx; rtx.operations.push_back( rop );
+   db.current_fee_schedule().set_fee( rtx.operations.back() );
+   set_expiration( db, rtx );
+   rtx.sign( dave_private_key, db.get_chain_id() );
+   const auto overlap_err = [&]() -> string {
+      try { PUSH_TX( db, rtx ); } catch( const fc::exception& e ) { return e.to_string(); }
+      return string();
+   }();
+   BOOST_CHECK_MESSAGE( overlap_err.find( "shares authority with the challenger" )
+            != std::string::npos,
+         "R18H204: shared-authority resolve not refused at the overlap walk; "
+         "got: " << overlap_err );
+
+   BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().empty() );
+} FC_LOG_AND_RETHROW() }
 
 /// VAC-R17-10 (round-17, REPAIR-?): the rmax guard needs an ENABLED
 /// binding vector. The existing enabled junior refusals (erin's claim=1

@@ -589,7 +589,8 @@ BOOST_AUTO_TEST_CASE( r32_quorum_gap_keeps_consumed_baseline )
    BOOST_CHECK( oid(db).consumed_value.valid() );
    BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
 
-   // Restore: dave joins the set; bob's stored submission is still live.
+   // Restore: bob rejoins the set. (His pre-rotation submission row was pruned
+   // by the gap update above -- the restore re-adds membership only.)
    oracle_options back = gap;
    back.producers[bob_id] = oracle_producer_entry( 1 );
    update_options( oid, alice_id, alice_private_key, back );
@@ -3425,6 +3426,80 @@ BOOST_AUTO_TEST_CASE( t8b2_guard_delay_promotes_oldest_sample_block_cadence_r17g
       "R17G RED: guard delay 7200 never promoted any sample at block cadence" );
    BOOST_CHECK_GE( *first_age_7200, int64_t( 7194 ) );
    BOOST_CHECK_LE( *first_age_7200, int64_t( 7260 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// R18 (ORC-02): the R17G bucket span needs the CEILING. 15*floor(delay/15)
+/// falls up to 14s (delay%15) short of the delay, so when the publish cadence
+/// equals exactly floor(delay/15) seconds the 17th push evicts each sample at
+/// the same publish at which it first ripens; the trim-before-scan order then
+/// erases it unread and the feed stalls at any delay with delay % 15 != 0 (the
+/// R18 replay stalled 3601/3603/7201 and swept the class). With bucket =
+/// ceil(delay/15) the full queue spans >= delay, the ripe sample survives to
+/// the scan, and the first promotion seeds the consumed value.
+///
+/// Production shape at small cost: delay 3601 (residue 1 mod 15, the class
+/// floor) with publishes every 48 blocks = 240s = exactly floor(3601/15) at
+/// the fixture's 5s block interval. The parameter is poked directly (the
+/// committee path floors the delay at the 3600 default; the guard arithmetic
+/// reads the same field either way, and the voted path is covered by t8b2).
+BOOST_AUTO_TEST_CASE( t8b3_guard_delay_promotes_non_divisible_delay_r18orc02 )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   {
+      auto& gpo = db.get_global_properties();
+      db.modify( gpo, []( global_property_object& p ) {
+         p.parameters.extensions.value.oracle_guard_delay_sec = 3601;
+      } );
+   }
+   BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters
+                           .get_oracle_guard_delay_sec(), 3601u );
+
+   ACTORS( (alice)(carol) );
+   fund( alice ); fund( carol );
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   opts.guard_delay         = true;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE3", opts, usd_ref );
+
+   // Publish every 48 blocks (240s): exactly floor(3601/15), the cadence the
+   // R18 replay showed stalling pre-fix. Pre-fix (bucket 240) every publish
+   // pushes; the 17th push (at 3840s) trims the oldest at age 3840 >= 3601 --
+   // the same publish at which it first ripened -- and the scan, running after
+   // the trim, never sees it: the feed stalls forever. Post-fix (bucket 241)
+   // the queue advances every second publish (480s apart, 15 entries spanning
+   // 7200s), the oldest reaches 3601 with far more than one trim away, and the
+   // scan promotes it at the first publish past the delay.
+   const auto t0 = db.head_block_time();
+   fc::optional<int64_t> first_age;
+   for( int i = 0; i < 1200; ++i )
+   {
+      if( i % 48 == 0 )
+         guard_publish( oid, carol_id, carol_private_key, 100 );
+      generate_block();
+      set_expiration( db, trx );
+      if( !first_age.valid() && oid(db).consumed_value.valid() )
+         first_age = int64_t( ( db.head_block_time() - t0 ).to_seconds() ) - 3; // the block that promoted
+      // While the delay still holds: no premature promotion.
+      if( ( db.head_block_time() - t0 ).to_seconds() < 3595 )
+         BOOST_CHECK( !oid(db).consumed_value.valid() );
+      if( first_age.valid() )
+         break;
+   }
+   BOOST_REQUIRE_MESSAGE( first_age.valid(),
+      "R18 ORC-02 RED: guard delay 3601 never promoted at the floor-cadence "
+      "publish rate (15*floor(3601/15) = 3600 < 3601: the 17th push evicts "
+      "each sample at its ripening publish; the trim runs before the scan)" );
+   // Promotion lands on the first publish at which the oldest sample is ripe:
+   // at/after the delay, and within one 240s publish cadence of ripening.
+   BOOST_CHECK_GE( *first_age, int64_t( 3601 ) );
+   BOOST_CHECK_LE( *first_age, int64_t( 3601 + 240 + 9 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// T8c: freeze halts consumption and fails margin actions closed; unfreeze by vote

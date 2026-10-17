@@ -56,6 +56,16 @@ Any future proof upgrade vendors its lineage here with fresh pins — the
 
 ## SHA256 of vendored files (measured at vendor time)
 
+Correction 2026-10-17 (round-17 `EXT-R17-05`): two rows below carried
+vendor-time transcription typos — `generator/tests_impl.h` was recorded as 65
+hex characters (not a valid sha256) and `rangeproof/rangeproof_impl.h` had one
+mistyped hex character. Both files are byte-stable since their introduction
+commit `cd97a59d` (empty `git diff cd97a59d..HEAD` for both paths — measured,
+not assumed), so these were manifest typos, never file drift. The list now
+carries the MEASURED values (29 files, 30 entries including this README).
+Full transcript:
+`build/audit-g1-clsag-bp-specialist-packet/VENDOR-SHA256-TRANSCRIPT.txt`.
+
 monero-ringct/:
 - bulletproofs.cc      fe61080cfbe7710847a97ea49e8463928cc4ae83eab439e623eda070b9dd17b0
 - bulletproofs.h       e36c28a84778076d333fcf6011fb986058f75d8238855fa0d0aa796923c6e2bd
@@ -77,12 +87,12 @@ secp256k1-zkp-modules/:
 - commitment/pedersen_impl.h         2abcb1bed49d470c4bdab2658fbd3f610984fceccc268f7379d6faec46b6ac16
 - commitment/tests_impl.h            6f1a4a1ccdca77dd5bf1513802b8808432e868720ef1327121670a54df59439a
 - generator/main_impl.h              065152e9409692d302023decc6ea2fe6c03a6af462435150f73be9ce8246f9f8
-- generator/tests_impl.h             6ec8063c932e3343792058e4cb4c39ed4973ddf89e7a2bab677e0d5834ee950b0
+- generator/tests_impl.h             6ec8063c932e334379db1c6cb4c39ed4973ddf89e7a2bab677e0d5834ee950b0
 - rangeproof/borromean.h             668ad333886c5a7db3f518cdc9acf88fc78eaad04e6d280fcb0ee58a571b94ee
 - rangeproof/borromean_impl.h        83b3fb20ae6782f754252333273a7f55a222b1d5670afad02a6885936f06d2ab
 - rangeproof/main_impl.h             be0404a7dba6ac56dc8dfb269c66dc9498e0fe4c76c49747028e155095f045ee
 - rangeproof/rangeproof.h            f136150e8e7347ff0bfac863581d9d0506bf1d4f528bf29750a7db4d2d4a8b54
-- rangeproof/rangeproof_impl.h       2d15388aa11b34718d2e3528ba1354e3872890afa4d82f1d222d89ea7b70c8e8
+- rangeproof/rangeproof_impl.h       2d15388aa11b34718d5e3528ba1354e3872890afa4d82f1d222d89ea7b70c8e8
 - rangeproof/tests_impl.h            5668f69a04ef1a150d0c67cf3330790f6b7a7778bd4e0da0d319d190fcb9c2af
 
 Vendored build files (recorded G1b-2 P7; reference-only, never compiled):

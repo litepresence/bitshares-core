@@ -37,6 +37,7 @@
 #include <fc/io/raw.hpp>
 #include <fc/uint128.hpp>
 
+#include <algorithm>
 #include <limits>
 
 namespace graphene { namespace chain {
@@ -284,8 +285,20 @@ void_result seasoning_verify_evaluator::do_evaluate( const seasoning_verify_oper
               "Pair ${p} is already verified by ${v}; double attestation refused",
               ("p", op.pair)("v", _record->verifier) );
     const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
-    FC_ASSERT( member_idx.find( op.verifier ) != member_idx.end(),
+    const auto mitr = member_idx.find( op.verifier );
+    FC_ASSERT( mitr != member_idx.end(),
                "Verifier ${a} is not a seated committee member", ("a", op.verifier) );
+    // GOV-R17-04 / ATR-R17-02 (round-17, merged at synthesis): committee_member_create
+    // is permissionless (op-29, LTM only) and registry rows are never pruned, so
+    // registry membership alone is a sybil door -- a pair operator could register a
+    // second committee account, attest their own vault, and self-issue the AC-08
+    // independence bit for the price of one registration. Mirror the elected-set
+    // gate the H2 oracle_evaluator (GOV-R17-03) and pair_freeze carry: the verifier
+    // must sit in the stake-elected active_committee_members set. The overlap walks
+    // below are unchanged.
+    const auto& elected = d.get_global_properties().active_committee_members;
+    FC_ASSERT( std::find( elected.begin(), elected.end(), mitr->get_id() ) != elected.end(),
+               "Verifier ${a} is not in the elected committee set", ("a", op.verifier) );
 
     // AC-16 (round-9): the attestation judges the pair's bonded backing, so
     // no party to the pair may issue it -- a self-attested 90-day clock is

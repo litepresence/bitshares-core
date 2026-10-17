@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/issuance_object.hpp>
@@ -46,6 +47,32 @@
 #include <algorithm>
 
 namespace graphene { namespace chain {
+
+/// R17-A (round-17): the exported center-out band spend. Defined beside its
+/// wind-down consumer because this TU's include closure resolves the plain
+/// vector/share_type aliases (verified); declared for all TUs in
+/// issuance_evaluator.hpp next to ensure/verify.
+void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
+{
+   h2_issue_ensure_bands( bands );
+   // NC-07 (round-9): the table is sized by DEDUCTION, never by an explicit
+   // N_BANDS bound: a fixed-size `order[7]` stays well-formed when the band
+   // count is raised (its tail is silently zero-filled, and band 0 would be
+   // hit twice), while the form below turns that bump into a compile error.
+   static const uint32_t order[] = { 3, 4, 2, 5, 1, 6, 0 };
+   static_assert( sizeof( order ) / sizeof( order[0] ) == GRAPHENE_H2_ISSUE_N_BANDS,
+                  "Band spend order must cover exactly GRAPHENE_H2_ISSUE_N_BANDS bands" );
+   share_type remaining = amount;
+   for( uint32_t k = 0; k < GRAPHENE_H2_ISSUE_N_BANDS && remaining > share_type( 0 ); ++k )
+   {
+      share_type& band = bands[ order[k] ];
+      const share_type take = std::min( band, remaining );
+      band -= take;
+      remaining -= take;
+   }
+   FC_ASSERT( remaining == share_type( 0 ),
+              "Band spend exceeds the partitioned total; conservation broken" );
+}
 
 const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault )
 {
@@ -435,10 +462,29 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
                  "Resolver ${a} is registered but not on the elected committee",
                  ("a", op.resolver) );
    }
+   // R17-C (round-17): the resolver must not overlap the challenger, mirroring
+   // the vote leg's self-dealing bans (challenge_evaluator.cpp). Without this,
+   // an $837.50-floor challenger could resolve its own expiry straight into a
+   // wind-down and cash the seized stack as its finder slice.
+   FC_ASSERT( op.resolver != _challenge->challenger,
+              "Challenger may not resolve its own challenge" );
+   FC_ASSERT( !h2_authority_graphs_overlap( d, op.resolver, _challenge->challenger ),
+              "Resolver ${a} shares authority with the challenger", ("a", op.resolver) );
    const vault_object* vault = d.find( _challenge->vault );
    FC_ASSERT( nullptr != vault, "Challenged vault no longer exists" );
    FC_ASSERT( vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
               "Vault is already wound down; no second wind-down" );
+   // R17-C (round-17): expiry is INCONCLUSIVE, not guilty. A nil-merit
+   // challenge must never move a healthy vault's entire bond stack: execute
+   // an EXPIRED_FROZEN wind-down only when the vault genuinely fails
+   // maintenance at resolve time. Sustained challenges keep the seizure
+   // (the vote is the merit finding there).
+   if( _challenge->state == GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN )
+   {
+      FC_ASSERT( !h2_vault_meets_maintenance( d, *vault ),
+                 "Expired challenge cannot wind down a vault that still "
+                 "meets maintenance; resolve refused without coverage breach" );
+   }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -709,9 +755,14 @@ object_id_type winddown_claim_evaluator::do_apply( const winddown_claim_operatio
       } );
       if( const reserve_object* reserve = h2_find_reserve( d, _winddown->pair ) )
       {
+         // R17-A: the burn moves WITH its band partition (center-out spend
+         // starts at band 3, where the settled face was parked) and the
+         // partition verify gates the writer, like every settle/refund leg.
          d.modify( *reserve, [&senior_burn]( reserve_object& r ) {
             r.stable_supply -= senior_burn;
+            h2_issue_bands_spend( r.band_stable, senior_burn );
          } );
+         h2_issue_verify_bands( *reserve );
       }
    }
    const auto& new_claim = d.create<winddown_claim_object>(

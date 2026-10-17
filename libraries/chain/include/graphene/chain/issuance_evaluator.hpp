@@ -251,6 +251,13 @@ namespace graphene { namespace chain {
      */
     void h2_issue_verify_bands( const reserve_object& r );
 
+/// R17-A (round-17): externally-linkable partition spend, previously file-local.
+/// Spends @p amount from @p bands center-outward (order 3,4,2,5,1,6,0) and
+/// leaves sum(bands) equal to the caller's new totals; conservation across
+/// the physical totals is the caller's job (spend + total move in one modify,
+/// then h2_issue_verify_bands).
+void h2_issue_bands_spend( std::vector<share_type>& bands, share_type amount );
+
    /// @return the offset pool for @p pair, or null when none exists.
    const offset_pool_object* h2_find_offset_pool( const database& d, asset_id_type pair );
 

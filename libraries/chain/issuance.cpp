@@ -220,29 +220,10 @@ share_type h2_issue_door_used( const reserve_object* reserve, uint32_t head_bloc
 /// Exact, deterministic, fail-closed: callers hold conservation by
 /// construction (band sums equal the totals), so any remainder is a
 /// consensus bug and is refused, never printed. Rounding: none -- takes
-/// exact minima, no division anywhere.
-void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
-{
-   h2_issue_ensure_bands( bands );
-   // NC-07 (round-9): the table is sized by DEDUCTION, never by an explicit
-   // N_BANDS bound: a fixed-size `order[7]` stays well-formed when the band
-   // count is raised (its tail is silently zero-filled, and band 0 would be
-   // hit twice), while the form below turns that bump into a compile error.
-   static const uint32_t order[] = { 3, 4, 2, 5, 1, 6, 0 };
-   static_assert( sizeof( order ) / sizeof( order[0] ) == GRAPHENE_H2_ISSUE_N_BANDS,
-                  "Band spend order must cover exactly GRAPHENE_H2_ISSUE_N_BANDS bands" );
-   share_type remaining = amount;
-   for( uint32_t k = 0; k < GRAPHENE_H2_ISSUE_N_BANDS && remaining > share_type( 0 ); ++k )
-   {
-      share_type& band = bands[ order[k] ];
-      const share_type take = std::min( band, remaining );
-      band -= take;
-      remaining -= take;
-   }
-   FC_ASSERT( remaining == share_type( 0 ),
-              "Band spend exceeds the partitioned total; conservation broken" );
-}
-
+/// exact minima, no division anywhere. DEFS moved out of the anonymous
+/// namespace for R17-A: the exported definition lives in
+/// vault_lifecycle_evaluator.cpp, declared in issuance_evaluator.hpp.
+///
 /// Price direction at two bonded prices (bond-per-face convention): is @p now
 /// strictly above @p anchor? Exact 256-bit cross-multiply, no division.
 bool h2_issue_price_up( const protocol::oracle_value& anchor,

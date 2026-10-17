@@ -60,6 +60,8 @@
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
@@ -67,6 +69,7 @@
 #include <graphene/protocol/h2_economics.hpp>
 #include <graphene/protocol/liquidity_pool.hpp>
 #include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/vault_ops.hpp>
 
@@ -351,12 +354,16 @@ void h2e_vote(
    PUSH_TX( f.db, tx );
 }
 
-/// Votes a fast-reject supermajority from the genesis seated set.
+/// Votes a fast-reject supermajority from the genesis seated set. GOV-R17-02:
+/// the deciding set is the ELECTED set (active_committee_members), not the
+/// permissionless registry, and the threshold mirrors the evaluator's
+/// supermajority helper -- a registry-sized vote loop overruns the
+/// resolution and the last vote is refused as non-OPEN.
 void h2e_fast_reject_from_genesis( database_fixture& f, object_id_type target )
 {
-   const uint64_t n = f.db.get_index_type<committee_member_index>().indices().size();
+   const uint64_t n = f.db.get_global_properties().active_committee_members.size();
    BOOST_REQUIRE( n > 0 );
-   const uint64_t need = ( 2 * n + 2 ) / 3; // ceil(2N/3)
+   const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
    for( uint64_t i = 0; i < need; ++i )
    {
       const auto& acct = f.get_account( string( "init" ) + fc::to_string( i ) );
@@ -368,10 +375,11 @@ void h2e_fast_reject_from_genesis( database_fixture& f, object_id_type target )
 }
 
 /// Votes a sustain supermajority from the genesis seated set (BPS-constant
-/// threshold mirroring the evaluator's supermajority helper).
+/// threshold mirroring the evaluator's supermajority helper; GOV-R17-02:
+/// counted over the ELECTED set, active_committee_members).
 void h2e_sustain_from_genesis( database_fixture& f, object_id_type target )
 {
-   const uint64_t n = f.db.get_index_type<committee_member_index>().indices().size();
+   const uint64_t n = f.db.get_global_properties().active_committee_members.size();
    BOOST_REQUIRE( n > 0 );
    const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
    for( uint64_t i = 0; i < need; ++i )
@@ -384,10 +392,11 @@ void h2e_sustain_from_genesis( database_fixture& f, object_id_type target )
    }
 }
 
-/// Votes an exonerate supermajority from the genesis seated set.
+/// Votes an exonerate supermajority from the genesis seated set (GOV-R17-02:
+/// counted over the ELECTED set, active_committee_members).
 void h2e_exonerate_from_genesis( database_fixture& f, object_id_type target )
 {
-   const uint64_t n = f.db.get_index_type<committee_member_index>().indices().size();
+   const uint64_t n = f.db.get_global_properties().active_committee_members.size();
    BOOST_REQUIRE( n > 0 );
    const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
    for( uint64_t i = 0; i < need; ++i )
@@ -398,6 +407,35 @@ void h2e_exonerate_from_genesis( database_fixture& f, object_id_type target )
       h2e_vote( f, acct.get_id(), f.init_account_priv_key, target,
                 GRAPHENE_H2_DISPUTE_EXONERATE );
    }
+}
+
+/// ISS-R14-16 test adaptation: grant a season record the production shape by
+/// backdating its window and stamping the verifier bit (hand-set precedent in
+/// h2_seasoning_tests). Records exist only for vaulted pairs; the early
+/// return keeps never-vaulted sites exact -- no flush, no block-cadence
+/// change, the issuer-direct gate is already inert there. The flush precedes
+/// the locate: a backdate written into an open pending session would be
+/// discarded at the next clear, so the record is re-located in committed
+/// state before the modify (file-local twin of h2x_grant_seasoning).
+void h2e_grant_seasoning( database_fixture& f, asset_id_type pair )
+{
+   const auto& by_pair = f.db.get_index_type<seasoning_record_index>()
+                            .indices().get<by_seasoning_pair>();
+   if( by_pair.find( pair ) == by_pair.end() )
+      return; // never-vaulted pair: no record exists and the gate is inert
+   f.generate_block(); // seal setup: a backdate issued back-to-back would be discarded
+   const auto itr = by_pair.find( pair );
+   if( itr == by_pair.end() )
+      return; // structural surprise: leave the record untouched
+   const fc::time_point_sec backdate = f.db.head_block_time()
+         - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+   f.db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+      m.window_start  = backdate;
+      m.min_vault_bps  = 50000;  // > the 2.0 (20000bps) and 1.0 (10000bps) floors
+      m.min_oracle_bps = 50000;
+      m.verifier_set   = true;
+      m.complete       = true;
+   } );
 }
 
 /// Committee oracle_unfreeze through the price-leg op (throws on refusal).
@@ -565,6 +603,7 @@ void h2e_issue_pair_face( database_fixture& f,
       account_id_type issuer, const fc::ecc::private_key& key,
       account_id_type recipient, asset_id_type pair, share_type amount )
 {
+   h2e_grant_seasoning( f, pair ); // ISS-R14-16: season the bound pair before the print
    asset_issue_operation op;
    op.issuer           = issuer;
    op.asset_to_issue   = asset( amount, pair );
@@ -1025,6 +1064,88 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    BOOST_CHECK_THROW( PUSH_TX( db, stx ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
+/// ATR-R17-01 (round-17, CONFIRMED_IMPORTANT): an administrative freeze of
+/// the bound oracle must hold at the pair read. The owner-controlled backup
+/// covers staleness/liveness loss of the bound series only -- never a freeze
+/// (committee tripwire, challenge, pair_freeze). RED pre-fix: the frozen
+/// primary still hopped to the live backup, because the hop predated the
+/// frozen-flag refusal h2_read_consumed_price applies to the primary, so
+/// freezing an already-stale self-owned primary never halted the vault's
+/// consumed price.
+BOOST_AUTO_TEST_CASE( atr_r17_01_frozen_bound_oracle_refuses_the_backup_hop )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   h2e_make_committee_member( *this, alice );
+   const auto bts_ref = h2e_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2e_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type primary =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "A17P.USD", bts_ref, usd_ref, opts );
+   const oracle_id_type backup =
+         h2e_make_oracle( *this, alice_id, alice_private_key, "A17B.USD", bts_ref, usd_ref, opts );
+   const auto vb = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, primary, vb, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   generate_block(); // identical same-block vesting create would be a duplicate tx
+   const auto vb2 = h2e_make_cdd_vesting( *this, bob_id, bob_private_key, H2E_ORACLE_RAW );
+   h2e_lock_producer_bond( *this, bob_id, bob_private_key, backup, vb2, H2E_ORACLE_RAW,
+                           H2E_ORACLE_USD_CENTS );
+   price_oracle fb = h2e_fallback_to( *this, backup, 0 );
+   h2e_set_fallback( *this, alice_id, alice_private_key, primary,
+                     optional<price_oracle>( fb ) );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2e_register_vault(
+         *this, alice_id, alice_private_key, vault_auth, H2E_VAULT_RAW, H2E_VAULT_USD_CENTS );
+   const auto vest = h2e_make_cdd_vesting( *this, alice_id, alice_private_key, H2E_VAULT_RAW );
+   h2e_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2E_VAULT_RAW,
+                        H2E_VAULT_USD_CENTS );
+   h2e_freeze( *this, alice_id, alice_private_key, vid, primary );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( primary( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+
+   // Both legs live: the primary serves.
+   h2e_publish( *this, primary, bob_id, bob_private_key, 100, 1 );
+   h2e_publish( *this, backup, bob_id, bob_private_key, 200, 1 );
+   {
+      const auto p = h2_read_pair_price( db, vid( db ), 0, db.head_block_time() );
+      BOOST_REQUIRE( p.valid() );
+      BOOST_CHECK( p->base_amount == share_type( 100 ) );
+   }
+
+   // Primary stale, backup live: the hop serves (the control leg -- the fix
+   // must not kill the backup's designed staleness purpose).
+   generate_blocks( db.head_block_time() + 90000 );
+   generate_block();
+   h2e_publish( *this, backup, bob_id, bob_private_key, 200, 1 );
+   {
+      const auto p = h2_read_pair_price( db, vid( db ), 0, db.head_block_time() );
+      BOOST_REQUIRE( p.valid() );
+      BOOST_CHECK( p->base_amount == share_type( 200 ) );
+   }
+
+   // Now freeze the BOUND oracle (the flag every admin path sets): the
+   // backup must NOT be read, even though it is live. Flush first: the
+   // backup publish above leaves the pending session open and a direct
+   // surgery into it would be rolled back by the next block (the
+   // pending-session rule; same flush discipline as the h2_09 recovery
+   // tests).
+   generate_block();
+   db.modify( primary( db ), []( oracle_object& o ) { o.options.frozen = true; } );
+   generate_block();
+   BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+} FC_LOG_AND_RETHROW() }
+
 /// Recovery trigger over the explicit system scope: below 150% new debt
 /// (vault_register) is refused while exits stay possible; restoration clears.
 BOOST_AUTO_TEST_CASE( recovery_suspends_new_debt_at_150_scope_then_clears )
@@ -1260,6 +1381,13 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_h2_medians )
    // but with no bound oracle there is no feed leg, so windows fill and the
    // stage never moves across three maintenances.
    const asset_id_type lone = h2e_create_uia( *this, alice_id, alice_private_key, "LONE" );
+   // ISS-R14-16: the issuer-direct print must sit before the vault exists --
+   // the issuer-direct gate is inert on a vault-less pair, and the sampling
+   // subject (a bound-less vault over three maintenances) is unaffected.
+   // The shared trx was stamped at test start; re-stamp at the current head
+   // (post-maintenance-jump) or the push fails the expiration check.
+   set_expiration( db, trx );
+   issue_uia( sam, asset( 2000000000LL, lone ) ); // pilot-scale (AC-02): ÷10, cap-inclusive
    authority vault_auth( 1, alice_id, 1 );
    const vault_id_type lvid = h2e_register_vault(
          *this, alice_id, alice_private_key, vault_auth,
@@ -1267,7 +1395,6 @@ BOOST_AUTO_TEST_CASE( h1_pairs_excluded_from_h2_medians )
      const asset_id_type lshare = h2e_create_uia( *this, sam_id, sam_private_key, "LSHARE" );
      const liquidity_pool_id_type lpool_id = create_liquidity_pool(
            sam_id, asset_id_type(), lone, lshare, 0, 0 ).get_id();
-    issue_uia( sam, asset( 2000000000LL, lone ) ); // pilot-scale (AC-02): ÷10, cap-inclusive
     deposit_to_liquidity_pool( sam_id, lpool_id,
                                asset( 10000000000LL ), asset( 100000000LL, lone ) ); // ÷10 pilot-scale
     for( int w = 0; w < 3; ++w )
@@ -1334,7 +1461,8 @@ BOOST_AUTO_TEST_CASE( tripwire_halt_ladder_on_crafted_dislocation_then_reopens )
           sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
     const liquidity_pool_id_type pool2_id = create_liquidity_pool(
           sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
-    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
+    h2e_grant_seasoning( *this, pairp ); // ISS-R14-16: season the bound pair before the print
+   issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
     deposit_to_liquidity_pool( sam_id, pool1_id,
                                asset( 50000000000LL ), asset( 500000000LL, pairp ) );
     deposit_to_liquidity_pool( sam_id, pool2_id,
@@ -1482,6 +1610,7 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
     const asset_id_type sq = h2e_create_uia( *this, sam_id, sam_private_key, "HSHARE" );
     const liquidity_pool_id_type pool_id = create_liquidity_pool(
           sam_id, asset_id_type(), pairq, sq, 0, 0 ).get_id();
+    h2e_grant_seasoning( *this, pairq ); // ISS-R14-16: season the bound pair before the print
     issue_uia( sam, asset( 2000000000LL, pairq ) ); // pilot-scale (AC-02): ÷10, cap-inclusive
     deposit_to_liquidity_pool( sam_id, pool_id,
                                asset( 10000000000LL ), asset( 100000000LL, pairq ) ); // ÷10 pilot-scale
@@ -1721,6 +1850,7 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
          sam_id, asset_id_type(), pairc, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairc, s2, 0, 0 ).get_id();
+   h2e_grant_seasoning( *this, pairc ); // ISS-R14-16: season the bound pair before the print
    issue_uia( sam, asset( 1200000000LL, pairc ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
                               asset( 50000000000LL ), asset( 500000000LL, pairc ) );
@@ -1904,6 +2034,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_sustained_oracle_frozen_then_committ
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   h2e_grant_seasoning( *this, pairp ); // ISS-R14-16: season the bound pair before the print
    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );
@@ -2211,6 +2342,7 @@ BOOST_AUTO_TEST_CASE( h2_maintenance_order_expiry_vault_tripwire_pinned )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   h2e_grant_seasoning( *this, pairp ); // ISS-R14-16: season the bound pair before the print
    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );
@@ -2377,6 +2509,7 @@ BOOST_AUTO_TEST_CASE( tripwire_reopen_keeps_expired_vault_frozen )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   h2e_grant_seasoning( *this, pairp ); // ISS-R14-16: season the bound pair before the print
    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );
@@ -2526,6 +2659,7 @@ BOOST_AUTO_TEST_CASE( exonerated_vault_restores_through_reopen )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   h2e_grant_seasoning( *this, pairp ); // ISS-R14-16: season the bound pair before the print
    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );
@@ -2800,6 +2934,7 @@ BOOST_AUTO_TEST_CASE( expiry_coincides_with_reopen_sweep_frozen_persists )
          sam_id, asset_id_type(), pairp, s1, 0, 0 ).get_id();
    const liquidity_pool_id_type pool2_id = create_liquidity_pool(
          sam_id, asset_id_type(), pairp, s2, 0, 0 ).get_id();
+   h2e_grant_seasoning( *this, pairp ); // ISS-R14-16: season the bound pair before the print
    issue_uia( sam, asset( 1200000000LL, pairp ) ); // pilot-scale (AC-02): ÷20 pools, drift <2%
    deposit_to_liquidity_pool( sam_id, pool1_id,
                               asset( 50000000000LL ), asset( 500000000LL, pairp ) );

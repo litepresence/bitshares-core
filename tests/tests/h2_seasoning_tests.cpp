@@ -884,6 +884,49 @@ BOOST_AUTO_TEST_CASE( related_party_verifier_refused )
    BOOST_CHECK_EQUAL( h2s_find_record( *this, pair_b ).verifier_set, false );
 } FC_LOG_AND_RETHROW() }
 
+/// GOV-R17-04 / ATR-R17-02 (round-17): the verifier gate admitted ANY
+/// committee_member_index row. committee_member_create is permissionless at
+/// one LTM fee (op-29) and registry rows are never pruned, so a pair
+/// operator could register a second account, self-attest the 90-day clock,
+/// and hand a downstream USD-issuance gate a verifier bit worth one
+/// registration. The attestation now requires the verifier sit in the
+/// stake-elected active_committee_members set. RED pre-fix: the unelected
+/// attestation is admitted and verifier_set flips.
+BOOST_AUTO_TEST_CASE( gov_r17_04_unelected_verifier_refused )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 5000000000000LL ) );
+   fund( bob, asset( 5000000000000LL ) );
+   fund( carol, asset( 100000000000LL ) );
+   h2s_make_committee_member( *this, alice ); // the seated control
+   const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   (void)bts_ref; (void)usd_ref;
+
+   // Sybil: an op-29 registry row that never won a seat (the fixture seats
+   // only through create_and_seat_committee_member).
+   upgrade_to_lifetime_member( carol );
+   create_committee_member( carol );
+
+   const asset_id_type pair = h2s_create_uia( *this, bob_id, bob_private_key, "SEASG17" );
+   h2s_register_vault( *this, bob_id, bob_private_key, pair,
+                       authority( 1, bob_id, 1 ) );
+
+   // The unelected registrant: refused with the elected-set message; the
+   // record flips nothing.
+   const string unelected_err = h2s_verify_outcome( *this, carol_id, carol_private_key, pair );
+   BOOST_CHECK_MESSAGE( unelected_err.find( "elected committee set" ) != std::string::npos,
+                        "GOV-R17-04: unelected verifier not refused: " << unelected_err );
+   BOOST_CHECK_EQUAL( h2s_find_record( *this, pair ).verifier_set, false );
+   // Control: the same record and pair -- the seated member attests it.
+   h2s_verify( *this, alice_id, alice_private_key, pair );
+   BOOST_CHECK( h2s_find_record( *this, pair ).verifier == alice_id );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( breach_count_monotonic_ac15c )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );

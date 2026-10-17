@@ -32,6 +32,7 @@
 #include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 #include <graphene/chain/vault_object.hpp>
@@ -479,6 +480,17 @@ void_result asset_issue_evaluator::do_evaluate( const asset_issue_operation& o )
              d.get_index_type<vault_index>().indices().get<by_vault_pair>();
        if( vault_by_pair.find( o.asset_to_issue.asset_id ) != vault_by_pair.end() )
        {
+          // Seasoning on the second supply door (ISS-R14-16, round-14):
+          // the mint door (issuance.cpp:950) already refuses senior prints
+          // on an unseasoned pair; issuer-direct issue printing senior face
+          // on the SAME pair must clear the identical gate, or a fresh
+          // unseasoned pair bypasses BSIP-1 section-5 staging through the
+          // twin door. Fail-closed: a missing record reads incomplete.
+          FC_ASSERT( h2_seasoning_complete( d, o.asset_to_issue.asset_id ),
+                     "Pair ${p} is not seasoned: 90-day coverage with an "
+                     "independent verifier is required before issuer-direct "
+                     "issue",
+                     ("p", o.asset_to_issue.asset_id) );
           const share_type pilot_cap = h2_issue_pilot_cap_face( a.precision );
           share_type restore_face( 0 );
           if( const reserve_object* reserve =

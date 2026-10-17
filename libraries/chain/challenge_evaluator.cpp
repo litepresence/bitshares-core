@@ -635,8 +635,16 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
     {
        FC_ASSERT( op.voter != _challenge->challenger,
                   "Challenger may not vote on its own challenge" );
+       // R17-E: vote leg is null-tolerant on a stranded row (see the expiry
+       // sweep). A missing challenged vault is a terminal refusal, not a
+       // chain-halting dismissal.
+       const vault_object* voted_vault = d.find( _challenge->vault );
+       FC_ASSERT( voted_vault != nullptr,
+                  "Challenged vault ${v} no longer exists; the challenge is "
+                  "stranded and further votes are refused",
+                  ("v", _challenge->vault) );
        FC_ASSERT( !h2_authority_graphs_overlap( d, op.voter,
-                    _challenge->vault( d ).vault_authority ),
+                    voted_vault->vault_authority ),
                   "Voter ${a} shares authority with the challenged vault; "
                   "the vault's authority side may not vote",
                   ("a", op.voter) );
@@ -661,7 +669,16 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
 void_result challenge_vote_evaluator::do_apply( const challenge_vote_operation& op ) const
 { try {
    database& d = db();
-   const uint64_t deciding_set = d.get_index_type<committee_member_index>().indices().size();
+   // GOV-R17-02 (round-17): the deciding set is the ELECTED set, not the
+   // unpruned registry. Registration is permissionless (op-29, LTM only) and
+   // registry rows are never pruned; GOV-R9-01 already refuses votes from
+   // non-elected rows, but with the registry still in the denominator K sybil
+   // registrations inflate supermajority_of(N) and the quorum bar so the
+   // seated members cannot resolve anything -- the reverse side of the same
+   // attacker-deniable vote path. Fail-closed preserved: the elected set is
+   // non-empty from genesis (the assert below holds).
+   const uint64_t deciding_set =
+         d.get_global_properties().active_committee_members.size();
    FC_ASSERT( deciding_set > 0, "No deciding set is seated" );
    if( _challenge != nullptr )
    {
@@ -711,7 +728,16 @@ void process_expired_h2_challenges( database& d )
    {
       if( itr->state != GRAPHENE_H2_CHALLENGE_OPEN )
          continue;
-      const vault_object& vault = itr->vault(d);
+      // R17-E (round-17): a stranded OPEN challenge row may point at a vault
+      // that no longer exists (removal once admitted such a state). The sweep
+      // is null-tolerant on the vault leg: skip the zombie rather than
+      // dereference it and halt the chain. The row stays bounded (fixed
+      // deadline index), the skip is deterministic, and no economics run on
+      // a missing source.
+      const vault_object* vault_src = d.find( itr->vault );
+      if( vault_src == nullptr )
+         continue;
+      const vault_object& vault = *vault_src;
       // Expiry is inconclusive, never exoneration: the challenger's escrow
       // forfeits through the standard 80/15/finder split instead of
       // returning in full (cartel abstention past the deadline must never

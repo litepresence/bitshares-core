@@ -211,8 +211,11 @@ vault_id_type h2d_register_vault(
 /// evaluator's BPS-constant helper exactly (H2c cleanup: was ceil(2N/3)).
 uint64_t h2d_vote_threshold( database_fixture& f )
 {
-   const uint64_t n =
-         f.db.get_index_type<committee_member_index>().indices().size();
+   // GOV-R17-02: the deciding set is the ELECTED set (the evaluator computes
+   // its quorum/supermajority from active_committee_members; the registry is
+   // permissionless and never pruned). Keep the helper in the same shape so
+   // threshold-exact tests stay consistent at tips without sybils.
+   const uint64_t n = f.db.get_global_properties().active_committee_members.size();
    BOOST_REQUIRE( n > 0 );
    return ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
 }
@@ -1710,6 +1713,69 @@ BOOST_AUTO_TEST_CASE( gov_r9_01_elected_seat_still_votes )
    BOOST_CHECK_NO_THROW( h2d_vote( *this, seat0.get_id(), init_account_priv_key,
                                    object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE ) );
    BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN ); // 1 vote: no quorum
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// GOV-R17-02 (round-17): the deciding_set is the ELECTED set, never the registry
+// ---------------------------------------------------------------------------
+
+/// RED (GOV-R17-02, carried since round-10): GOV-R9-01 already refuses votes
+/// from non-elected rows, but the resolution DENOMINATOR at
+/// challenge_evaluator.cpp still counts the unpruned registry. Registration is
+/// permissionless (op-29, LTM only) and rows are never pruned: K fresh
+/// registrations inflate supermajority_of(N) and the quorum bar, so the seated
+/// members cannot resolve anything while a sybil army exists -- every vote
+/// path is attacker-deniable in reverse (with GOV-R17-01, seizure-by-default).
+/// Here 8 genesis seats + 10 registered-but-never-elected members: the 8
+/// elected votes must resolve a dispute whose bar stays sized on the elected
+/// set. Pre-fix the resolution is refused (RED), post-fix it lands (GREEN).
+BOOST_AUTO_TEST_CASE( gov_r17_02_unelected_registrants_do_not_shrink_supermajority )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice );
+   fund( bob, asset( 3000000000000LL ) );
+   fund( carol, asset( 3000000000000LL ) );
+
+   // Seat the full genesis committee AND register 10 permissionless sybils.
+   h2d_make_committee_member( *this, alice );
+   for( int i = 0; i < 8; ++i )
+   {
+      const string name = string( "h2r17q" ) + fc::to_string( i );
+      // create + fund + upgrade + register, but never seat:
+      const auto& sybil = create_account( name, init_account_priv_key );
+      fund( sybil, asset( 3000000000000LL ) );
+      upgrade_to_lifetime_member( sybil );
+      create_committee_member( sybil );
+   }
+   const uint64_t registry = db.get_index_type<committee_member_index>().indices().size();
+   const uint64_t elected = db.get_global_properties().active_committee_members.size();
+   BOOST_TEST_MESSAGE( "GOV-R17-02: registry=" << registry << " elected=" << elected );
+   BOOST_REQUIRE_GT( registry, elected );
+
+   const oracle_dispute_id_type did =
+         gov_r9_open_dispute( *this, bob_id, bob_private_key, carol_id, carol_private_key );
+   BOOST_REQUIRE_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+
+   // The elected budget is the H2 QUORUM/SUPERMAJORITY floor for the genesis
+   // committee; the pre-fix bar is computed from the registry (inflated).
+   const uint64_t need = h2d_vote_threshold( *this );
+   const string decisive_name = string( "init" ) + fc::to_string( need - 1 );
+   for( uint64_t i = 0; i < need; ++i )
+      fund( get_account( string( "init" ) + fc::to_string( i ) ), asset( 1000000 ) );
+   for( uint64_t i = 0; i + 1 < need; ++i )
+      h2d_vote( *this, get_account( string( "init" ) + fc::to_string( i ) ).get_id(),
+                init_account_priv_key, object_id_type( did ),
+                GRAPHENE_H2_DISPUTE_EXONERATE );
+   BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+   // The decisive vote: post-fix this resolves the dispute with exactly the
+   // elected-set supermajority; pre-fix (registry denominator) it stays open.
+   h2d_vote( *this, get_account( decisive_name ).get_id(), init_account_priv_key,
+             object_id_type( did ), GRAPHENE_H2_DISPUTE_EXONERATE );
+   BOOST_CHECK_EQUAL( did( db ).state, GRAPHENE_H2_CHALLENGE_EXONERATED );
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------

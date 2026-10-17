@@ -171,6 +171,16 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
                     "Pair ${a} carries a wound-down vault whose claims are not "
                     "settled; re-registration refused until the wind-down "
                     "completes", ("a", op.pair) );
+         // R17-E (round-17): never remove a vault that still carries an OPEN
+         // challenge. The removal strands the challenge row behind a dangling
+         // vault id and the next expiry sweep (process_expired_h2_challenges)
+         // dereferences it and halts the chain. vault_rotate carries the same
+         // gate; re-registration reaches the same removal, so it needs the
+         // same stop.
+         FC_ASSERT( existing->open_challenges == 0,
+                    "Pair ${a} carries ${c} open challenges; re-registration "
+                    "refused until they resolve",
+                    ("a", op.pair)("c", existing->open_challenges) );
       }
    }
 
@@ -206,6 +216,13 @@ object_id_type vault_register_evaluator::do_apply( const vault_register_operatio
       {
          FC_ASSERT( existing->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN,
                     "Refusing to remove a non-winddown vault at re-registration" );
+         // R17-E mirror gate (defense in depth; see do_evaluate): a drifted
+         // evaluate gate can never cascade into removing a live challenge
+         // tracker with the chain's expiry sweep standing behind it.
+         FC_ASSERT( existing->open_challenges == 0,
+                    "Refusing to remove a winddown vault that carries "
+                    "${c} open challenges",
+                    ("c", existing->open_challenges) );
          // The terminal vault's forfeit pool (the 15% slice of expired
          // challenge bonds) is supply-visible escrow with no other home: the
          // H2d sweep only drains BOUND vaults through their oracle's reward

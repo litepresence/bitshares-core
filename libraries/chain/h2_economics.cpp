@@ -756,6 +756,22 @@ optional<protocol::oracle_value> h2_read_pair_price(
    const auto primary = h2_read_consumed_price( d, *vault.bound_oracle, series, now );
    if( primary.valid() )
       return *primary;
+   // ATR-R17-01 (round-17, CONFIRMED_IMPORTANT): the owner-controlled backup
+   // covers staleness/liveness loss of the bound series, never an
+   // administrative freeze of the bound oracle itself (committee tripwire,
+   // challenge, pair_freeze). h2_read_consumed_price refuses a frozen oracle,
+   // so pre-fix a frozen primary still hopped to the live backup and freezing
+   // a stale-but-self-owned primary never halted the vault's consumed price.
+   // (The tripwire feed leg deliberately keeps watching the primary's raw
+   // aggregate under freeze -- X-05 ladder transparency, window 4 escalates
+   // post-DEBT in tripwire_halt_ladder_on_crafted_dislocation_then_reopens --
+   // so the proposed "feed = consumed precedence" complement was NOT applied;
+   // it would pause the ladder exactly when DEBT has frozen the oracle.)
+   {
+      const oracle_object* po = d.find( *vault.bound_oracle );
+      if( po != nullptr && po->options.frozen )
+         return optional<protocol::oracle_value>();
+   }
    // Single backup, never a chain: the reader falls exactly one level.
    const guard_state_object* guard = h2_find_guard( d, *vault.bound_oracle );
    if( guard == nullptr || !guard->fallback.valid() )

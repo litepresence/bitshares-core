@@ -115,6 +115,18 @@ void oracle_object::update_current_value( time_point_sec now, uint32_t delay_sec
    };
    vector<live_submission> live;
    live.reserve( submissions.size() );
+   // H1-FINAL-01 (round-16): prune rows for producers no longer in the set,
+   // mirroring the reputation prune below. Without this, rotation churn grew
+   // the map without bound: the aggregation loop only SKIPS stale rows, so
+   // every owner rotation left its producers' rows behind forever and
+   // per-publish work grew O(rotations) on every node.
+   for( auto sit = submissions.begin(); sit != submissions.end(); )
+   {
+      if( options.producers.find( sit->first ) == options.producers.end() )
+         sit = submissions.erase( sit );
+      else
+         ++sit;
+   }
    for( const auto& s : submissions )
    {
       if( !is_submission_live( s.second.first, now ) )
@@ -141,9 +153,17 @@ void oracle_object::update_current_value( time_point_sec now, uint32_t delay_sec
       // through an outage would be trading on a number nobody is still asserting.
       current_value.reset();
       current_value_producer_count = 0;
-      // Quorum loss fails the guards closed too: no raw value, no consumed value left
-      // standing, nothing left ripening in the delay queue.
-      consumed_value.reset();
+      // Quorum loss clears what is about to be consumed; the raw aggregate is
+      // absent and nothing is left ripening in the delay queue. (H1-FINAL-02,
+      // round-16: quorum loss is TRANSIENT -- the read path fails closed on the
+      // absent current_value + submission liveness, so the rate limiter's
+      // baseline (consumed_value, now never destroyed; the last_good pair below
+      // survives it too) stays standing and the re-entry promotion is still
+      // move-checked. Destroying the baseline here let the oracle owner paste
+      // an arbitrary-size price step in one promotion: rotate away the
+      // producers, let this branch wipe consumed_value, then the next
+      // promotion skipped the move check entirely via the first-promotion
+      // branch.)
       pending_queue.clear();
       return;
    }
@@ -336,7 +356,9 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    // Kept defensive anyway -- a guard must never invent a price.
    if( !current_value.valid() )
    {
-      consumed_value.reset();
+      // (H1-FINAL-02, round-16): a transient bare-queue state must not destroy
+      // the rate limiter's baseline; the delay queue is cleared, the baseline
+      // stays, and the last_good pair below carries the reference anyway.
       pending_queue.clear();
       return;
    }
@@ -349,8 +371,19 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    // spans the delay whatever the publish rate; the newest bucket refreshes its value
    // in place, keeping its timestamp (or the bucket would never close -- the same
    // argument as the history ring above).
+   // R17G (round-17, PS-R17-01): the bucket is delay/(MAX_PENDING-1), not
+   // delay/MAX_PENDING. With delay/MAX_PENDING buckets, 16 buckets span
+   // 16*floor(delay/16) <= delay, so the 17th arrival clipped the oldest entry at
+   // exactly its ripening age -- the capacity trim runs BEFORE the ripen scan
+   // below, so the just-ripe entry was erased before any scan saw it, and at
+   // every whole-hour delay (3600 default, 7200, 43200, 86400 per the PS-R17-01
+   // simulation) the queue self-erased every ripe sample and the gated pair's
+   // feed stayed null forever. With 15 smaller buckets, the full queue (16
+   // entries) spans 15*floor(delay/15) <= delay, the 16th arrival lands at/after
+   // the delay boundary with nothing clipped, the ripen scan consumes the ripe
+   // oldest entry, and the first-ever capacity trim comes one full bucket later.
    const uint32_t bucket = std::max<uint32_t>(
-      1, effective_delay / GRAPHENE_ORACLE_GUARD_MAX_PENDING );
+      1, effective_delay / ( GRAPHENE_ORACLE_GUARD_MAX_PENDING - 1 ) );
    if( pending_queue.empty()
        || ( now - pending_queue.back().first ).to_seconds() >= int64_t( bucket ) )
       pending_queue.emplace_back( now, *current_value );
@@ -388,15 +421,25 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    {
       consumed_value = *ripe;
       consumed_value_time = ripe_time;
+      last_good_value = *ripe;
+      last_good_time = ripe_time;
       rate_limited = false;
       return;
    }
 
    // Rate limit: if ANY series moved beyond the bound, the whole promotion holds.
    // Holding the whole vector (never per-series) keeps bid <= ask true by construction.
+   // H1-FINAL-02 (round-16): compare against the never-destroyed baseline.
+   // consumed_value is no longer reset by any transient path (the quorum-loss
+   // and defensive clears above were removed), so it normally equals
+   // last_good_value; the pair keeps the guard sound even if a future reset
+   // path is reintroduced, because the comparison falls back to the reference
+   // that outlived it.
+   const vector<oracle_value>& rate_ref =
+         last_good_value.valid() ? *last_good_value : *consumed_value;
    bool too_far = false;
    for( size_t s = 0; s < series.size() && !too_far; ++s )
-      too_far = deviates_too_far( (*ripe)[s], (*consumed_value)[s],
+      too_far = deviates_too_far( (*ripe)[s], rate_ref[s],
                                   GRAPHENE_ORACLE_GUARD_MAX_MOVE_PPM );
    if( too_far )
    {
@@ -406,6 +449,8 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    }
    consumed_value = *ripe;
    consumed_value_time = ripe_time;
+   last_good_value = *ripe;
+   last_good_time = ripe_time;
    rate_limited = false;
    guard_hits = 0;
 }
@@ -435,6 +480,8 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (reputation)
                     (open_disputes)
                     (last_dispute_time)
+                    (last_good_value)
+                    (last_good_time)
                     (forfeit_pool_balance)
                     (dispute_cleared_time)
                   )

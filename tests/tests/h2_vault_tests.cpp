@@ -40,6 +40,8 @@
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/seasoning_object.hpp>
@@ -293,15 +295,56 @@ signed_transaction e06_staged_tx(
 }
 
 /// Votes a sustain supermajority from the genesis seated set (init0..initN).
+/// GOV-R17-02: the deciding set is the ELECTED set, active_committee_members
+/// -- a registry-sized vote loop overruns the resolution and the last vote
+/// is refused as non-OPEN.
 void h2c_sustain_from_genesis( database_fixture& f, object_id_type target )
 {
    const uint64_t n =
-         f.db.get_index_type<committee_member_index>().indices().size();
+         f.db.get_global_properties().active_committee_members.size();
    BOOST_REQUIRE( n > 0 );
    const uint64_t need = ( n * GRAPHENE_H2_SUPERMAJORITY_BPS + 9999 ) / 10000;
    for( uint64_t i = 0; i < need; ++i )
       h2c_vote( f, f.get_account( string( "init" ) + fc::to_string( i ) ).get_id(),
                 f.init_account_priv_key, target, GRAPHENE_H2_DISPUTE_SUSTAIN );
+}
+
+
+/// ISS-R14-16 test adaptation: grant a season record the production shape by
+/// backdating its window and stamping the verifier bit (hand-set precedent in
+/// h2_seasoning_tests). Records only exist for registered pairs; for anything
+/// else the issuer-direct gate is already inert and this is a no-op.
+void h2x_grant_seasoning( database_fixture& f, asset_id_type pair )
+{
+   const auto& by_pair = f.db.get_index_type<seasoning_record_index>()
+                            .indices().get<by_seasoning_pair>();
+   if( by_pair.find( pair ) == by_pair.end() )
+      return; // never-vaulted pair: no record exists and the gate is inert
+   f.generate_block(); // seal setup: a backdate issued back-to-back would be discarded
+   // Re-locate after the flush: the pre-flush iterator belongs to the session
+   // the flush discards, so the modify must run against committed state.
+   const auto itr = by_pair.find( pair );
+   if( itr == by_pair.end() )
+      return; // structural surprise: leave the record untouched
+   const fc::time_point_sec backdate = f.db.head_block_time()
+         - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+   f.db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+      m.window_start  = backdate;
+      m.min_vault_bps  = 50000;  // > the 2.0 (20000bps) and 1.0 (10000bps) floors
+      m.min_oracle_bps = 50000;
+      m.verifier_set   = true;
+      m.complete       = true;
+   } );
+}
+
+/// VAC-R17-11: band partition sum exactly as h2_issue_verify_bands checks
+/// it (file-local twin of h2j_band_sum_face in h2_issuance2_tests).
+share_type h2c_band_sum_face( const reserve_object* r )
+{
+   share_type s( 0 );
+   for( const share_type& b : r->band_stable )
+      s += b;
+   return s;
 }
 
 void h2c_set_outstanding( database_fixture& f, vault_id_type vid, share_type amount )
@@ -1209,6 +1252,29 @@ BOOST_AUTO_TEST_CASE( r11r1_winddown_senior_claim_requires_pair_face )
    const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
    h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
    generate_block();
+   // ISS-R14-16: the issuer-direct funding below is gated on a complete
+   // season record, and the completion helper fail-closes UNBOUND pairs
+   // (pre-bind sweeps are skipped), so no grant can ever read complete.
+   // Pin a producer/price series exactly as the lifecycle tests do: freeze
+   // once to bind, unfreeze both sides, carry on with the drive unchanged.
+   // Alice seats first: reference creation is committee-only until the
+   // committee opens it (may_create_reference_asset, elected-set gate).
+   h2c_make_committee_member( *this, alice );
+   const auto r11_bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "R11B", 5 );
+   const auto r11_usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "R11U", 4 );
+   oracle_options r11_opts;
+   r11_opts.producers[bob_id] = oracle_producer_entry( 1 );
+   const oracle_id_type r11_oid = h2c_make_oracle(
+         *this, alice_id, alice_private_key, "R11.USD", r11_bts_ref, r11_usd_ref, r11_opts );
+   const auto r11_ovest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_ORACLE_RAW );
+   h2c_lock_producer_bond( *this, bob_id, bob_private_key, r11_oid, r11_ovest,
+                           H2C_ORACLE_RAW, H2C_ORACLE_USD_CENTS );
+   generate_block();
+   h2c_freeze( *this, alice_id, alice_private_key, vid, r11_oid );
+   BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( r11_oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
    h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
@@ -1221,6 +1287,13 @@ BOOST_AUTO_TEST_CASE( r11r1_winddown_senior_claim_requires_pair_face )
    BOOST_REQUIRE( wdid( db ).total_claims == H2C_VAULT_RAW );
    const asset_id_type pair = wdid( db ).pair;
    BOOST_REQUIRE( pair( db ).issuer == alice_id );
+
+   // The bound pair's claims convert through the live price leg (H2d) and a
+   // dual-stale read halts, so a fresh (100,1) publish stands before the
+   // probes and stays current through the same-head grant/issue/claim pushes
+   // (sibling lifecycle-test idiom). The pro-rata share leg is price-free
+   // for this 100%-cover book, so the asserted payout floor is unchanged.
+   h2c_publish( *this, r11_oid, bob_id, bob_private_key, 100, 1 );
 
    // Theft probe: erin holds zero pair face but claims the whole book.
    BOOST_CHECK( db.get_balance( erin_id, pair ).amount == share_type( 0 ) );
@@ -1243,6 +1316,7 @@ BOOST_AUTO_TEST_CASE( r11r1_winddown_senior_claim_requires_pair_face )
    const share_type senior_claim = share_type( 1000000 );
    const share_type senior_expect =
          share_type( senior_claim.value * ( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) / 10000 );
+   h2x_grant_seasoning( *this, pair ); // ISS-R14-16: production pairs seasoned while live
    asset_issue_operation iop;
    iop.issuer           = alice_id;
    iop.asset_to_issue   = asset( senior_claim, pair );
@@ -1363,11 +1437,11 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    const vault_id_type vid = h2c_register_vault_default( *this, bob_id, bob_private_key, vault_auth );
    const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
    h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
-   // Half leverage (200% cover): the vault stays maintenance-healthy while
-   // the challenge window lapses, so only the expiry sweep — never the
-   // top-up path — moves this vault.
+   // Full leverage (100% cover): a real coverage breach, so under R17-C
+   // the expired-challenge resolve keeps its merit leg. The breach lands
+   // on the jump across the deadline (the same freeze, now justified).
    generate_block();
-   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW / 2 );
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
 
    // Carol challenges; nobody votes. The window lapses and the maintenance
    // sweep expires it fail-closed (bond returns, vault stays frozen).
@@ -1378,7 +1452,9 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
    BOOST_REQUIRE_EQUAL( vid( db ).frozen, true );
    BOOST_REQUIRE_EQUAL( vid( db ).open_challenges, 0u );
-   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   // Breached by the coverage rule (outstanding raised to full leverage
+   // above), which is what keeps the R17-C resolve merit leg open.
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
 
    // Owner self-resolve refused: bob owns the vault but is not seated.
    vault_resolve_operation self;
@@ -1415,7 +1491,7 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
    BOOST_CHECK( wd_idx.begin()->source_vault == vid );
    BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW );
-   BOOST_CHECK( wd_idx.begin()->total_claims == H2C_VAULT_RAW / 2 );
+   BOOST_CHECK( wd_idx.begin()->total_claims == H2C_VAULT_RAW );
    BOOST_CHECK_EQUAL( cid( db ).executed, true );
    // Exit-only: the vault never returns to HEALTHY; the freeze holds until
    // wind-down claims complete per the existing claim rules.
@@ -1427,8 +1503,8 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    // last-good-minus-15% from the seized slice (fully backed here).
    const winddown_vault_id_type wdid { wd_idx.begin()->id };
    // R11-R1 entitlement: dave's senior face must exist before he claims.
-   h2c_fund_pair_face( *this, dave_id, wdid( db ).pair, ( H2C_VAULT_RAW / 2 ) / 3 );
-   const share_type senior_claim = ( H2C_VAULT_RAW / 2 ) / 3;
+   h2c_fund_pair_face( *this, dave_id, wdid( db ).pair, H2C_VAULT_RAW / 3 );
+   const share_type senior_claim = H2C_VAULT_RAW / 3;
    const share_type senior_expect =
          share_type( senior_claim.value * ( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) / 10000 );
    winddown_claim_operation sop;
@@ -1835,10 +1911,10 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
    h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest,
                         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
-   // 200% cover: the vault stays maintenance-healthy while the challenge
-   // window lapses, so only the expiry sweep moves it (R5C test shape).
+   // Full leverage (100% cover): a real breach keeps the R17-C merit leg
+   // (expired resolve needs !meets) reachable in the recovery story.
    generate_block();
-   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW / 2 );
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
 
    // Expiry-freeze: carol challenges; nobody votes; the window lapses
    // fail-closed (EXPIRED_FROZEN, vault frozen, challenge count drained).
@@ -1879,11 +1955,11 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
     // (pending-session rule noted above); after the flush the funding
     // commits directly and survives the re-application at later blocks.
     generate_block();
-    h2c_fund_pair_face( *this, carol_id, wdid( db ).pair, H2C_VAULT_RAW / 2 );
-    winddown_claim_operation sop;
-    sop.claimant     = carol_id;
-   sop.winddown     = wdid;
-   sop.claim_amount = H2C_VAULT_RAW / 2; // == total_claims
+     h2c_fund_pair_face( *this, carol_id, wdid( db ).pair, H2C_VAULT_RAW );
+     winddown_claim_operation sop;
+     sop.claimant     = carol_id;
+    sop.winddown     = wdid;
+    sop.claim_amount = H2C_VAULT_RAW; // == total_claims
    sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
    signed_transaction stx; stx.operations.push_back( sop );
    db.current_fee_schedule().set_fee( stx.operations.back() );
@@ -1891,6 +1967,24 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    stx.sign( carol_private_key, db.get_chain_id() );
    PUSH_TX( db, stx );
    BOOST_REQUIRE( wdid( db ).claimed_total == wdid( db ).total_claims );
+   // Flush: the settle claim leaves the pending session open; without this
+   // block the recovery lift below lands in pending state, the next block
+   // rolls it back, and the re-register then sees the stale suspension.
+   generate_block();
+   // R17-C fallout: at full leverage the pair's live scope sits inside the
+   // 150% recovery trigger, so the framework suspends NEW debt there until
+   // the settlement restores it. Lift it by hand first (the same flip the
+   // next maintenance sweep computes for a live zero-debt pair) so this
+   // recovery story stays about re-registration, not about the H2d gate.
+   {
+      const auto& rec_idx_h2_09 = db.get_index_type<recovery_state_index>()
+                                    .indices();
+      BOOST_REQUIRE( !rec_idx_h2_09.empty() );
+      db.modify( *rec_idx_h2_09.begin(), []( recovery_state_object& r ) {
+         r.new_debt_suspended = false;
+         r.entered_at = fc::time_point_sec();
+      } );
+   }
    const share_type carried_shell = vid( db ).forfeit_pool_balance;
    BOOST_REQUIRE( carried_shell > share_type( 0 ) );
 
@@ -2012,6 +2106,65 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    PUSH_TX( db, mtx );
    BOOST_CHECK( vid2( db ).outstanding == share_type( 1000 ) );
    BOOST_CHECK( db.get_balance( bob_id, pair ).amount == share_type( 1000 ) );
+
+   // VAC-R17-11 (round-17): the recovery must survive the next maintenance
+   // sweep AND a second reserve writer after it. Pre-R17A the wind-down
+   // senior claim left sum(band_stable) != stable_supply, and the first band
+   // verify after re-registration (the sweep's fold, or the next writer)
+   // halted the chain -- as written this test stopped one transaction short
+   // of that verify, asserting the surviving book as correct. Flush the
+   // mint, cross one sweep with a fresh publish live, assert the partition,
+   // then mint again on the swept book and assert it stayed exact.
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 300 );
+   // Half-price republish: the genesis mint above retained the whole 130000
+   // BTS deposit as the rmin slice (have == required at (100,1)), so the door
+   // headroom is exactly zero and ANY second writer leg is refused by the
+   // extraction bound. At (50,1) the required side is 65000 and 65000 of
+   // headroom opens for the 13000 leg below.
+   h2c_publish( *this, oid, bob_id, bob_private_key, 50, 1 );
+   BOOST_REQUIRE( h2_read_pair_price( db, vid2( db ), 0, db.head_block_time() ).valid() );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   {
+      const auto& r_idx = db.get_index_type<reserve_index>().indices().get<by_reserve_pair>();
+      const auto ritr = r_idx.find( pair );
+      BOOST_REQUIRE( ritr != r_idx.end() );
+      h2_issue_verify_bands( *ritr );
+      BOOST_CHECK( h2c_band_sum_face( &*ritr ) == ritr->stable_supply );
+      BOOST_CHECK( ritr->stable_supply == share_type( 1000 ) );
+      BOOST_CHECK_EQUAL(
+            pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+            ritr->stable_supply.value );
+   }
+   // Second reserve writer after the sweep: the partition must still move
+   // exactly (mid-band moves belong to the writers, the sweep only verifies).
+   hybrid_mint_operation mop2;
+   mop2.minter        = bob_id;
+   mop2.vault         = vid2;
+   mop2.deposit       = asset( 13000, asset_id_type() );
+   mop2.stable_amount = share_type( 100 );
+   mop2.fxr_asset     = fxr;
+   signed_transaction mtx2; mtx2.operations.push_back( mop2 );
+   db.current_fee_schedule().set_fee( mtx2.operations.back() );
+   set_expiration( db, mtx2 );
+   mtx2.sign( bob_private_key, db.get_chain_id() );
+   PUSH_TX( db, mtx2 );
+   BOOST_CHECK( vid2( db ).outstanding == share_type( 1100 ) );
+   {
+      const auto& r_idx = db.get_index_type<reserve_index>().indices().get<by_reserve_pair>();
+      const auto ritr = r_idx.find( pair );
+      BOOST_REQUIRE( ritr != r_idx.end() );
+      h2_issue_verify_bands( *ritr );
+      BOOST_CHECK( h2c_band_sum_face( &*ritr ) == ritr->stable_supply );
+      BOOST_CHECK( ritr->stable_supply == share_type( 1100 ) );
+      BOOST_CHECK_EQUAL(
+            pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+            ritr->stable_supply.value );
+   }
+   // The story ends here: the re-registered pair is LIVE again, so a second
+   // registration on it is refused by the live-vault gate itself (and the
+   // H2d suspension gate has dedicated tests above).
 } FC_LOG_AND_RETHROW() }
 
 /// R9-I9 second settlement shape: the wind-down reached COMPLETE (the
@@ -2054,6 +2207,7 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    // binds below the haircut), driving paid_total to segregated_bond and
    // the wind-down state to COMPLETE.
    h2c_set_outstanding( *this, vid, H2C_VAULT_RAW * 2 );
+   generate_block();
    vault_resolve_operation rop;
    rop.resolver  = alice_id;
    rop.challenge = cid;
@@ -2069,6 +2223,11 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    BOOST_REQUIRE( wdid( db ).segregated_bond == H2C_VAULT_RAW );
 
     // R11-R1 entitlement: dave must hold the full double-book face.
+    // Flush first: the resolve above leaves the pending session open and a
+    // direct funding surgery into it would be rolled back by the next block
+    // (pending-session rule, same as the claimed-total test above); after
+    // the flush the funding commits and survives re-application.
+    generate_block();
     h2c_fund_pair_face( *this, dave_id, wdid( db ).pair, H2C_VAULT_RAW * 2 );
     winddown_claim_operation sop;
     sop.claimant     = dave_id;
@@ -2095,6 +2254,99 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    BOOST_CHECK_EQUAL( vid2( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
    BOOST_CHECK( wdid( db ).state == GRAPHENE_H2_WINDDOWN_COMPLETE );
    BOOST_CHECK_EQUAL( vid2( db ).forfeit_pool_balance.value, carried_shell.value );
+
+   // VAC-R17-11 (round-17): a COMPLETE-shape recovery must also survive the
+   // next maintenance sweep and a subsequent reserve writer -- without them
+   // this test asserted the surviving (re-registered, empty) book as correct
+   // and never reached the first band verify after recovery. Bond and bind
+   // the fresh vault, season the inherited record (surgery helper: backdate
+   // + verifier bit + minimums; the bound leg is live from the pin above),
+   // then mint, sweep, verify the partition, and mint again.
+   const auto bts_ref = h2c_create_reference( *this, alice_id, alice_private_key, "BT9C", 5 );
+   const auto usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "USD9C", 4 );
+   oracle_options c_opts;
+   c_opts.producers[ bob_id ] = oracle_producer_entry( 1 );
+   const oracle_id_type c_oid = h2c_make_oracle(
+         *this, alice_id, alice_private_key, "R9I9C.USD", bts_ref, usd_ref, c_opts );
+   const auto c_ovest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_ORACLE_RAW );
+   h2c_lock_producer_bond( *this, bob_id, bob_private_key, c_oid, c_ovest,
+                           H2C_ORACLE_RAW, H2C_ORACLE_USD_CENTS );
+   generate_block();
+   const auto c_vest2 = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid2, c_vest2,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   h2c_freeze( *this, alice_id, alice_private_key, vid2, c_oid );
+   BOOST_REQUIRE( vid2( db ).bound_oracle.valid() );
+   generate_block();
+   db.modify( vid2( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( c_oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   h2c_publish( *this, c_oid, bob_id, bob_private_key, 100, 1 );
+   BOOST_REQUIRE( h2_read_pair_price( db, vid2( db ), 0, db.head_block_time() ).valid() );
+
+   h2x_grant_seasoning( *this, pair );
+   BOOST_REQUIRE( h2_seasoning_complete( db, pair ) );
+   generate_block();
+
+   const asset_id_type fxr = h2c_create_uia( *this, bob_id, bob_private_key, "R9I9CF" );
+   hybrid_mint_operation mop;
+   mop.minter        = bob_id;
+   mop.vault         = vid2;
+   mop.deposit       = asset( 130000, asset_id_type() );
+   mop.stable_amount = share_type( 1000 );
+   mop.fxr_asset     = fxr;
+   signed_transaction mtx; mtx.operations.push_back( mop );
+   db.current_fee_schedule().set_fee( mtx.operations.back() );
+   set_expiration( db, mtx );
+   mtx.sign( bob_private_key, db.get_chain_id() );
+   PUSH_TX( db, mtx );
+   BOOST_CHECK( vid2( db ).outstanding == share_type( 1000 ) );
+   BOOST_CHECK( db.get_balance( bob_id, pair ).amount == share_type( 1000 ) );
+
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 300 );
+   // Half-price republish: same door-headroom reason as the claimed-total
+   // test above (the genesis deposit sits exactly on the rmin floor at
+   // (100,1), leaving zero headroom for the second writer below).
+   h2c_publish( *this, c_oid, bob_id, bob_private_key, 50, 1 );
+   BOOST_REQUIRE( h2_read_pair_price( db, vid2( db ), 0, db.head_block_time() ).valid() );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   {
+      const auto& r_idx = db.get_index_type<reserve_index>().indices().get<by_reserve_pair>();
+      const auto ritr = r_idx.find( pair );
+      BOOST_REQUIRE( ritr != r_idx.end() );
+      h2_issue_verify_bands( *ritr );
+      BOOST_CHECK( h2c_band_sum_face( &*ritr ) == ritr->stable_supply );
+      BOOST_CHECK( ritr->stable_supply == share_type( 1000 ) );
+      BOOST_CHECK_EQUAL(
+            pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+            ritr->stable_supply.value );
+   }
+   {
+      hybrid_mint_operation mop2;
+      mop2.minter        = bob_id;
+      mop2.vault         = vid2;
+      mop2.deposit       = asset( 13000, asset_id_type() );
+      mop2.stable_amount = share_type( 100 );
+      mop2.fxr_asset     = fxr;
+      signed_transaction mtx2; mtx2.operations.push_back( mop2 );
+      db.current_fee_schedule().set_fee( mtx2.operations.back() );
+      set_expiration( db, mtx2 );
+      mtx2.sign( bob_private_key, db.get_chain_id() );
+      PUSH_TX( db, mtx2 );
+   }
+   BOOST_CHECK( vid2( db ).outstanding == share_type( 1100 ) );
+   {
+      const auto& r_idx = db.get_index_type<reserve_index>().indices().get<by_reserve_pair>();
+      const auto ritr = r_idx.find( pair );
+      BOOST_REQUIRE( ritr != r_idx.end() );
+      h2_issue_verify_bands( *ritr );
+      BOOST_CHECK( h2c_band_sum_face( &*ritr ) == ritr->stable_supply );
+      BOOST_CHECK( ritr->stable_supply == share_type( 1100 ) );
+      BOOST_CHECK_EQUAL(
+            pair( db ).dynamic_asset_data_id( db ).current_supply.value,
+            ritr->stable_supply.value );
+   }
 } FC_LOG_AND_RETHROW() }
 
 /// R11R3 (LEG-R11-01) legacy attach gate, vault_register door: any account
@@ -2150,6 +2402,288 @@ BOOST_AUTO_TEST_CASE( r11r3_third_party_vault_register_on_legacy_uia_refused )
    const vault_id_type vid = h2c_register_vault( *this, alice_id, alice_private_key,
          authority( 1, alice_id, 1 ), H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, own );
    BOOST_CHECK( vid( db ).vault_pair == own );
+} FC_LOG_AND_RETHROW() }
+
+/// R17-E (round-17): a challenge opened while the vault is HEALTHY survives
+/// the whole TOPUP -> WINDDOWN -> settle path (open challenges never freeze
+/// and no maintenance leg drains them), so re-registration's terminal-vault
+/// removal must refuse while open_challenges > 0. Without the gate the
+/// removal strands an OPEN challenge row behind a dangling vault id and the
+/// next expiry sweep halts the chain on the dereference. The consumer side
+/// is walked here to prove the producer gate is really reached; the
+/// null-tolerant sweep/voter legs are defense in depth for any survivor
+/// row that already exists.
+BOOST_AUTO_TEST_CASE( r17e_regristration_refuses_open_challenge_no_zombie_halt )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   // Original vault on the default pair; alice's authority settles;
+   // carol challenges and holds the face for the settlement step.
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default(
+         *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+    h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest,
+                         H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+    // Flush first: the pending-session rule noted above (the surgery below
+    // must commit directly or the next block rolls it back).
+    generate_block();
+
+    // Breach -> TOPUP first (frozen+halted mints, exit-only). THEN carol
+   // posts the challenge inside the top-up window: TOPUP vaults accept
+   // challenges (only WINDDOWN refuses creation), and the challenge's 48h
+   // deadline comfortably outlives the top-up deadline. This is the only
+   // ordering that keeps the challenge OPEN through the wind-down entry and
+   // settlement (a challenge posted while HEALTHY expires on the way:
+   // the next maintenance after the funding helpers is ~2d away).
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+
+   generate_blocks( vid( db ).top_up_deadline - 3600 );
+   generate_block();
+   BOOST_REQUIRE( db.head_block_time() < vid( db ).top_up_deadline );
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "r17e" ) );
+   BOOST_REQUIRE_EQUAL( vid( db ).open_challenges, 1 );
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+
+   // Step maintenance-by-maintenance into WINDDOWN without ever generating
+   // past the challenge deadline (the top-up deadline lapses first, so a
+   // couple of steps suffice; fail loudly if the deadline ever closes).
+   while( vid( db ).maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN
+          && db.head_block_time() < cid( db ).deadline )
+   {
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+      generate_block();
+      BOOST_TEST_MESSAGE( "r17e-step head=" << db.head_block_time().sec_since_epoch()
+                          << " state=" << uint32_t( vid( db ).maintenance_state )
+                          << " top_up_deadline=" << vid( db ).top_up_deadline.sec_since_epoch()
+                          << " deadline=" << cid( db ).deadline.sec_since_epoch() );
+   }
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   BOOST_REQUIRE( db.head_block_time() < cid( db ).deadline );
+   BOOST_REQUIRE_EQUAL( vid( db ).open_challenges, 1 );
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_OPEN );
+
+   // Settle the whole frozen-liability book in one senior claim (h2_09
+   // shape: face funded to the claimant first, the whole book then claims).
+   const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
+   BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
+   const winddown_vault_id_type wdid { wd_idx.begin()->id };
+   BOOST_REQUIRE( wdid( db ).source_vault == vid );
+   generate_block();
+   h2c_fund_pair_face( *this, carol_id, wdid( db ).pair, H2C_VAULT_RAW );
+   winddown_claim_operation sop;
+   sop.claimant     = carol_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = H2C_VAULT_RAW;
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction stx; stx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( carol_private_key, db.get_chain_id() );
+   PUSH_TX( db, stx );
+   BOOST_REQUIRE( wdid( db ).claimed_total == wdid( db ).total_claims );
+
+   // Re-registration carve for the attack: the refusal gate must turn the
+   // removal DOWN, because the removal's only door is this op. Producer
+   // gate + consumer sweep checked in one flow.
+   string regr_err;
+   try {
+      h2c_register_vault( *this, alice_id, alice_private_key, vault_auth,
+                          H2C_VAULT_RAW, H2C_VAULT_USD_CENTS, wdid( db ).pair );
+   } catch( const fc::exception& e ) { regr_err = e.to_string(); }
+
+   if( regr_err.empty() )
+   {
+      // DEFECT shape (RED): removal strands the OPEN challenge row behind a
+      // dangling vault id; the next expiry sweep dereferences the removed
+      // vault and halts the chain.
+      generate_blocks( cid( db ).deadline + 2 * 86400 );
+      generate_block();
+      BOOST_FAIL( "R17E: re-registration ADMITTED with an open challenge; "
+                  "the zombie expiry sweep did not halt (mute consumer)" );
+   }
+
+   BOOST_CHECK_MESSAGE( regr_err.find( "open challenge" ) != std::string::npos,
+         "R17E: re-registration refused but not for the open-challenge gate: "
+         << regr_err );
+
+   // GREEN tail: no removal happened; the challenge expires normally and no
+   // sweep leg ever dereferences a missing vault.
+   generate_blocks( cid( db ).deadline + 2 * 86400 );
+   generate_block();
+   BOOST_CHECK_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+   BOOST_CHECK_EQUAL( vid( db ).open_challenges, 0 );
+   BOOST_CHECK( db.find( vid ) != nullptr );
+} FC_LOG_AND_RETHROW() }
+
+/// R17-C (round-17): expiry is inconclusive, never exoneration, and it must
+/// never be a half-price seizure lever: a nil-merit (EXPIRED_FROZEN) challenge
+/// resolves into a wind-down only when the vault genuinely fails maintenance.
+/// Working side: the seated responder cannot be the challenger (directly or
+/// through a bounded authority walk), mirroring the vote leg.
+BOOST_AUTO_TEST_CASE( r17c_expired_resolve_needs_coverage_breach_and_non_overlap )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   // Healthy vault at 200% raw coverage: no breach anywhere in the flow.
+   authority vault_auth( 1, bob_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default(
+         *this, bob_id, bob_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, bob_id, bob_private_key, vid, vest,
+                        H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+
+   // carol's-floor challenge; nobody votes; the window lapses fail-closed.
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, carol_id, carol_private_key, vid, h2c_evidence( "r17c-zero-merit" ) );
+   generate_blocks( cid( db ).deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN );
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   BOOST_REQUIRE_EQUAL( vid( db ).frozen, true );
+
+   // Attack 1: the challenger resolves her own expiry (direct). Refused:
+   // the resolver never sits on the challenger's side.
+   vault_resolve_operation sop;
+   sop.resolver  = carol_id;
+   sop.challenge = cid;
+   signed_transaction atx; atx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( atx.operations.back() );
+   set_expiration( db, atx );
+   atx.sign( carol_private_key, db.get_chain_id() );
+   const auto self_err = [&]() -> string {
+      try { PUSH_TX( db, atx ); } catch( const fc::exception& e ) { return e.to_string(); }
+      return string();
+   }();
+   BOOST_CHECK_MESSAGE( !self_err.empty(),
+         "R17C: challenger self-resolution ADMITTED" );
+
+   // Attack 2 (GREEN state): an honest seated member (alice) resolves the
+   // expired challenge against a vault that STILL MEETS MAINTENANCE.
+   // Refused: no coverage breach, no wind-down. (Pre-fix RED: the resolve
+   // succeeded and seized the whole segregated bond stack.)
+   vault_resolve_operation rop;
+   rop.resolver  = alice_id;
+   rop.challenge = cid;
+   signed_transaction rtx; rtx.operations.push_back( rop );
+   db.current_fee_schedule().set_fee( rtx.operations.back() );
+   set_expiration( db, rtx );
+   rtx.sign( alice_private_key, db.get_chain_id() );
+   const auto honest_err = [&]() -> string {
+      try { PUSH_TX( db, rtx ); } catch( const fc::exception& e ) { return e.to_string(); }
+      return string();
+   }();
+   BOOST_CHECK_MESSAGE( !honest_err.empty(),
+         "R17C: expired-challenge wind-down ADMITTED on a healthy vault" );
+   BOOST_CHECK_MESSAGE( honest_err.find( "meets maintenance" ) != std::string::npos,
+         "R17C: resolve refused but not for the coverage predicate: "
+         << honest_err );
+   BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().empty() );
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+} FC_LOG_AND_RETHROW() }
+
+
+/// VAC-R17-10 (round-17, REPAIR-?): the rmax guard needs an ENABLED
+/// binding vector. The existing enabled junior refusals (erin's claim=1
+/// below winddown_claim_pays_seniors_first...) die on the frozen-liabilities
+/// gate (:589-592) or the dust assert, never on rmax. Construct: tiny senior
+/// face (payout 1) then a junior face big enough that its PRO-RATA payout
+/// exceeds rmax x senior_paid while the frozen-liabilities leg still has
+/// room (book far from full) and the payout pays more than dust. RED shape:
+/// pre-fix nothing here would refuse (the guard existed but no enabled
+/// vector reached it); the assertion below fires at the rmax message by
+/// name, proving the leg reachable and binding.
+BOOST_AUTO_TEST_CASE( rmax_junior_dilution_fires_with_book_room_vac_r17_10 )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+
+   // Failed vault: full-bond backing against equal liabilities (100% cover).
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default( *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   generate_block();
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE( vid( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
+   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE( vid( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+   BOOST_REQUIRE( wdid( db ).segregated_bond == H2C_VAULT_RAW );
+
+   // Senior claims face 2: payout 2*8500/10000 = 1 (integer math), so the
+   // running rmax cap stands at 2 x 1 = 2 from here on.
+   h2c_fund_pair_face( *this, carol_id, wdid( db ).pair, share_type( 2 ) );
+   winddown_claim_operation sop;
+   sop.claimant     = carol_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = share_type( 2 );
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction stx; stx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( carol_private_key, db.get_chain_id() );
+   PUSH_TX( db, stx );
+   BOOST_REQUIRE( wdid( db ).senior_paid >= share_type( 1 ) );
+
+   // Junior face 1000: payout 1000*8500/10000 = 850 > cap 2, while
+   // claimed_total (1002) stays far under total_claims (RAW) -- the
+   // frozen-liabilities gate has room and the payout is not dust.
+   fund( dave ); fund( dave, asset( 1000000 ) );
+   h2c_fund_pair_face( *this, dave_id, wdid( db ).pair, share_type( 1000 ) );
+   winddown_claim_operation jop;
+   jop.claimant     = dave_id;
+   jop.winddown     = wdid;
+   jop.claim_amount = share_type( 1000 );
+   jop.tranche      = GRAPHENE_H2_WINDDOWN_JUNIOR;
+   signed_transaction jtx; jtx.operations.push_back( jop );
+   db.current_fee_schedule().set_fee( jtx.operations.back() );
+   set_expiration( db, jtx );
+   jtx.sign( dave_private_key, db.get_chain_id() );
+   try { PUSH_TX( db, jtx ); }
+   catch ( const fc::exception& e )
+   {
+      BOOST_CHECK_MESSAGE(
+            e.to_string().find( "rmax" ) != std::string::npos,
+            "junior dilution refused off-gate (expected the rmax name): "
+            + e.to_string() );
+      return;
+   }
+   BOOST_FAIL( "rmax did not fire: junior payout 850 on senior_paid 1 was "
+               "accepted past the 2x dilution cap" );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -1927,6 +1927,34 @@ BOOST_AUTO_TEST_CASE( band_quantas_floor_per_leg_with_anchor_advance )
 static_assert( GRAPHENE_H2_ISSUE_PILOT_MAX_STABLE_FACE_USD == 20000ULL,
                "pilot ceiling must stay $20,000 face (lift = new binary + audit)" );
 
+
+/// ISS-R14-16 test adaptation: grant a season record the production shape by
+/// backdating its window and stamping the verifier bit (hand-set precedent in
+/// h2_seasoning_tests). Records only exist for registered pairs; for anything
+/// else the issuer-direct gate is already inert and this is a no-op.
+void h2x_grant_seasoning( database_fixture& f, asset_id_type pair )
+{
+   const auto& by_pair = f.db.get_index_type<seasoning_record_index>()
+                            .indices().get<by_seasoning_pair>();
+   if( by_pair.find( pair ) == by_pair.end() )
+      return; // never-vaulted pair: no record exists and the gate is inert
+   f.generate_block(); // seal setup: a backdate issued back-to-back would be discarded
+   // Re-locate after the flush: the pre-flush iterator belongs to the session
+   // the flush discards, so the modify must run against committed state.
+   const auto itr = by_pair.find( pair );
+   if( itr == by_pair.end() )
+      return; // structural surprise: leave the record untouched
+   const fc::time_point_sec backdate = f.db.head_block_time()
+         - GRAPHENE_H2_SEASONING_WINDOW_SEC - 3600;
+   f.db.modify( *itr, [&backdate]( seasoning_record_object& m ) {
+      m.window_start  = backdate;
+      m.min_vault_bps  = 50000;  // > the 2.0 (20000bps) and 1.0 (10000bps) floors
+      m.min_oracle_bps = 50000;
+      m.verifier_set   = true;
+      m.complete       = true;
+   } );
+}
+
 void h2j_pilot_issue(
       database_fixture& f, account_id_type issuer, const fc::ecc::private_key& key,
       asset_id_type pair, account_id_type to, share_type amount )
@@ -2678,6 +2706,151 @@ BOOST_AUTO_TEST_CASE( seasoning_gate_refuses_unseasoned_mint_ac08 )
    BOOST_REQUIRE( r != nullptr );
    BOOST_CHECK( r->bts_balance == share_type( 140000 ) );
    BOOST_CHECK( r->stable_supply == share_type( 1000 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// ISS-R14-16 (round-14, carried to round-17): the issuer-direct supply door
+/// must clear the SAME seasoning gate the mint door enforces (AC-08). Twin of
+/// seasoning_gate_refuses_unseasoned_mint_ac08: un-seasoned pair, direct
+/// issue refused at the seasoning assertion, then the seasoned backdate
+/// admits the boundary face. Pre-fix this direct issue printed senior face
+/// on a 0-day pair, bypassing BSIP-1 section-5 staging through the twin door.
+BOOST_AUTO_TEST_CASE( seasoning_gate_refuses_unseasoned_issue_ac08 )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 500000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSEASI", "HYSEASIF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "I" );
+   generate_block();
+   {
+      const auto& idx = db.get_index_type<seasoning_record_index>()
+                           .indices().get<by_seasoning_pair>();
+      const auto itr = idx.find( d.pair );
+      BOOST_REQUIRE( itr != idx.end() );
+      const fc::time_point_sec fresh = db.head_block_time();
+      db.modify( *itr, [&fresh]( seasoning_record_object& m ) {
+         m.window_start = fresh;
+      } );
+   }
+   BOOST_REQUIRE( !h2_seasoning_complete( db, d.pair ) );
+
+   // Refusal: names the seasoning assertion, never the pilot cap.
+   {
+      signed_transaction tx = h2j_build_issue_tx(
+            *this, alice_id, alice_private_key, d.pair, alice_id, share_type( 1 ) );
+      try { PUSH_TX( db, tx ); }
+      catch ( const fc::exception& e )
+      {
+         BOOST_CHECK_MESSAGE(
+               e.to_string().find( "not seasoned" ) != std::string::npos,
+               "issuer-direct issue on an unseasoned pair refused off-gate: "
+               + e.to_string() );
+      }
+      BOOST_CHECK_EQUAL( d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, 0 );
+   }
+   // Seasoned backdate admits the boundary face (gate correctness leg).
+   h2x_grant_seasoning( *this, d.pair );
+   BOOST_REQUIRE( h2_seasoning_complete( db, d.pair ) );
+   h2j_pilot_issue( *this, alice_id, alice_private_key, d.pair, alice_id,
+                    share_type( 1 ) );
+   BOOST_CHECK_EQUAL( d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, 1 );
+} FC_LOG_AND_RETHROW() }
+
+/// R17-A (round-17): the R11-R1 senior wind-down burn moved the reserve
+/// stable ledger WITHOUT the band partition (vault_lifecycle_evaluator.cpp
+/// senior leg), so sum(band_stable) diverged from stable_supply at the very
+/// first settled senior claim and every later verify (next settle sweep,
+/// next writer, or the settling re-wrap below) asserts -- the pilot's own
+/// exit path halts the chain. Reproduction drives the production path end
+/// to end: real signed mint funds the book and its bands, the 150%
+/// maintenance trigger is set by the h2c_set_outstanding surgery precedent
+/// (the only debt knob reachable without a second issuer live timeline),
+/// the deadline sweep enters WINDDOWN, and the senior claimant burns her
+/// whole face. GREEN here: the burn moves its band legs and the partition
+/// verify passes from here on.
+BOOST_AUTO_TEST_CASE( winddown_senior_burn_moves_bands_r17a )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYWBNDX", "HYWBNDXF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "W" );
+
+   // A real signed mint funds the book AND its bands (partition on entry);
+   // alice holds all 1000 stable face, so she is the whole senior class.
+   h2j_mint( *this, alice_id, alice_private_key, d, share_type( 140000 ), share_type( 1000 ) );
+   generate_block();   
+   BOOST_REQUIRE_EQUAL( db.get_balance( alice_id, d.pair ).amount.value, 1000 );
+
+   // Force the 150% maintenance trigger next sweep (surgery precedent;
+   // outstanding far above any 150% cover at this bonded price).
+   db.modify( d.vault( db ), []( vault_object& m ) {
+      m.outstanding = share_type( 2000000 );
+   } );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
+   generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
+
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   // Settle sweep zeroed ONLY the BTS leg; the stable leg survived.
+   BOOST_CHECK( r->bts_balance == share_type( 0 ) );
+   BOOST_CHECK( r->stable_supply == share_type( 1000 ) );
+   // Partition is consistent entering the claim window.
+   h2_issue_verify_bands( *r );
+
+   // Deposit the oracle's bonded-price leg before any claim: claims are
+   // conversion-dependent (vault_lifecycle_evaluator.cpp:631-634) and halt
+   // on a dual-stale bound price by design (round-16 price-validity gate).
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+
+   // Senior claim burns the whole face: payout at the 15% haircut comes
+   // from the swept book; the stable ledger must move WITH its bands.
+   share_type before_bts = db.get_balance( alice_id, asset_id_type() ).amount;
+   winddown_claim_operation sop;
+   sop.claimant     = alice_id;
+   sop.winddown     = wdid;
+   sop.claim_amount = share_type( 1000 );
+   sop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction stx; stx.operations.push_back( sop );
+   db.current_fee_schedule().set_fee( stx.operations.back() );
+   set_expiration( db, stx );
+   stx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, stx );
+
+   // Face burned from the asset side.
+   BOOST_CHECK_EQUAL( db.get_balance( alice_id, d.pair ).amount.value, 0 );
+   BOOST_CHECK_EQUAL( d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, 0 );
+   BOOST_CHECK( r->stable_supply == share_type( 0 ) );
+   // Payout landed (haircut bound; exact economics pinned elsewhere).
+   BOOST_CHECK( db.get_balance( alice_id, asset_id_type() ).amount >
+                before_bts );
+
+   // RED (defect): sum(band_stable) != stable_supply -- verify throws.
+   // GREEN (fix): the burn carried its band legs; both go to zero exactly.
+   share_type band_sum( 0 );
+   for( const share_type& band : r->band_stable )
+      band_sum += band;
+   BOOST_CHECK( band_sum == r->stable_supply );
+   h2_issue_verify_bands( *r );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -23,6 +23,7 @@
 #include <openssl/rand.h>
 
 #include <map>
+#include <set>
 
 namespace graphene { namespace chain {
 
@@ -149,11 +150,38 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
 
    // Resample loop: fresh shuffle per attempt (bounded; exhaustion throws
    // — availability yields to privacy, explicitly).
+   //
+   // R17B window-admission switch (round-17 Critical, PRV-R17-02; the
+   // floor's derivation is at the constant): the stratified draw below
+   // admits the real input's window into the decoy draw whenever the
+   // eligible set spans FEWER than R17B_MIN_DISTINCT_WINDOWS distinct
+   // windows. At and above the floor the exclusion stands: the real's
+   // window is kept out of the decoy candidates, so no ring position is
+   // privileged and the draw stays window-distinct under the wire shuffle.
+   // Below the
+   // R17B floor, ALL windows (the real's included) participate with
+   // multiplicity: the pre-round-17 exclusion left the real's window at
+   // zero decoy occupancy, a signature that names the real input from the
+   // public creation-block grid alone (k-sweep posterior 1.0 at <= 8
+   // windows, ~0.5 at 9, ~0.24 at 10), and admission gives it a multi-decoy
+   // occupancy no other window is guaranteed to lack. The 12..15 middle
+   // band keeps the pre-round-17 residual and is owned by the round-18
+   // re-audit k-sweep, NOT claimed by this instrument. (See the g1_stealth
+   // suite R17B instrument for the drawn-window-exact repair check.)
    std::vector<size_t> order( others.size() );
    for( size_t i = 0; i < order.size(); ++i ) order[i] = i;
    for( int attempt = 0; attempt < 32; ++attempt )
    {
       FC_ASSERT( shuffle_indices( order ), "Prover RNG failed" );
+      // R17B: re-measure the eligible distinct-window count each attempt
+      // over "others" (cheap; the candidate set never changes inside the
+      // loop, but the measured tail comes from the same guard here).
+      uint32_t distinct_windows = 0;
+      {
+         std::set<uint32_t> ws;
+         for( const auto& oc : others ) ws.insert( oc.blk / 100 );
+         distinct_windows = (uint32_t)ws.size();
+      }
       std::vector<cand> picked;
       picked.reserve( ring_size );
        // Stratified draw (spec 2026-10-11-wallet §1), R11R4-hardened
@@ -168,20 +196,35 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
        // public). One slot per non-empty bucket per pass keeps the
        // anti-Sybil property (a single-window dust dump earns one slot per
        // pass, never an output-proportional share). The real input's own
-       // window is EXCLUDED from the decoy draw: under randomized visitation
-       // every ring window is an equally plausible real window, and the
-       // exclusion removes the multiplicity-2 tell entirely. Residual: pools
-       // with fewer than 16 non-empty windows still multi-pass, doubling
-       // decoy windows while the real's window stays single; and when fewer
-       // than ring_size-1 decoys exist outside the real's window the draw
-       // exhausts and throws (availability yields to privacy, explicitly).
+       // Stratified draw (spec 2026-10-11-wallet §1, R11R4 + R17B):
+       // bucket the shuffled candidates by creation window, then
+       // round-robin one decoy per non-empty bucket per pass, visiting the
+       // buckets in a PER-ATTEMPT SHUFFLED key order. One slot per
+       // non-empty bucket per pass keeps the anti-Sybil property (a
+       // single-window dust dump earns one slot per pass, never an
+       // output-proportional share).
+       //
+       // R17B (round-17 Critical, PRV-R17-02): the real's window is
+       // admitted as a decoy bucket whenever the eligible set spans fewer
+       // than R17B_MIN_DISTINCT_WINDOWS distinct windows. On a thin window
+       // set the exclusion gives the real's window a unique single
+       // occupancy in the ring (membership is fully "nameable" from the
+       // wire); admission under multi-pass gives the real's window an
+       // occupancy shape no other window is guaranteed to lack. On a WIDE
+       // pool (>= R17B_MIN_DISTINCT_WINDOWS windows) the exclusion stands
+       // and the round-robin spreads the 15 decoys over the non-real
+       // windows with the pre-round-17 residual only (exactly uniform from
+       // 16 distinct windows up; the round-18 k-sweep owns 12..15). All
+       // window-eligibility is measured over the SAME index
+       // loop that built "others" — sampler and evaluator agree by
+       // construction.
        const uint32_t real_window = real_c.blk / 100;
        std::map<uint32_t, std::vector<size_t>> buckets;
        for( size_t k = 0; k < order.size(); ++k )
        {
           const uint32_t w = others[ order[k] ].blk / 100;
-          if( w == real_window )
-             continue; // R11R4: the real's window contributes no decoys
+          if( w == real_window && distinct_windows >= R17B_MIN_DISTINCT_WINDOWS )
+             continue; // R17B: exclusion only at/above the blend floor
           buckets[ w ].push_back( order[k] );
        }
        // Per-attempt shuffled bucket visit order (R11R4): an index

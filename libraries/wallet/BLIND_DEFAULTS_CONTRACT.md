@@ -72,10 +72,12 @@ against consensus policy in `g1_stealth_tests`):
 
 - Candidate set: UNSPENT blinded balances of the spent asset carrying
   post-fork creation metadata (chain-visible `get_blinded_balances` +
-  `get_stealth_effective_set` for depth context). NEVER include
-  spent-flagged outputs (their flags are public — they could never be the
-  real input, so they shrink the plausible set), grandfathered
-  (metadata-absent) outputs, or outputs younger than 24h.
+  `get_stealth_effective_set` for depth context). Spent-flagged outputs
+  cannot exist post-fork (the flag is retired and never written —
+  `stealth_evaluator.cpp:837-843`; `confidential_object.hpp:54-65`); do NOT
+  filter on it. Exclude grandfathered (metadata-absent) outputs and outputs
+  younger than 24h. Note nullified outputs stay decoy-eligible by design
+  (section 9).
 - Sample UNIFORMLY at random WITHOUT replacement from the candidate set.
   Never prefer recently-created outputs, never reuse a preferred subset
   across spends (reuse shrinks the effective set; the chain alarms on it

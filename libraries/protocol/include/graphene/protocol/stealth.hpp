@@ -56,6 +56,15 @@ constexpr uint32_t GRAPHENE_STEALTH_RING_TARGET = 16;
 /// Ceiling ring size: bounds verifier work per input (DoS cap, not privacy).
 constexpr uint32_t GRAPHENE_STEALTH_RING_MAX = 32;
 
+/// R17B (round-17): op109 input sampling blends the real input's creation
+/// window into the decoy draw whenever the eligible window set has fewer
+/// distinct windows than this value. Below it the exclusion's zero-occupancy
+/// signature names the real input (posterior 1.0 at <= 8 windows, ~0.5 at
+/// 9, ~0.24 at 10); at and above it the round-robin's residual is the
+/// pre-round-17 mild shape (exactly uniform from 16 distinct windows up).
+/// 12 = the measured crossover. Prover-side only (no evaluator reads it).
+constexpr uint32_t R17B_MIN_DISTINCT_WINDOWS = 12;
+
 /// Per-block blind-operation budget shared by ops 39/40/41/104/106: at most
 /// 100 blind ops per block. This is a MARKET-SPACE reservation (a full blind
 /// block must not crowd out the transparent/market traffic patterns the rest
@@ -265,7 +274,6 @@ constexpr uint32_t GRAPHENE_STEALTH_PARITY_BURN_CRITICAL_PCT = 80;
 /// skew rule window; bounds the histogram: <= 301 entries, pruned oldest).
 constexpr uint32_t GRAPHENE_STEALTH_SKEW_WINDOW_BLOCKS = 100;
 constexpr uint32_t GRAPHENE_STEALTH_SKEW_WINDOWS_KEPT = 301;
-
 /// Pinned pre-parity blind-cost anchor (proposal): the upstream
 /// transfer_to_blind defaults (base + per-output), kept as code constants so
 /// the float-to-cost level never depends on committee silence. The live

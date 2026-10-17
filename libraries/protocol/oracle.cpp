@@ -92,11 +92,24 @@ void oracle_value::validate()const
 
 bool operator < ( const oracle_value& a, const oracle_value& b )
 {
+   // Round-14 ratio-order determinism fix: the order must be TOTAL over the
+   // struct so the weighted-median representative is a function of the value
+   // set, never of std::sort stability. Ratio-equal, raw-different values
+   // ((1,1) vs (3,3)) are otherwise equivalent elements whose permutation is
+   // implementation-defined -- two honest nodes on different standard
+   // libraries (exactly what a hardfork binary switch brings) would emit
+   // different current_feed base/quote scales. operator== stays ratio-based
+   // on purpose: H2 change detection (h2_economics.cpp:619) and
+   // deviates_too_far compare by ratio and must keep doing so.
    const fc::uint128_t left  = fc::uint128_t( a.base_amount.value )
                              * b.quote_amount.value;
    const fc::uint128_t right = fc::uint128_t( b.base_amount.value )
                              * a.quote_amount.value;
-   return left < right;
+   if( left != right )
+      return left < right;
+   if( a.base_amount != b.base_amount )
+      return a.base_amount < b.base_amount;
+   return a.quote_amount < b.quote_amount;
 }
 
 bool operator == ( const oracle_value& a, const oracle_value& b )

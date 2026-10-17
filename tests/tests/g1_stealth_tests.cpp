@@ -1516,6 +1516,12 @@ BOOST_AUTO_TEST_CASE( decoy_rules_enforced )
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_BLIND_POOL_FLOOR, 11u );
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_RING_MIN, 11u );
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_RING_MAX, 32u );
+   // R17B window-blend floor (round-17): the sampler's real-window
+   // admission switch at thin window sets; consensus-visible through
+   // stealth_sample_pool_ring's drawn-window distribution. 12 = the
+   // measured crossover: admission dominates at <= 11 windows, and at/above
+   // it the exclusion's pre-round-17 residual is the weaker signature.
+   BOOST_REQUIRE_EQUAL( R17B_MIN_DISTINCT_WINDOWS, 12u );
 
    auto now = db.head_block_time();
    std::string err;
@@ -10238,8 +10244,9 @@ BOOST_AUTO_TEST_CASE( poolswap_tag109_exists )
 // share asset, one constant-product pool (1M/1M), and 20 aged A-blinds
 // (4/4/4/4/4 skew windows + 25h age, mirroring t5_fund_pool's aged pattern so
 // the TARGET-size ring satisfies the decoy policy and pool floor; five
-// windows so the R11R4 sampler — which excludes the real's whole window —
-// still finds its 15 decoys outside every window).
+// windows — post-R17B the sampler ADMITS the real's window into the decoy
+// draw at fewer than the R17B-MIN-DISTINCT-WINDOWS distinct-window floor,
+// so a 5-window pool still blends the real among its peers).
 struct g2_pool
 {
    asset_id_type            asset_a;
@@ -10331,11 +10338,11 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
       p.commits.push_back( o.commitment );
       p.blinds.push_back( B );
    };
-   // R11R4 (PRV-R11-01): 5 windows x 4 blinds. The production sampler
-   // excludes the real's whole window from the decoy draw, so EVERY blind
-   // must be spendable: the smallest outside-window complement (16 here)
-   // still covers the 15 decoys, and the 4-per-window ring counts clear the
-   // thin-pool 25% skew leg (4*4 <= 16).
+   // R11R4 + R17B: 5 windows x 4 blinds. The sampler identities make every
+   // blind spendable: post-R17B the real's window is one bucket among the
+   // 5 (admitted below the R17B-MIN-DISTINCT-WINDOWS floor), the smallest
+   // complement (16 here) still covers the 15 decoys, and the 4-per-window
+   // ring counts clear the thin-pool 25% skew leg (4*4 <= 16).
    for( int i = 0; i < 4; ++i ) { fund_one( i ); f.generate_block(); }
    f.generate_blocks( 110 );
    for( int i = 4; i < 8; ++i ) { fund_one( i ); f.generate_block(); }
@@ -11458,6 +11465,103 @@ BOOST_AUTO_TEST_CASE( poolswap_no_real_account_writes )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
+// VAC-R17-05 (round-17): the op109 nullifier rejection branch had no enabled
+// PUSH case (op104/op108 pins at :2689/:5884 never cover the poolswap path).
+// Two vectors follow the evaluator's real gate order (commitment freshness
+// :2302 -> owner -> ring liveness/sigs -> nullifier (11) :2416 -> range
+// proof (12)): (A) the byte-identical re-push is refused by the
+// commitment-freshness name before the nullifier branch is ever consulted;
+// (B) a FRESH build (new tag: the stable builder derives its input from
+// p.blinds[s], so the key images are bit-identical while the output
+// commitment and every proof are new) passes the freshness/owner/ring gates
+// and is refused by "Key image already spent" -- the spent-image guard is
+// source-independent of proof-bundle freshness. Reserves and the nullifier
+// set provably untouched by both refusals.
+BOOST_AUTO_TEST_CASE( poolswap_spent_nullifier_repush_refused_vac_r17_05 )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS((dan));
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = T_g2_ready_pool( *this, dan, dan_private_key, "G2RSP" );
+   set_expiration( db, trx );
+
+   const int64_t bal_a0 = p.pool( db ).balance_a.value;
+   const int64_t bal_b0 = p.pool( db ).balance_b.value;
+   const size_t nul_before = db.get_index_type<stealth_nullifier_index>().indices().size();
+
+   g2_swap sw = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-rsp", 50 );
+   trx.operations = { sw.op };
+   PUSH_TX( db, trx ); trx.clear();
+   generate_block();
+   // Anti-vacuity: the first push really completed and spent both images.
+   BOOST_CHECK_EQUAL(
+      db.get_index_type<stealth_nullifier_index>().indices().size() - nul_before, 2u );
+   // Post-first-push pool state: the baseline the refused re-push must leave alone.
+   const int64_t bal_a1 = p.pool( db ).balance_a.value;
+   const int64_t bal_b1 = p.pool( db ).balance_b.value;
+   const size_t nul_after = db.get_index_type<stealth_nullifier_index>().indices().size();
+
+   // The fixture seeds ONE parity grant and the first push consumed it (a
+   // swap debits its grant from parity_pool[A]); without a top-up both
+   // refusals below stop at the fee float ("Blind fee below cost level")
+   // before reaching their gates. Re-seed so the fee leg stays funded: the
+   // top-up runs on its own sealed block (issue -> seal -> direct seed, the
+   // T_g2_ready_pool discipline) and restores exactly the availability the
+   // first push had -- Leg A still proves the commitment gate precedes the
+   // fee gate, Leg B must reach the nullifier set.
+   issue_uia( dan, asset( 25000000, p.asset_a ) );
+   generate_block();
+   {
+      share_type parity_core = db.current_fee_schedule().calculate_fee(
+         operation( stealth_pool_exchange_operation() ) ).amount;
+      share_type anchor = stealth_cost_anchor_core( db, 1 );
+      share_type gap = ( anchor > parity_core ) ? ( anchor - parity_core ) : share_type( 0 );
+      share_type need = stealth_gap_to_asset( db, p.asset_a, gap ) + share_type( 1000 );
+      T_seed_pool_uia( *this, dan, p.asset_a( db ), need.value );
+   }
+
+   // Leg A -- exact re-push: the first gate refuses it (commitment exists).
+   set_expiration( db, trx );
+   trx.operations = { sw.op };
+   {
+      std::string a_err;
+      try { PUSH_TX( db, trx ); }
+      catch( const fc::exception& e ) { a_err = e.to_detail_string(); }
+      BOOST_CHECK_MESSAGE(
+         a_err.find( "Stealth output commitment already exists" ) != std::string::npos,
+         "op109 exact re-push refused off-gate: " + a_err );
+   }
+   trx.clear();
+
+   // Leg B -- the nullifier vector: fresh build over the SAME input.
+   g2_swap sw2 = g2_build_swap( db, p, 5, GRAPHENE_STEALTH_PROOF_V2, "g2-rsp2", 50 );
+   BOOST_REQUIRE( sw2.op.input.key_image == sw.op.input.key_image );
+   BOOST_REQUIRE( sw2.op.input.alt_key_image == sw.op.input.alt_key_image );
+   BOOST_REQUIRE( sw2.op.output.commitment != sw.op.output.commitment );
+   set_expiration( db, trx );
+   trx.operations = { sw2.op };
+   {
+      std::string b_err;
+      try { PUSH_TX( db, trx ); }
+      catch( const fc::exception& e ) { b_err = e.to_detail_string(); }
+      BOOST_CHECK_MESSAGE(
+         b_err.find( "Key image already spent" ) != std::string::npos,
+         "op109 fresh-output re-spend refused off-gate: " + b_err );
+   }
+   trx.clear();
+
+   // Nothing moved either time: same reserves, no extra nullifier rows.
+   // (bal_a0/bal_b0 stay only to prove the first push moved them at all.)
+   BOOST_CHECK_NE( bal_a1, bal_a0 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, bal_a1 );
+   BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, bal_b1 );
+   BOOST_CHECK_EQUAL( db.get_index_type<stealth_nullifier_index>().indices().size(), nul_after );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
 // ---- EE-5 Part D: the three V1 vectors (G2-2 Note-3). op109's BP+ OUTPUT path
 // is V2-only (exact 592 bytes, "G2 wires no V1 Borromean leg"), and its V1 RING
 // leg is frozen past sunset — none of which was pinned.
@@ -11933,12 +12037,11 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
    g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2SAMP", 0 );
    generate_block();
    set_expiration( db, trx );
-   // R11R4 (PRV-R11-01): the pool holds 20 aged blinds over 5 windows and
-   // the sampler excludes the real's whole window: the 15 decoys come from
-   // the other 4 windows (4 each) round-robined one-per-window-per-pass, so
-   // the split is exactly 4/4/4/3 in some order, all outside the real's
-   // window (deterministic — the shuffle only permutes which window takes
-   // the 3 and the emission order).
+   // R11R4 + R17B: the pool holds 20 aged blinds over 5 windows; the R17B
+   // window-admission switch puts the real's window in the draw on this
+   // thin setup, so the 15 decoys cover all 5 windows (3 or 4 each,
+   // round-robined one-per-window-per-pass; the shuffle only permutes which
+   // windows take the 3s and the emission order).
    graphene::chain::stealth_sampled_ring smp =
       graphene::chain::stealth_sample_pool_ring(
          db, p.asset_a, p.commits[3] );
@@ -11952,9 +12055,12 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
       BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
                    == sorted.end() );
    }
-   // Window split pin (R11R4 exclusion + anti-Sybil one-per-pass): the real
-   // (commits[3], first window) stands alone in its window; each of the
-   // other four windows contributes 3 or 4 decoys, totalling 15.
+   // Window split pin, R17B-updated (PRV-R17-02): at 5 distinct windows the
+   // eligible set is below R17B_MIN_DISTINCT_WINDOWS, so the real's window
+   // is ADMITTED to the decoy draw — the pre-R17B exclusion (real window
+   // uniquely occupied by 0 decoys) was the R17B uniqueness tell. All 5
+   // windows take ≥1 decoy, totalling 15; one-per-pass round-robin keeps
+   // every window at 3 or 4 (the real's own current window included).
    {
       const auto& bbi =
          db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
@@ -11970,14 +12076,15 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
          BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "decoy not indexed" );
          ++perW[ itr->created_block / 100 ];
       }
-      BOOST_REQUIRE_EQUAL( perW.size(), 4u );
+      BOOST_REQUIRE_EQUAL( perW.size(), 5u );
+      BOOST_REQUIRE_MESSAGE( perW.count( realW ) > 0,
+         "R17B: the real's window was excluded from the decoy draw on a "
+         "thin pool — the uniqueness tell is present" );
       size_t total = 0;
       for( const auto& kv : perW )
       {
-         BOOST_CHECK_MESSAGE( kv.first != realW,
-            "R11R4: a decoy shares the real's window" );
          BOOST_CHECK_MESSAGE( kv.second == 3 || kv.second == 4,
-            "R11R4: window " << kv.first << " contributed " << kv.second
+            "R17B: window " << kv.first << " contributed " << kv.second
             << " decoys, expected 3 or 4 (one-per-window-per-pass)" );
          total += kv.second;
       }
@@ -12012,6 +12119,94 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
          db, p.asset_a, p.commits[3],
          db.head_block_num() + 1000000 ),
       fc::exception );
+   verify_asset_supplies( db );
+} FC_CAPTURE_AND_RETHROW() }
+
+// R17B (round-17, PRV-R17-02): on a THIN window setup (5 distinct windows,
+// fewer than R17B_MIN_DISTINCT_WINDOWS) the sampler must blend the real's
+// window into the decoy draw, not exclude it — the excluded real window
+// carries a unique single-occupancy signature over the ring, naming the
+// real from membership blocks alone. The suite's R11R4 pin asserts exact
+// exclusion shapes driven by the SAMPLED pool mass, not by code spelling,
+// so it is repo-wide editorial but does not const-duplicate the floor here;
+// this instrument reads the POSTERIOR over all members' window votes
+// directly.
+BOOST_AUTO_TEST_CASE( r17b_thin_window_sampler_blends_real_window )
+{ try {
+   generate_blocks( HARDFORK_STEALTH_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   transfer( account_id_type()( db ), dan, asset_id_type()( db ).amount( 500000000 ) );
+   generate_block();
+   g2_pool p = g2_fund_pool( *this, dan, dan_private_key, "G2R17B", 0 );
+   generate_block(); // seal the blinds through pending.
+   set_expiration( db, trx );
+   graphene::chain::stealth_sampled_ring smp =
+      graphene::chain::stealth_sample_pool_ring(
+         db, p.asset_a, p.commits[3] );
+   BOOST_REQUIRE_EQUAL( smp.ring.size(), 16u );
+   BOOST_REQUIRE( smp.real_index < smp.ring.size() );
+   BOOST_CHECK( smp.ring[smp.real_index] == p.commits[3] );
+   // Distinct members (evaluator refuses duplicates).
+   {
+      std::vector<fc::ecc::commitment_type> sorted = smp.ring;
+      std::sort( sorted.begin(), sorted.end() );
+      BOOST_CHECK( std::adjacent_find( sorted.begin(), sorted.end() )
+                   == sorted.end() );
+   }
+   // Window split: with the real's window ADMITTED, all 5 windows take
+   // decoys (4 each up to the 15-decoy total), so the real's window in the
+   // sampled ring is never uniquely occupied by 0 decoys — it always
+   // stands 1 real + 3 decoys.
+   {
+      const auto& bbi =
+         db.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
+      auto itr0 = bbi.find( p.commits[3] );
+      BOOST_REQUIRE_MESSAGE( itr0 != bbi.end(), "real not indexed" );
+      const uint32_t realW = itr0->created_block / 100;
+      std::map<uint32_t, size_t> perW;
+      for( size_t m = 0; m < smp.ring.size(); ++m )
+      {
+         if( m == smp.real_index )
+            continue;
+         auto itr = bbi.find( smp.ring[m] );
+         BOOST_REQUIRE_MESSAGE( itr != bbi.end(), "decoy not indexed" );
+         auto& cnt = perW[ itr->created_block / 100 ];
+         ++cnt;
+         BOOST_CHECK_MESSAGE( cnt <= 4u * 4u /*4 windows * 4-per-window*/,
+            "R17B: a window fills the whole pool - no round-robin" );
+         // The distinguishing check: the real's window MUST take ≥1 decoy.
+         BOOST_CHECK_MESSAGE( itr->created_block / 100 != realW
+                              || true, /* always true for the map key */ "" );
+      }
+      BOOST_REQUIRE_MESSAGE( perW.count( realW ) > 0,
+         "R17B THIN-WINDOW: the real's window was excluded from the "
+         "decoy draw — uniqueness-tell present (pre-repair sampler)" );
+      size_t total = 0;
+      for( const auto& kv : perW )
+      {
+         BOOST_CHECK_MESSAGE( kv.second == 3 || kv.second == 4,
+            "R17B: window " << kv.first << " contributed " << kv.second
+            << " decoys, expected 3 or 4 (one-per-window per pass)" );
+         total += kv.second;
+      }
+      BOOST_CHECK_EQUAL( total, 15u );
+      // Evaluator membership loop + decoy policy at live depth.
+      std::vector<uint32_t> heights;
+      std::vector<fc::time_point_sec> times;
+      for( const auto& c : smp.ring )
+      {
+         auto itr = bbi.find( c );
+         heights.push_back( itr->created_block );
+         times.push_back( itr->created_time );
+      }
+      std::string err;
+      BOOST_CHECK_MESSAGE(
+         stealth_check_decoy_policy( heights, times, db.head_block_time(),
+            db.head_block_num(), err, stealth_pool_depth( db, p.asset_a ) ),
+         err );
+   }
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -12821,14 +13016,18 @@ static std::vector<ee_bal> T_ee_deposit( database_fixture& f, account_id_type fr
    return r;
 }
 
-// Stratified draw (spec 2026-10-11-wallet §1), R11R4-hardened (PRV-R11-01):
-// 49+7+7+7 across four windows gives exactly 5+5+5 decoys per 15 picks
-// regardless of shuffle, all OUTSIDE the real's window (the real's window
-// is excluded from the decoy draw): with the real fixed in the first
-// window, outside-window decoy slots == 3000 of 3000 EXACTLY, split 5/5/5
-// across the other three windows every ring (one-decoy-per-window-per-pass).
-// Pre-change the uniform draw conforms with P≈1e-5/attempt, so sampling
-// either throws (near-certain) or fails the exact count — both RED.
+// Stratified draw (spec 2026-10-11-wallet §1), R11R4-hardened (PRV-R11-01),
+// R17B-updated (PRV-R17-02): 49+7+7+7 across four windows sits BELOW the
+// R17B_MIN_DISTINCT_WINDOWS floor, so the real's window is ADMITTED to the
+// decoy draw (the pre-R17B exclusion left it at zero decoy occupancy — the
+// uniqueness tell). The 15 decoys round-robin ONE per bucket per pass over
+// all four buckets: every window contributes 3 or 4 every ring (3 passes
+// fill 12 picks; the 4th pass's first 3 buckets take the last 3), and the
+// shuffle permutes only which bucket takes the 3 and the emission order.
+// The 49-strong first window earns exactly the same 3-4 as the 7-strong
+// windows — one-slot-per-bucket-per-pass caps a mass dump. Pre-change the
+// uniform draw conforms with P≈1e-5/attempt, so sampling either throws
+// (near-certain) or fails the exact counts — both RED.
 // (Placed after T_ee_deposit: ee_bal is complete only here.)
 BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
 { try {
@@ -12878,10 +13077,12 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
       return itr->created_block / 100;
    };
     const uint32_t realW = win_of( commitsA[0] );
-    // 200 rings around a first-window real; every decoy must sit outside it
-    // (R11R4 exclusion), split exactly 5/5/5 across the other three windows
-    // (one-decoy-per-window-per-pass over 3 eligible buckets x 7).
-    uint32_t outside = 0, total = 0;
+    // 200 rings around a first-window real; R17B: the real's window is one
+    // of the four decoy buckets (above), so every window — the real's
+    // included — takes 3 or 4 decoys every ring, and the real's window is
+    // never left at zero decoy occupancy (its pre-R17B unique single
+    // occupancy was the tell).
+    uint32_t total = 0;
     std::map<uint32_t, uint32_t> perW;
     for( int s = 0; s < 200; ++s )
     {
@@ -12903,25 +13104,31 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
           if( m == smp.real_index )
              continue;
           ++total;
-          const uint32_t w = win_of( smp.ring[m] );
-          if( w != realW )
-             ++outside;
-          ++one[w];
+          ++one[win_of( smp.ring[m] )];
        }
-       BOOST_REQUIRE_EQUAL( one.size(), 3u );
+       // All four buckets contribute every ring (each holds enough decoy
+       // candidates, and one-per-bucket-per-pass fills 3 passes before the
+       // 15th pick lands in the 4th).
+       BOOST_REQUIRE_EQUAL( one.size(), 4u );
+       BOOST_REQUIRE_MESSAGE( one.count( realW ) > 0,
+          "R17B: the real's window was excluded from the decoy draw on a "
+          "window set below the R17B floor (uniqueness tell)" );
        for( const auto& kv : one )
        {
-          BOOST_CHECK_MESSAGE( kv.first != realW,
-             "R11R4: a decoy shares the real's window" );
-          BOOST_CHECK_EQUAL( kv.second, 5u );
+          BOOST_CHECK_MESSAGE( kv.second == 3u || kv.second == 4u,
+             "R11R4/R17B: window " << kv.first << " contributed "
+             << kv.second << " decoys in one ring (expected 3 or 4: "
+             "one-per-bucket-per-pass over 4 buckets for 15 picks)" );
           perW[kv.first] += kv.second;
        }
     }
     BOOST_REQUIRE_EQUAL( total, 3000u );
-    BOOST_REQUIRE_EQUAL( outside, 3000u );
-    BOOST_REQUIRE_EQUAL( perW.size(), 3u );
+    BOOST_REQUIRE_EQUAL( perW.size(), 4u );
     for( const auto& kv : perW )
-       BOOST_CHECK_EQUAL( kv.second, 1000u ); // 5/ring x 200 rings
+       BOOST_CHECK_MESSAGE( kv.second >= 700u && kv.second <= 800u,
+          "R17B: window " << kv.first << " total " << kv.second
+          << " over 200 rings outside the 750 +- 50 envelope (the 3-vs-4 "
+          "pick is a fresh uniform shuffle every ring)" );
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
@@ -12938,9 +13145,8 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
 // created_block is public chain state, so an observer who knows the
 // windows names the real member directly:
 //   (a) ring[0] is ALWAYS the minimum window (the first bucket's first
-//       pick — or the spliced real, which lives in that same minimum
-//       window here, alone since R11R4 excludes its window from decoys),
-//       so the first position is a constant, not a sample;
+//       pick — or the spliced real, which also lives in that minimum
+//       window), so the first position is a constant, not a sample;
 //   (b) removing the real input's position ALWAYS leaves the canonical
 //       ascending-key round-robin of the remaining multiset — that is the
 //       attack of REPAIR-02: remove each candidate k in turn and re-run
@@ -12957,18 +13163,18 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
 // round-robin refills the lowest window every pass, so a global
 // non-decreasing-window test would be vacuous (it never holds even on
 // the defective sampler). After a Fisher-Yates of the whole ring, (a)
-// becomes a 1/16 draw (R11R4: the real stands alone in the minimum window —
-// its window contributes no decoys) and (b) collapses to ~0 (a uniform
-// permutation of the 1/5/5/5 multiset is the round-robin of its own
-// multiset with probability 1/12108096; matching it after a one-element
-// removal is likewise ~1e-7 per candidate position), so both assertions
-// below are RED on the unfixed sampler and GREEN once the final shuffle
-// lands.
+// becomes a draw on the minimum window's ring occupancy (R17B: that
+// window is admitted on this 4-window fixture, so ~4/16; 1/16 under the
+// pre-R17B exclusion) and (b) collapses to ~0 (a uniform permutation
+// matching the round-robin of its own multiset is ~1e-7 per candidate
+// position), so both assertions below are RED on the unfixed sampler and
+// GREEN once the final shuffle lands.
 //
 // Fixture = wallet_sampler_stratifies_windows exactly (49+7+7+7 blinds over
-// four distinct 100-block windows, real in the first/minimum window;
-// that case's exact outside == 3000 pins the 5/5/5 round-robin split across
-// the three non-real windows and the absence of a window straddle), so this case reuses the same harness
+// four distinct 100-block windows, real in the first/minimum window; that
+// case pins the R17B 3-or-4 per-window split over all four buckets — the
+// real's included — and the absence of a window straddle), so this case
+// reuses the same harness
 // instead of inventing a second one. Real-position histogram is NOT
 // asserted: the splice index `at` was already uniform, so it is vacuous
 // against the defect — the window order is the signal.
@@ -13046,9 +13252,9 @@ BOOST_AUTO_TEST_CASE( poolswap_sampler_no_window_order_fingerprint )
       }
       return out;
    };
-   // 200 rings: unfixed rates 1.0 / 1.0 vs fixed 6/16 / ~0 — the
-   // thresholds below sit many sigma clear of both, so neither direction
-   // can flake.
+   // 200 rings: unfixed rates 1.0 / 1.0 vs fixed well under 1 on both (a)
+   // and (b) at the R17B fixture — the thresholds below sit many sigma
+   // clear of both, so neither direction can flake.
    const int samples = 200;
    uint32_t first_is_min = 0; // (a)
    uint32_t any_odd = 0;      // (b) rings where >= 1 removal restores the

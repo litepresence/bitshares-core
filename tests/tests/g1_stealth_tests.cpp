@@ -11505,9 +11505,10 @@ BOOST_AUTO_TEST_CASE( poolswap_spent_nullifier_repush_refused_vac_r17_05 )
    const size_t nul_after = db.get_index_type<stealth_nullifier_index>().indices().size();
 
    // The fixture seeds ONE parity grant and the first push consumed it (a
-   // swap debits its grant from parity_pool[A]); without a top-up both
-   // refusals below stop at the fee float ("Blind fee below cost level")
-   // before reaching their gates. Re-seed so the fee leg stays funded: the
+   // swap debits its grant from parity_pool[A]); without a top-up Leg B
+   // stops at the fee float ("Blind fee below cost level") before reaching
+   // the nullifier set (Leg A's refusal is the commitment gate, which
+   // precedes the fee float call). Re-seed so the fee leg stays funded: the
    // top-up runs on its own sealed block (issue -> seal -> direct seed, the
    // T_g2_ready_pool discipline) and restores exactly the availability the
    // first push had -- Leg A still proves the commitment gate precedes the

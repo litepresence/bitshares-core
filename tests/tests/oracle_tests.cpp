@@ -549,6 +549,128 @@ BOOST_AUTO_TEST_CASE( a_stale_submission_stops_counting )
    BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 } FC_LOG_AND_RETHROW() }
 
+/// H1-FINAL-02 (round-16; RED first at the pre-fix tree): a transient quorum
+/// gap must not destroy the rate limiter's baseline. Pre-fix the quorum-loss
+/// branch reset consumed_value, so the owner could paste an arbitrary-size
+/// price step in one promotion: rotate the producers away (baseline wiped),
+/// then rotate back with a spiked submission -- the re-entry promotion took
+/// the first-promotion branch and skipped the move check entirely.
+BOOST_AUTO_TEST_CASE( r32_quorum_gap_keeps_consumed_baseline )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave );
+
+   setup_references( alice_id, alice_private_key );
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 2;
+   opts.value_lifetime_sec  = 600;
+   opts.guard_rate_limit    = true;
+   const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
+
+   publish( oid, bob_id,   bob_private_key,   100 );
+   publish( oid, carol_id, carol_private_key, 100 );
+   BOOST_REQUIRE( oid(db).consumed_value.valid() );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+
+   // Outage: rotate the quorum away -- live submissions drop below the minimum.
+   oracle_options gap = opts;
+   gap.producers.clear();
+   gap.producers[dave_id] = oracle_producer_entry( 1 );
+   gap.minimum_producers  = 1;
+   update_options( oid, alice_id, alice_private_key, gap );
+   BOOST_CHECK( !oid(db).current_value.valid() );
+   BOOST_CHECK_EQUAL( oid(db).current_value_producer_count, 0u );
+   // The baseline survives (RED pre-fix: this reset consumed_value).
+   BOOST_CHECK( oid(db).consumed_value.valid() );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+
+   // Restore: dave joins the set; bob's stored submission is still live.
+   oracle_options back = gap;
+   back.producers[bob_id] = oracle_producer_entry( 1 );
+   update_options( oid, alice_id, alice_private_key, back );
+   BOOST_CHECK( oid(db).consumed_value.valid() );
+
+   // dave's spiked paste is move-checked against the surviving baseline and
+   // held: the owner cannot ride the outage to an arbitrary price step.
+   publish( oid, dave_id, dave_private_key, 250 );
+   BOOST_CHECK( oid(db).rate_limited );
+   BOOST_CHECK( oid(db).consumed_value->at( 0 ) == val( 100 ) );
+   // The never-destroyed reference pair is stamped and current.
+   BOOST_REQUIRE( oid(db).last_good_value.valid() );
+   BOOST_CHECK( oid(db).last_good_value->at( 0 ) == val( 100 ) );
+   BOOST_CHECK( oid(db).last_good_time.valid() );
+} FC_LOG_AND_RETHROW() }
+
+/// H1-FINAL-01 (round-16; RED first at the pre-fix tree): submissions is
+/// pruned to the current producer set. Pre-fix the aggregation only SKIPPED
+/// rows for removed producers (it never erased them), so owner rotation left
+/// every removed producer's row behind forever and per-publish work grew
+/// O(rotations) on every node.
+BOOST_AUTO_TEST_CASE( r32_submissions_pruned_to_current_producer_set )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol)(dave)(eve) );
+   fund( alice ); fund( bob ); fund( carol ); fund( dave ); fund( eve );
+
+   setup_references( alice_id, alice_private_key );
+   oracle_options opts;
+   opts.producers[bob_id]   = oracle_producer_entry( 1 );
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.producers[dave_id]  = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 600;
+   const auto oid = make_oracle( alice_id, alice_private_key, "CORE.USD", opts );
+
+   publish( oid, bob_id,   bob_private_key,   100 );
+   publish( oid, carol_id, carol_private_key, 100 );
+   publish( oid, dave_id,  dave_private_key,  100 );
+   BOOST_REQUIRE_EQUAL( oid(db).submissions.size(), 3u );
+
+   // Rotation prunes immediately: rows for producers outside the set are gone.
+   oracle_options one_bob = opts;
+   one_bob.producers.clear();
+   one_bob.producers[bob_id] = oracle_producer_entry( 1 );
+   update_options( oid, alice_id, alice_private_key, one_bob );
+   BOOST_CHECK_EQUAL( oid(db).submissions.size(), 1u );
+   // Flush: the rotation loop's first {bob} update is byte-identical to this one.
+   generate_block();
+
+   oracle_options one_eve = one_bob;
+   one_eve.producers.clear();
+   one_eve.producers[eve_id] = oracle_producer_entry( 1 );
+   update_options( oid, alice_id, alice_private_key, one_eve );
+   BOOST_CHECK_EQUAL( oid(db).submissions.size(), 0u );
+   generate_block();
+
+   // Repeated rotations stay bounded: the map never holds more rows than the
+   // set has, whatever the rotation count.
+   for( int i = 0; i < 8; ++i )
+   {
+      for( const auto& who : { bob_id, carol_id } )
+      {
+         oracle_options one = one_eve;
+         one.producers.clear();
+         one.producers[who] = oracle_producer_entry( 1 );
+         update_options( oid, alice_id, alice_private_key, one );
+         publish( oid, who, who == bob_id ? bob_private_key : carol_private_key, 100 );
+         BOOST_CHECK_EQUAL( oid(db).submissions.size(), 1u );
+         // Flush the pending session: the next iteration's update for the same
+         // producer is byte-identical (same ref block, expiration, options,
+         // signature) and would be refused as a duplicate transaction.
+         generate_block();
+      }
+   }
+} FC_LOG_AND_RETHROW() }
+
 /// Weight is the difference between an oracle and a plain vote count.
 BOOST_AUTO_TEST_CASE( weights_shift_the_median )
 { try {
@@ -3012,7 +3134,11 @@ BOOST_AUTO_TEST_CASE( t8b_delay_holds_value_until_delay_passes )
       cop.expiration_time = db.head_block_time() + *cop.review_period_seconds + 10;
       committee_member_update_global_parameters_operation cmuop;
       cmuop.new_parameters = db.get_global_properties().parameters;
-      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 120;
+      // H1-FINAL-06/R17G: sub-minute delays are refused by the coded floor
+      // (chain_parameters validate, GRAPHENE_ORACLE_GUARD_MIN_DELAY_SEC); the
+      // suite votes the smallest whole-hour delay in the PS-R17-01 stall
+      // classes instead (7200s = 2h: pre-R17G it self-erases its queue).
+      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 7200;
       cop.proposed_ops.emplace_back( cmuop );
       trx.operations.push_back( cop );
       processed_transaction ptx = PUSH_TX( db, trx, ~0 );
@@ -3021,6 +3147,11 @@ BOOST_AUTO_TEST_CASE( t8b_delay_holds_value_until_delay_passes )
 
       proposal_update_operation uop;
       uop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      // Explicit target: a defaulted (1.10.0) target would hit whichever
+      // proposal was created first in this test; review_period_time lives at
+      // expiration - review, so approving a proposal created more than
+      // moments ago is refused.
+      uop.proposal = prop_id;
       uop.active_approvals_to_add = { get_account("init0").get_id(), get_account("init1").get_id(),
                                       get_account("init2").get_id(), get_account("init3").get_id(),
                                       get_account("init4").get_id(), get_account("init5").get_id(),
@@ -3033,7 +3164,7 @@ BOOST_AUTO_TEST_CASE( t8b_delay_holds_value_until_delay_passes )
       generate_blocks( db.get_dynamic_global_properties().next_maintenance_time );
       generate_block();
       BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters
-                              .get_oracle_guard_delay_sec(), 120u );
+                              .get_oracle_guard_delay_sec(), 7200u );
    }
    set_expiration( db, trx );
 
@@ -3059,7 +3190,12 @@ BOOST_AUTO_TEST_CASE( t8b_delay_holds_value_until_delay_passes )
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
 
    // Past N + delay the same value becomes consumable and the feed goes live.
+   // Delay is 7200 now (the coded floor above); one mid-delay publish keeps a
+   // live bucket; the jump crosses the ripening.
    generate_blocks( db.head_block_time() + 180 );
+   set_expiration( db, trx );
+   guard_publish( oid, carol_id, carol_private_key, 100 );
+   generate_blocks( db.head_block_time() + 7300 );
    set_expiration( db, trx );
    guard_publish( oid, carol_id, carol_private_key, 100 );
    BOOST_REQUIRE( oid(db).consumed_value.valid() );
@@ -3067,6 +3203,150 @@ BOOST_AUTO_TEST_CASE( t8b_delay_holds_value_until_delay_passes )
    BOOST_CHECK( !mia_id(db).bitasset_data(db).current_feed.settlement_price.is_null() );
    BOOST_CHECK( mia_id(db).bitasset_data(db).current_feed.settlement_price
                 == price( asset( 1, mia_id ), asset( 100, asset_id_type() ) ) );
+} FC_LOG_AND_RETHROW() }
+
+/// T8b2 (R17G, PS-R17-01): the guard-delay queue must promote the oldest sample
+/// when it ripens at the committee delay, even when an honest producer publishes
+/// at block cadence (the production shape). Pre-R17G the capacity trim ran BEFORE
+/// the ripen scan with bucket = delay/16, so 16 buckets spanned exactly <= the
+/// delay: the oldest entry was erased at its ripening block and no sample ever
+/// reached age >= delay -- the gated pair's feed stayed null forever at the
+/// production delay values (3600 default, plus 7200/43200 and every whole-hour
+/// value in the stall classes). RED here at 3600 (default) and 7200 (voted),
+/// GREEN with bucket = delay/(MAX_PENDING-1): the 16th arrival lands at the
+/// delay boundary with the queue not yet clipped, so the ripen scan sees the
+/// ripe oldest entry.
+BOOST_AUTO_TEST_CASE( t8b2_guard_delay_promotes_oldest_sample_block_cadence_r17g )
+{ try {
+   generate_blocks( HARDFORK_ORACLE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+   // The committee has never set the extension: the default delay (3600,
+   // protocol/oracle.hpp) is what every production pair sees; pin it here so
+   // the regression is written against the exact value under test.
+   BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters
+                          .get_oracle_guard_delay_sec(), 3600u );
+
+   // H1-FINAL-06 floor: a sub-minute vote is refused at validate, pre-fork
+   // the whole extension is refused anyway (t8b pins that shape) — probe the
+   // post-fork refusal here at 90s, then the floor boundary value (3600)
+   // landing cleanly.
+   {
+      proposal_create_operation cop = proposal_create_operation::committee_proposal(
+            db.get_global_properties().parameters, db.head_block_time() );
+      cop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      cop.expiration_time = db.head_block_time() + *cop.review_period_seconds + 10;
+      committee_member_update_global_parameters_operation cmuop;
+      cmuop.new_parameters = db.get_global_properties().parameters;
+      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 90;
+      cop.proposed_ops.emplace_back( cmuop );
+      trx.operations.push_back( cop );
+      GRAPHENE_CHECK_THROW( PUSH_TX( db, trx, ~0 ), fc::exception );
+      trx.clear();
+      // Boundary value: exactly the floor is legal (probes nothing else).
+      cop.expiration_time = db.head_block_time() + *cop.review_period_seconds + 10;
+      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 3600;
+      cop.proposed_ops.clear();
+      cop.proposed_ops.emplace_back( cmuop );
+      trx.operations.push_back( cop );
+      PUSH_TX( db, trx, ~0 );
+      trx.clear();
+   }
+
+   ACTORS( (alice)(carol) );
+   fund( alice ); fund( carol );
+   setup_references( alice_id, alice_private_key );
+
+   oracle_options opts;
+   opts.producers[carol_id] = oracle_producer_entry( 1 );
+   opts.minimum_producers   = 1;
+   opts.value_lifetime_sec  = 7 * 86400;
+   opts.guard_delay         = true;
+   const auto oid = make_guard_oracle( alice_id, alice_private_key, "USD.CORE", opts, usd_ref );
+
+   // Publish at BLOCK cadence from t0: one publish per block (same value, so
+   // no rate-limit leg). With bucket = floor(delay/16) = 225 for the default
+   // 3600 the queue grows ~1 entry per 225s; the 17th arrival clips the oldest
+   // entry at exactly its ripening age and the consumed value must never seed
+   // pre-fix.
+   const auto t0 = db.head_block_time();
+   fc::optional<int64_t> first_age_3600;
+   for( int i = 0; i < 1220; ++i )
+   {
+      guard_publish( oid, carol_id, carol_private_key, 100 );
+      generate_block();
+      set_expiration( db, trx );
+      if( !first_age_3600.valid() && oid(db).consumed_value.valid() )
+         first_age_3600 = int64_t( ( db.head_block_time() - t0 ).to_seconds() ) - 3; // the block that promoted
+      // While the delay still holds: no premature promotion.
+      if( ( db.head_block_time() - t0 ).to_seconds() < 3000 )
+         BOOST_CHECK( !oid(db).consumed_value.valid() );
+      if( first_age_3600.valid() )
+         break;
+   }
+   BOOST_REQUIRE_MESSAGE( first_age_3600.valid(),
+      "R17G RED: guard delay 3600 never promoted any sample at block cadence "
+      "(queue self-erases every ripe sample)" );
+   BOOST_CHECK_GE( *first_age_3600, int64_t( 3594 ) );
+   BOOST_CHECK_LE( *first_age_3600, int64_t( 3660 ) );
+
+   // Second leg: a committee-voted delay inside the same stall class. 7200
+   // (old bucket = floor(7200/16) = 450; 16 entries spanning 6750, so the
+   // 17th arrival at 7200 clipped the oldest entry at exactly its ripening
+   // age; the fixed bucket 480 lets the queue reach the boundary intact).
+   {
+      proposal_create_operation cop = proposal_create_operation::committee_proposal(
+            db.get_global_properties().parameters, db.head_block_time() );
+      cop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      cop.expiration_time = db.head_block_time() + *cop.review_period_seconds + 10;
+      committee_member_update_global_parameters_operation cmuop;
+      cmuop.new_parameters = db.get_global_properties().parameters;
+      cmuop.new_parameters.extensions.value.oracle_guard_delay_sec = 7200;
+      cop.proposed_ops.emplace_back( cmuop );
+      trx.operations.push_back( cop );
+      processed_transaction ptx = PUSH_TX( db, trx, ~0 );
+      trx.clear();
+      proposal_id_type prop_id { ptx.operation_results[0].get<object_id_type>() };
+
+      proposal_update_operation uop;
+      uop.fee_paying_account = GRAPHENE_TEMP_ACCOUNT;
+      // Explicit target: without this the default (1.10.0) hits the earlier
+      // floor-probe proposal, and approvals past review_period_time are refused.
+      uop.proposal = prop_id;
+      uop.active_approvals_to_add = { get_account("init0").get_id(), get_account("init1").get_id(),
+                                      get_account("init2").get_id(), get_account("init3").get_id(),
+                                      get_account("init4").get_id(), get_account("init5").get_id(),
+                                      get_account("init6").get_id(), get_account("init7").get_id() };
+      trx.operations.push_back( uop );
+      PUSH_TX( db, trx, ~0 );
+      trx.clear();
+
+      generate_blocks( prop_id( db ).expiration_time + 5 );
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time );
+      generate_block();
+      set_expiration( db, trx );
+      BOOST_REQUIRE_EQUAL( db.get_global_properties().parameters
+                              .get_oracle_guard_delay_sec(), 7200u );
+   }
+   // A fresh delay opt-in under the new delay: freshly published samples age
+   // from here, so this leg measures the voted delay end to end.
+   const auto oid2 = make_guard_oracle( alice_id, alice_private_key, "USD.CORE2", opts, usd_ref );
+   const auto t2 = db.head_block_time();
+   fc::optional<int64_t> first_age_7200;
+   for( int i = 0; i < 2460; ++i )
+   {
+      guard_publish( oid2, carol_id, carol_private_key, 100 );
+      generate_block();
+      set_expiration( db, trx );
+      if( !first_age_7200.valid() && oid2(db).consumed_value.valid() )
+         first_age_7200 = int64_t( ( db.head_block_time() - t2 ).to_seconds() ) - 3;
+      if( first_age_7200.valid() )
+         break;
+   }
+   BOOST_REQUIRE_MESSAGE( first_age_7200.valid(),
+      "R17G RED: guard delay 7200 never promoted any sample at block cadence" );
+   BOOST_CHECK_GE( *first_age_7200, int64_t( 7194 ) );
+   BOOST_CHECK_LE( *first_age_7200, int64_t( 7260 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// T8c: freeze halts consumption and fails margin actions closed; unfreeze by vote

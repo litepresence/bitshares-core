@@ -382,7 +382,17 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
    const uint32_t delay_sec = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
    const uint32_t maint_sec = d.get_global_properties().parameters.maintenance_interval;
 
-   d.modify( *_oracle, [&op, now, delay_sec, maint_sec]( oracle_object& o ) {
+   const auto& oracle_name = _oracle->name;
+   d.modify( *_oracle, [&op, now, delay_sec, maint_sec, &oracle_name]( oracle_object& o ) {
+      // H1-FINAL-01 (round-16): the update_current_value prune relies on this
+      // invariant -- writes happen only for producers that are in the set right
+      // now; a producer removed later keeps its row only until the next
+      // update_current_value prunes it. do_evaluate already refuses
+      // non-producers; this fail-closed pin keeps the prune sound even if that
+      // upstream check is ever weakened.
+      FC_ASSERT( o.options.producers.count( op.producer ) > 0,
+                 "Producer ${a} is not in the producer set of oracle '${n}'",
+                 ("a", op.producer)("n", oracle_name) );
       o.submissions[op.producer] = std::make_pair( now, op.values );
       // Reputation counts the attempt here; live/outlier counts accrue inside the
       // aggregation this publish triggers. No economics reads any of it.

@@ -70,8 +70,21 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       oracle_options  options;
 
       /// Latest submission per producer: one value per declared series, in order.
-      /// Bounded by options.producers.
+      /// Bounded by options.producers. (H1-FINAL-01, round-16: "bounded by
+      /// options.producers" is now CODE, not a comment — update_current_value
+      /// prunes rows for producers no longer in the set, mirroring the
+      /// reputation prune, so rotation churn cannot grow this map.)
       flat_map<account_id_type, pair<time_point_sec, vector<oracle_value>>> submissions;
+
+      /// H1-FINAL-02 (round-16, carried since round-9 H1-08): the rate limiter's
+      /// reference that no reset path can destroy. Written at every confirmed
+      /// promotion, never cleared: a transient quorum gap or a defensive early
+      /// return cannot remove the guard's baseline, so the re-entry promotion is
+      /// still move-checked against the pre-gap reference. Read fallback: when
+      /// absent (fresh oracle), the comparison falls back to consumed_value (the
+      /// pre-existing shape).
+      optional<vector<oracle_value>>  last_good_value;
+      optional<time_point_sec>        last_good_time;
 
       /// Recent aggregates, oldest first, capped at GRAPHENE_ORACLE_MAX_HISTORY entries
       /// each holding one value per series. Recorded from the moment the oracle exists,

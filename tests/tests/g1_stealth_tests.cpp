@@ -12176,10 +12176,9 @@ BOOST_AUTO_TEST_CASE( r17b_thin_window_sampler_blends_real_window )
          ++cnt;
          BOOST_CHECK_MESSAGE( cnt <= 4u * 4u /*4 windows * 4-per-window*/,
             "R17B: a window fills the whole pool - no round-robin" );
-         // The distinguishing check: the real's window MUST take ≥1 decoy.
-         BOOST_CHECK_MESSAGE( itr->created_block / 100 != realW
-                              || true, /* always true for the map key */ "" );
       }
+      // The distinguishing check: the real's window MUST take >=1 decoy
+      // (RED-proven pre-repair: perW.count(realW) == 0 on the old sampler).
       BOOST_REQUIRE_MESSAGE( perW.count( realW ) > 0,
          "R17B THIN-WINDOW: the real's window was excluded from the "
          "decoy draw — uniqueness-tell present (pre-repair sampler)" );

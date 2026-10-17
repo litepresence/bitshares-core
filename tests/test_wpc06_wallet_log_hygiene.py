@@ -26,6 +26,13 @@ confidential.hpp). WPC-R17-02: the transfer_to_blind-mate capture at
 wallet.cpp (receive path tail) must not pass (confirm) to
 FC_CAPTURE_AND_RETHROW: confirm.outputs[].decrypted_memo.blinding_factor
 holds freshly generated blinds there.
+
+R18 / R17I-01 hardening (2026-10-17): rx_confirm is now nesting-aware -- the
+original `[^()]*` body could not match the multi-arg capture form
+`FC_CAPTURE_AND_RETHROW( (a)(b)...(confirm) )` (0 matches against the exact
+pre-fix 5a580663:wallet.cpp:1861) and the guard was vacuous. A two-sided
+self-test in main() now fails the run (exit 2) if the pattern can no longer
+flag the known pre-fix line or flags the fixed line.
 """
 
 import pathlib
@@ -77,8 +84,22 @@ IMPL_BANNED = (
      "blind receipts on a log line carries memo blinding factors"),
 )
 
-BANNED_CAPTURE = re.compile(
-    r"FC_CAPTURE_AND_RETHROW\s*\(([^)]*)\)")
+# R17I-01 (round-18 audit): the original guard pattern could not match the
+# nested multi-arg capture form `FC_CAPTURE_AND_RETHROW( (a)...(confirm) )`
+# (0 matches against the pre-fix 5a580663:wallet.cpp:1861), so the regression
+# check was vacuous for the actual leak. This pattern admits one level of
+# nested paren groups on the way to the `(confirm)` token and is two-sided
+# self-tested in main() so it cannot silently go vacuous again.
+rx_confirm = re.compile(
+    r"FC_CAPTURE_AND_RETHROW\s*\((?:[^()]*\([^()]*\))*[^()]*\(confirm\)"
+    r"[^()]*\)")
+
+# Two-sided non-vacuity self-test inputs: the exact pre-fix line (must be
+# flagged) and the fixed line (must not be).
+R17I01_PREFIX = ("} FC_CAPTURE_AND_RETHROW( (from_key_or_label)"
+                 "(to_key_or_label)(amount_in)(symbol)(broadcast)(confirm) ) }")
+R17I01_FIXED = ("} FC_CAPTURE_AND_RETHROW( (from_key_or_label)"
+                "(to_key_or_label)(amount_in)(symbol)(broadcast) ) }")
 
 
 def main():
@@ -88,11 +109,16 @@ def main():
     if not WALLET_IMPL_CPP.is_file():
         print("FAIL: wallet_api_impl.cpp not found at %s" % WALLET_IMPL_CPP)
         return 2
+    # Guard self-test (R17I-01): fail closed if the (confirm) regression
+    # regex ever becomes vacuous or over-broad again.
+    if not rx_confirm.search(R17I01_PREFIX) or rx_confirm.search(R17I01_FIXED):
+        print("FAIL: (confirm)-guard self-test failed - rx_confirm is vacuous "
+              "or over-broad; fix the regex before trusting a PASS")
+        return 2
     bare_res = [(n, bare_object_re(n)) for n in BARE_SECRET_OBJECTS]
     offenders = []
-    # Pre-R17-02: the receive-path tail captured (confirm) here.
-    rx_confirm = re.compile(
-        r"FC_CAPTURE_AND_RETHROW\s*\([^()]*\(confirm\)[^()]*\)")
+    # Pre-R17-02: the receive-path tail captured (confirm) here; the guard
+    # now lives at module scope with its two-sided self-test (R17I-01).
     with open(WALLET_CPP, "r", encoding="utf-8", errors="replace") as f:
         for lineno, line in enumerate(f, 1):
             if not LOG_MACRO_RE.search(line):

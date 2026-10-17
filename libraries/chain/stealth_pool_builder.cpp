@@ -195,14 +195,7 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
        // naming the real's window (created_block of every member is
        // public). One slot per non-empty bucket per pass keeps the
        // anti-Sybil property (a single-window dust dump earns one slot per
-       // pass, never an output-proportional share). The real input's own
-       // Stratified draw (spec 2026-10-11-wallet §1, R11R4 + R17B):
-       // bucket the shuffled candidates by creation window, then
-       // round-robin one decoy per non-empty bucket per pass, visiting the
-       // buckets in a PER-ATTEMPT SHUFFLED key order. One slot per
-       // non-empty bucket per pass keeps the anti-Sybil property (a
-       // single-window dust dump earns one slot per pass, never an
-       // output-proportional share).
+       // pass, never an output-proportional share).
        //
        // R17B (round-17 Critical, PRV-R17-02): the real's window is
        // admitted as a decoy bucket whenever the eligible set spans fewer

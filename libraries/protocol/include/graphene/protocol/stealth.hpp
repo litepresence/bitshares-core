@@ -661,7 +661,7 @@ struct stealth_pool_exchange_operation : public base_operation
    liquidity_pool_id_type    pool;             ///< pool swapped through (instance feeds G2RM/G2VP transcripts)
    asset                     amount_to_sell;   ///< claimed input value; PINNED by the Schnorr value_pin, NOT trusted
    asset                     min_to_receive;   ///< slippage floor, enforced by the shared pool math
-   uint8_t                   proof_version = GRAPHENE_STEALTH_PROOF_V1;
+   uint8_t                   proof_version = GRAPHENE_STEALTH_PROOF_V2;
    blind_factor_type         excess;           ///< b_P − b_out, mod n (composite-F kernel)
    stealth_ring_input        input;            ///< exactly one (no vector — soundness requirement)
    stealth_blind_output      output;           ///< exactly one (no vector — soundness requirement)

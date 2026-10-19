@@ -4347,9 +4347,9 @@ BOOST_AUTO_TEST_CASE( r9b_bp_shape_scalar_transcript_vectors )
    { std::vector<char> bad = proof; // A8: d1 == 0
      std::copy( zbytes, zbytes + 32, bad.begin() + 164 );
      expect_bp_reject( bad, "bad d1" ); }
-    // E7: valid proof with A1/B replaced by the round-0 L/R pair in the `e`
+    // E7: valid proof with A1/B replaced by the initial L/R pair in the `e`
     // transcript. All four points are valid on-curve, so parsing succeeds;
-    // the equation must still fail (R9C: round challenges use "G1BPr" and
+    // the equation must still fail (round challenges use "G1BPr" and
     // the final challenge its own label "G1BPf", so role collision is gone
     // by construction — and separately the multiexp binds A1/B directly,
     // so transplanting L0/R0 cannot close it).

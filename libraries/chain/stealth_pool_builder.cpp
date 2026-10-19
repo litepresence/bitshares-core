@@ -165,9 +165,18 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
    // public creation-block grid alone (k-sweep posterior 1.0 at <= 8
    // windows, ~0.5 at 9, ~0.24 at 10), and admission gives it a multi-decoy
    // occupancy no other window is guaranteed to lack. The 12..15 middle
-   // band keeps the pre-R17B residual and stays a documented open item for
-   // the k-sweep instrument, NOT claimed by this repair. (See the g1_stealth
-   // suite R17B instrument for the drawn-window-exact repair check.)
+   // band keeps the pre-R17B residual. k-sweep instrument
+   // (tooling/r17b_ksweep.py) measured the residual at the frozen tip:
+   //   k=12 -> 8 candidate windows  (posterior 1/8 = 0.125)
+   //   k=13 -> 10                   (1/10 = 0.100)
+   //   k=14 -> 12                   (1/12 = 0.083)
+   //   k=15 -> 14                   (1/14 = 0.071)
+   //   k>=16 -> 16                  (1/16 = 0.0625, optimal)
+   // The owner decision on whether this residual is acceptable, or whether
+   // the floor should rise to 16, is recorded in the activation checklist
+   // (R18-PRV-03/R18-PRV-04). NOT claimed by this repair. (See the
+   // g1_stealth suite R17B instrument for the drawn-window-exact repair
+   // check.)
    std::vector<size_t> order( others.size() );
    for( size_t i = 0; i < order.size(); ++i ) order[i] = i;
    for( int attempt = 0; attempt < 32; ++attempt )

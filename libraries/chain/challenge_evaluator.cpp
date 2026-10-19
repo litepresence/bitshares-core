@@ -596,6 +596,12 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
    else
       FC_ASSERT( false, "Vote target must be a vault challenge or an oracle dispute" );
 
+   // R24-01 (round-24 H2-24-01): a correctly-typed id naming a nonexistent
+   // object leaves both pointers null; the ternary below would null-deref in
+   // consensus and halt every applying node. Fail closed instead.
+   FC_ASSERT( _challenge != nullptr || _dispute != nullptr,
+              "Vote target object does not exist" );
+
    const uint8_t state = ( _challenge != nullptr ) ? _challenge->state : _dispute->state;
    FC_ASSERT( state == GRAPHENE_H2_CHALLENGE_OPEN,
               "Only an open challenge or dispute may be voted on" );

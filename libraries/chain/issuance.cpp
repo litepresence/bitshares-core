@@ -881,6 +881,9 @@ share_type h2_issue_queued_restore_face( const reserve_object& reserve )
    return face;
 }
 
+// Spec: docs/superpowers/specs/2026-09-29-bsip1-hybrid-economics.md §4
+// Defends against: unbacked mint (rmin gate, per-block door cap, 24h vesting
+// escrow, FXR junior leg, no reflexive mint).
 void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op )
 { try {
    database& d = db();
@@ -1337,6 +1340,9 @@ object_id_type hybrid_mint_evaluator::do_apply( const hybrid_mint_operation& op 
    return object_id_type( reserve->id );
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
+// Spec: docs/superpowers/specs/2026-09-29-bsip1-hybrid-economics.md §4
+// Defends against: unredeemable claim (rmin gate, 24h vesting escrow payout,
+// FXR junior absorption, no reflexive burn).
 void_result hybrid_redeem_evaluator::do_evaluate( const hybrid_redeem_operation& op )
 { try {
    database& d = db();

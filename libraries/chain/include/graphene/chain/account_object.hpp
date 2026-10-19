@@ -94,11 +94,11 @@ namespace graphene { namespace chain {
 
          /// Voting Power Stats
          ///@{
-         uint64_t vp_all = 0;           ///<  all voting power.
-         uint64_t vp_active = 0;        ///<  active voting power, if there is no attenuation, it is equal to vp_all.
-         uint64_t vp_committee = 0;     ///<  the final voting power for the committees.
-         uint64_t vp_witness = 0;       ///<  the final voting power for the witnesses.
-         uint64_t vp_worker = 0;        ///<  the final voting power for the workers.
+         uint64_t vp_all = 0;           ///< all voting power.
+         uint64_t vp_active = 0;        ///< active voting power, if there is no attenuation, it is equal to vp_all.
+         uint64_t vp_committee = 0;     ///< the final voting power for the committees.
+         uint64_t vp_witness = 0;       ///< the final voting power for the witnesses.
+         uint64_t vp_worker = 0;        ///< the final voting power for the workers.
          /// Timestamp of the last count of votes.
          /// If there is no statistics,
          /// the date is less than `_db.get_dynamic_global_properties().last_vote_tally_time`.

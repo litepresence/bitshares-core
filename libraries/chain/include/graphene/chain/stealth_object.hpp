@@ -46,7 +46,7 @@ using stealth_nullifier_multi_idx = multi_index_container<
 using stealth_nullifier_index = generic_index<stealth_nullifier_object, stealth_nullifier_multi_idx>;
 
 /**
- * @brief Per-interval alarm snapshot (BSIP-2 §1-§2, G1c).
+ * @brief Per-interval alarm snapshot (BSIP-2 §1-§2).
  * @ingroup object
  *
  * Recomputed every maintenance interval by stealth_parity_maintenance from
@@ -58,7 +58,7 @@ using stealth_nullifier_index = generic_index<stealth_nullifier_object, stealth_
 struct stealth_alarm_snapshot
 {
    /// Live-set effective depth per asset: metadata-bearing blinded balances
-   /// currently indexed. Ring spends remove nothing (Task 3, nullifier
+   /// currently indexed. Ring spends remove nothing (nullifier
    /// migration: nullified outputs stay indexed and decoy-eligible), so only
    /// consuming spends leave the set — the live pool the floor gate measures,
    /// exposed to wallets/UIs via database_api::get_stealth_effective_set.
@@ -100,7 +100,7 @@ struct stealth_freeze_vote
 };
 
 /**
- * @brief A pending committee parity attestation (Task 6: parity quorum).
+ * @brief A pending committee parity attestation (parity quorum).
  * @ingroup object
  *
  * Single-member attestations no longer move the clocks: a review/report is
@@ -167,7 +167,7 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// Fail-closed halt flag: while set, all blind ops (39/40/41/104/106)
       /// reject in do_evaluate. Set by the freeze 3-quorum (manual backup);
       /// cleared by the resume 3-quorum with an empty diverged_assets set.
-      /// The supply tripwire no longer flaps this flag (Task 6, SUP-07): it
+      /// The supply tripwire no longer flaps this flag (SUP-07): it
       /// records diverged_assets per asset instead.
       bool                  blind_halted = false;
       /// Block number that fired the tripwire (0 = never / manual-only).
@@ -196,13 +196,13 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// decoy policy, not here). Maintained on insert/spend by the blind
       /// evaluators, post-STEALTH only — this is the O(1) backing of
       /// stealth_pool_depth (no per-evaluate full-pool scan). Every
-      /// !spent -> spent ring transition decrements it (Task 6: decoys are
+      /// !spent -> spent ring transition decrements it (decoys are
       /// one-time-use, spent outputs are excluded from future rings), so it
       /// always equals the fresh set — never the retained-spent set.
       /// Grandfathered (pre-fork, metadata absent) balances never count.
       /// Zero entries are removed; flat_map is ORDERED.
       flat_map<asset_id_type, uint32_t> unspent_blind_count;
-      /// Per-asset supply-divergence set (Task 6, SUP-07): assets whose
+      /// Per-asset supply-divergence set (SUP-07): assets whose
       /// evaluator-maintained shadow disagrees with live
       /// confidential_supply. Blind ops of listed assets halt individually
       /// (per-asset scope — healthy assets keep moving); the committee
@@ -211,10 +211,10 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// flat_set is ORDERED (consensus law).
       flat_set<asset_id_type> diverged_assets;
       /// Pending single-member parity attestations awaiting a second
-      /// distinct member for the same kind (Task 6 parity quorum). One per
+      /// distinct member for the same kind (parity quorum). One per
       /// member; pruned to fresh entries on every attestation. ORDERED.
       flat_map<account_id_type, stealth_parity_vote> pending_parity_votes;
-      // --- G1c parity pool (BSIP-2 §2). All appended-last. ---
+      // --- parity pool (BSIP-2 §2). All appended-last. ---
       /// Per-asset parity pool balances (fee-share inflow minus granted
       /// subsidies). Zero entries removed; ORDERED flat_map. Part of supply
       /// accounting (see verify_asset_supplies): inflow redirects the

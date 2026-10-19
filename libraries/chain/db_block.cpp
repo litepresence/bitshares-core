@@ -674,7 +674,7 @@ void database::_apply_block( const signed_block& next_block )
       apply_debug_updates();
 
    // notify observers that the block has been applied
-   notify_applied_block( processed_block ); //emit
+   notify_applied_block( processed_block ); // emit
    _applied_ops.clear();
 
    notify_changed_objects();

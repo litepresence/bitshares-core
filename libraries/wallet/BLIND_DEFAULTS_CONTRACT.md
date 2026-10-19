@@ -1,4 +1,4 @@
-# Blind-Defaults UI Contract (BSIP-2 §2, G1c) — browser wallet binding spec
+# Blind-Defaults UI Contract (BSIP-2 §2) — browser wallet binding spec
 
 Status: normative for the browser wallet (separate repo). The in-tree
 `cli_wallet` implements the same values (see `blind_transfer_defaults` in
@@ -49,14 +49,14 @@ it (mix hold).
 - The delay applies per broadcast, including retries (a retry is a new
   broadcast). Setting 0 is allowed only as an explicit advanced option with
   a warning.
-- Enforcement point (Task 6): `wallet_api::maybe_delay_blind_broadcast`
+- Enforcement point: `wallet_api::maybe_delay_blind_broadcast`
   is the single choke point — all three blind-sending paths
   (`transfer_from_blind`, `blind_transfer_help`, `transfer_to_blind`) call
   it, and `transfer_default`'s blind branch routes through
   `transfer_to_blind`, so no blind path bypasses the delay and none delays
   twice. Hook-tested (`set_blind_sleep_hook`).
 - `min_mix_blocks` (default 0, off) is ENFORCED by cli_wallet input
-  selection (Task 6): a blind receipt may fund a spend only once
+  selection: a blind receipt may fund a spend only once
   `head_block - received_block >= min_mix_blocks`. Receipts recorded
   offline (or by older wallets) carry `received_block == 0` (unknown age)
   and are ineligible while any hold is configured — fail-closed. Consensus

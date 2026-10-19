@@ -52,4 +52,4 @@ class snapshot_plugin : public graphene::app::plugin {
        fc::path           dest;
 };
 
-} } //graphene::snapshot_plugin
+} } // graphene::snapshot_plugin

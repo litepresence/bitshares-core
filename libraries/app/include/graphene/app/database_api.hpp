@@ -1425,7 +1425,7 @@ class database_api
 
       /**
        * @brief per-asset honest decoy depth backing the blind-pool floor
-       * (Task 6, BSIP-2 §1 alarms)
+       * (BSIP-2 §1 alarms)
        *
        * Live copy of the consensus unspent-decoy-candidate counters
        * (metadata-bearing unspent blinded balances; spent-but-retained

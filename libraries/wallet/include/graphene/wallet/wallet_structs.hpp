@@ -104,7 +104,7 @@ struct blind_receipt
    stealth_confirmation            conf;
    /// Head-block number when this receipt was recorded (best-effort: 0 when
    /// the wallet was offline or the remote was unreachable = unknown age).
-   /// Task 6: input selection enforces min_mix_blocks against this field —
+   /// input selection enforces min_mix_blocks against this field —
    /// unknown-age receipts are ineligible while a hold is configured
    /// (fail-closed; 0 with min_mix_blocks == 0 (default off) behaves as
    /// before). Appended-last: old wallet files load with 0.
@@ -216,7 +216,7 @@ struct wallet_data
    /// RP5 dual-key address book (appended-last; old files load empty).
    vector<stealth_address_record>                                    stealth_addresses;
 
-   string                    ws_server = "ws://localhost:8090";
+   string                    ws_server = "ws:// localhost:8090";
    string                    ws_user;
    string                    ws_password;
 };
@@ -345,7 +345,7 @@ struct account_history_operation_detail {
 };
 
 /**
- * @brief Blind-by-default wallet settings (BSIP-2 §2, G1c).
+ * @brief Blind-by-default wallet settings (BSIP-2 §2).
  *
  * Reference (cli) wallet creates blinded change and defaults new transfers
  * to blind, with one-tap transparent opt-out. Network hygiene (decoy-fetch
@@ -366,7 +366,7 @@ struct blind_transfer_defaults
    /// when broadcast=true; 0 disables (explicit, logged choice).
    uint32_t min_broadcast_delay_sec = 3;
    /// Optional N-block holding before a received blind output is spent.
-   /// ENFORCED by cli_wallet input selection (Task 6): a receipt may fund a
+   /// ENFORCED by cli_wallet input selection (): a receipt may fund a
    /// blind spend only once head_block - received_block >= min_mix_blocks;
    /// receipts with unknown age (received_block == 0, e.g. recorded offline
    /// or by an older wallet) are ineligible while the hold is configured.
@@ -376,7 +376,7 @@ struct blind_transfer_defaults
 };
 
 /**
- * Mix-hold eligibility (Task 6, BSIP-2 §1): pure decision rule behind
+ * Mix-hold eligibility (BSIP-2 §1): pure decision rule behind
  * min_mix_blocks, unit-testable without a node. head_block comes from the
  * remote database_api; received_block from the receipt (0 = unknown age).
  * - min_mix_blocks == 0 (default off): everything eligible (legacy path).
@@ -398,7 +398,7 @@ inline bool blind_receipt_mix_eligible( uint32_t received_block,
 
 /**
  * Number of RPC round-trips needed to cover n decoy candidates at
- * batch_size per trip (G1c decoy-fetch batching, BSIP-2 §1). Pure helper
+ * batch_size per trip (decoy-fetch batching, BSIP-2 §1). Pure helper
  * so the chunking math is unit-testable without a node: batch 0 is
  * treated as 1 (same guard as get_blind_balances). No consensus effect.
  */

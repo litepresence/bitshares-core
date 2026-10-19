@@ -423,7 +423,7 @@ public:
    string                  _wallet_filename;
    wallet_data             _wallet;
 
-   // G1c blind-by-default settings (BSIP-2 §2, session-local: not written to
+   // blind-by-default settings (BSIP-2 §2, session-local: not written to
    // the wallet file, so upgrades never misread persisted values; the
    // browser-wallet contract in BLIND_DEFAULTS_CONTRACT.md owns persistence).
    blind_transfer_defaults _blind_defaults;

@@ -58,6 +58,6 @@ class custom_operations_plugin : public graphene::app::plugin
 
 typedef fc::static_variant<account_storage_map> custom_plugin_operation;
 
-} } //graphene::custom_operations
+} } // graphene::custom_operations
 
 FC_REFLECT_TYPENAME( graphene::custom_operations::custom_plugin_operation )

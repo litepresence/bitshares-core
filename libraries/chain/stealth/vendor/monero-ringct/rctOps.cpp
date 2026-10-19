@@ -392,7 +392,7 @@ namespace rct {
     //does a * G where a is a scalar and G is the curve basepoint
     void scalarmultBase(key &aG,const key &a) {
         ge_p3 point;
-        sc_reduce32copy(aG.bytes, a.bytes); //do this beforehand!
+        sc_reduce32copy(aG.bytes, a.bytes); // do this beforehand!
         ge_scalarmult_base(&point, aG.bytes);
         ge_p3_tobytes(aG.bytes, &point);
     }
@@ -401,7 +401,7 @@ namespace rct {
     key scalarmultBase(const key & a) {
         ge_p3 point;
         key aG;
-        sc_reduce32copy(aG.bytes, a.bytes); //do this beforehand
+        sc_reduce32copy(aG.bytes, a.bytes); // do this beforehand
         ge_scalarmult_base(&point, aG.bytes);
         ge_p3_tobytes(aG.bytes, &point);
         return aG;

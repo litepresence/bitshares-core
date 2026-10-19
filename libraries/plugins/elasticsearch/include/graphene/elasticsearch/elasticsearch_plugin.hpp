@@ -144,7 +144,7 @@ struct bulk_struct {
    optional<visitor_struct> additional_data;
 };
 
-} } //graphene::elasticsearch
+} } // graphene::elasticsearch
 
 FC_REFLECT_ENUM( graphene::elasticsearch::mode, (only_save)(only_query)(all) )
 FC_REFLECT( graphene::elasticsearch::operation_history_struct,

@@ -109,7 +109,7 @@ namespace detail {
          return vbo_mfs_hash(k.account_id, k.asset_id);
       }
    };
-} //detail
+} // detail
 
 asset database::get_market_fee_vesting_balance(const account_id_type &account_id, const asset_id_type &asset_id)
 {

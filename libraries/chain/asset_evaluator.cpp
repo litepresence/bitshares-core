@@ -159,7 +159,7 @@ namespace detail {
     void check_asset_options_hf_stealth( const fc::time_point_sec& block_time,
                                          const asset_options& options )
     {
-       // Task 7 (GP-01/GP-02 legacy coexistence): the parity fee-share
+       // (GP-01/GP-02 legacy coexistence): the parity fee-share
        // opt-in must not be set before the STEALTH hardfork. Pre-fork nodes
        // reject unknown extension fields on unpack, so a pre-fork opt-in
        // would split the network (new nodes accept, old nodes refuse the

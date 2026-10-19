@@ -68,7 +68,7 @@ void_result transfer_to_blind_evaluator::do_evaluate( const transfer_to_blind_op
          FC_ASSERT( o.outputs.size() <= protocol::GRAPHENE_STEALTH_RING_TARGET,
                     "Pre-floor deposits carry at most one ring target of outputs" );
       const uint32_t cold_n = cold_start ? 0u : (uint32_t)o.outputs.size();
-      // G1c parity float rule (BSIP-2 §2): same skip guard as the schedule
+      // parity float rule (BSIP-2 §2): same skip guard as the schedule
       // check — no fee paid, no subsidy consumed. Rule R: a deposit is the
       // only net source of blind-set value, so min(n, classifier) == n here.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
@@ -114,7 +114,7 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
    // Pool floor counter: post-STEALTH creates carry metadata (counted);
    // pre-fork creates are grandfathered (helper no-ops pre-fork anyway).
    stealth_pool_count_add( db(), o.amount.asset_id, (int32_t)o.outputs.size() );
-   // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
+   // parity subsidy settlement + skew histogram (decoy-eligible creates).
    // CI-01: consume re-derives stealth_op39_subsidy_count, which
    // reads the depositor window. It MUST see the same pre-add window that
    // do_evaluate's require saw (evaluate runs before any histogram write),
@@ -161,7 +161,7 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       FC_ASSERT( itr != cidx.end() );
       FC_ASSERT( itr->asset_id == o.fee.asset_id );
       FC_ASSERT( itr->owner == in.owner );
-      // Task 3 (nullifier migration): post-fork stealth outputs spend ONLY
+      // (nullifier migration): post-fork stealth outputs spend ONLY
       // via op108, which nullifier-checks the opening. Grandfathered
       // (pre-fork, created_block == 0) balances keep using this legacy leg
       // exactly as before. Evaluator-only (no wire change: replay-safe).
@@ -175,7 +175,7 @@ void_result transfer_from_blind_evaluator::do_evaluate( const transfer_from_blin
       stealth_check_asset_gate( d, o.amount.asset_id );
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
-      // G1c parity float rule: withdrawals carry no blind outputs (n = 0).
+      // parity float rule: withdrawals carry no blind outputs (n = 0).
       // Rule R (EE-1b): op41 is an EXPLICIT spend — it does consume its
       // metadata-bearing inputs (-spent_counted below) — but it carries no
       // outputs member at all, so n_out is 0 and the classifier returns 0 on
@@ -210,7 +210,7 @@ void_result transfer_from_blind_evaluator::do_apply( const transfer_from_blind_o
    });
    stealth_shadow_add( db(), o.amount.asset_id, share_type( -( o.amount.amount + o.fee.amount ).value ) );
    stealth_pool_count_add( db(), o.amount.asset_id, -spent_counted );
-   // G1c: parity subsidy settlement (withdrawals carry no new outputs).
+   // parity subsidy settlement (withdrawals carry no new outputs).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, 0,
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid,
@@ -244,7 +244,7 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       GRAPHENE_ASSERT( itr != cidx.end(), blind_transfer_unknown_commitment, "", ("commitment",in.commitment) );
       FC_ASSERT( itr->asset_id == o.fee.asset_id );
       FC_ASSERT( itr->owner == in.owner );
-      // Task 3 (nullifier migration): post-fork stealth outputs spend ONLY
+      // (nullifier migration): post-fork stealth outputs spend ONLY
       // via op108, which nullifier-checks the opening. Grandfathered
       // (pre-fork, created_block == 0) balances keep using this legacy leg
       // exactly as before. Evaluator-only (no wire change: replay-safe).
@@ -265,7 +265,7 @@ void_result blind_transfer_evaluator::do_evaluate( const blind_transfer_operatio
       FC_ASSERT( d.head_block_time() < stealth_v1_sunset_time( d ),
                  "V1 blind spends are frozen past sunset (use turnstile re-proof)" );
       stealth_require_sound_range_proofs( d, o.outputs );
-      // G1c parity float rule (same skip guard). Rule R (EE-1b): a ring
+      // parity float rule (same skip guard). Rule R (EE-1b): a ring
       // spend consumes nothing from the live set, so ΔD_a is +n_out at any
       // ring size and the full per-output component is available here.
       stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
@@ -313,7 +313,7 @@ void_result blind_transfer_evaluator::do_apply( const blind_transfer_operation& 
    stealth_shadow_add( db(), o.fee.asset_id, share_type( -o.fee.amount.value ) );
    stealth_pool_count_add( db(), o.fee.asset_id, -spent_counted );
    stealth_pool_count_add( db(), o.fee.asset_id, (int32_t)o.outputs.size() );
-   // G1c: parity subsidy settlement + skew histogram.
+   // parity subsidy settlement + skew histogram.
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid,

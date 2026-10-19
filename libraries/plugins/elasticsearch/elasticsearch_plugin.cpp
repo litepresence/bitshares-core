@@ -48,7 +48,7 @@ class elasticsearch_plugin_impl
 
       struct plugin_options
       {
-         std::string elasticsearch_url = "http://localhost:9200/";
+         std::string elasticsearch_url = "http:// localhost:9200/";
          std::string auth = "";
          uint32_t bulk_replay = 10000;
          uint32_t bulk_sync = 100;
@@ -85,7 +85,7 @@ class elasticsearch_plugin_impl
 
       std::unique_ptr<graphene::utilities::es_client> es;
 
-      vector <string> bulk_lines; //  vector of op lines
+      vector <string> bulk_lines; // vector of op lines
       size_t approximate_bulk_size = 0;
 
       bulk_struct bulk_line_struct;
@@ -506,7 +506,7 @@ void elasticsearch_plugin::plugin_set_program_options(
 {
    cli.add_options()
          ("elasticsearch-node-url", boost::program_options::value<std::string>(),
-               "Elastic Search database node url(http://localhost:9200/)")
+               "Elastic Search database node url(http:// localhost:9200/)")
          ("elasticsearch-basic-auth", boost::program_options::value<std::string>(),
                "Pass basic auth to elasticsearch database('')")
          ("elasticsearch-bulk-replay", boost::program_options::value<uint32_t>(),

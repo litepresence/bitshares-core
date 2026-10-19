@@ -51,7 +51,7 @@ class blinded_balance_object : public graphene::db::abstract_object<blinded_bala
       /// NEVER decoy-eligible, spendable only explicitly or via turnstile).
       uint32_t                                created_block = 0;
       fc::time_point_sec                      created_time;
-      /// Task 3 (nullifier migration, BSIP-2): RETIRED cross-path guard.
+      /// (nullifier migration, BSIP-2): RETIRED cross-path guard.
       /// Ring spends no longer write this flag (decoy-inclusion griefing:
       /// nullified outputs stay decoy-eligible, re-spend is refused by the
       /// nullifier set alone). Post-fork stealth outputs spend ONLY via
@@ -59,7 +59,7 @@ class blinded_balance_object : public graphene::db::abstract_object<blinded_bala
       /// the created_block == 0 gate, not this field. Grandfathered
       /// (pre-fork, created_block == 0) balances keep the legacy legs.
       /// Field RETAINED (never read post-fork except the turnstile
-      /// no-extension branch until Task 4): removing it would break object
+      /// no-extension branch until ): removing it would break object
       /// reflection / wire format. Appended last; default false preserves
       /// pre-fork balances.
       bool                                    spent = false;

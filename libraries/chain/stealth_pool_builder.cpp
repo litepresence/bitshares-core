@@ -366,7 +366,7 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
    const int64_t cover = a - f_maker - pool_pays;
 
    // (3) Fee floor for the 1-output tx-fee leg: max(the fee-schedule
-   // requirement, the G1c float rule — parity level when the parity pool
+   // requirement, the float rule — parity level when the parity pool
    // covers the gap, else the cost anchor), converted to the sold asset
    // rounding UP (pool-favoring). Below-floor covers abort here because
    // consensus would refuse them (schedule leg) or they would violate the

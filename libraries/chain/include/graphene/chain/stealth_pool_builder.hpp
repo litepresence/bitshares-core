@@ -113,7 +113,7 @@ struct stealth_pool_swap_opening
  * cover, and aborts client-side when:
  * - the cover is below the fee floor for the 1-output tx-fee leg, where
  *   the floor is max(the fee-schedule requirement,
- *   the G1c float rule: parity level when the parity pool covers the gap,
+ *   the float rule: parity level when the parity pool covers the gap,
  *   else the cost anchor — stealth_cost_anchor_core /
  *   stealth_parity_available, n = 1), converted to the sold asset
  *   (round-up, pool-favoring). Below-floor covers are swaps consensus

@@ -87,7 +87,7 @@ bool stealth_passed( const database& db )
    return HARDFORK_STEALTH_PASSED( db.head_block_time() );
 }
 
-// Task 7 legacy coexistence (BSIP-2 §2, GP-01/GP-02): the parity fee-share
+// legacy coexistence (BSIP-2 §2, GP-01/GP-02): the parity fee-share
 // routes ONLY for assets whose issuer opted in via
 // additional_asset_options.parity_fee_share_enabled (appended-last, absent ==
 // false). Every legacy asset (bit*, HONEST.*, gateway UIAs, CORE) is absent-
@@ -103,7 +103,7 @@ bool parity_fee_share_opted_in( const database& db, asset_id_type recv_asset )
 
 } // anonymous namespace
 
-// Exported to the test suite via stealth_evaluator.hpp (Task 3): the single
+// Exported to the test suite via stealth_evaluator.hpp (): the single
 // definition of the nullifier identity — tests must link this, never
 // duplicate the sha256 hash.
 fc::sha256 nullifier_key( const std::vector<char>& image33 )
@@ -140,7 +140,7 @@ bool stealth_blind_halted( const database& db )
    return s->blind_halted;
 }
 
-/// Per-asset halt scope (Task 6, SUP-07): true while the asset's supply
+/// Per-asset halt scope (SUP-07): true while the asset's supply
 /// shadow diverges from live confidential_supply. Healthy assets keep
 /// moving while a diverged asset's blind ops fail closed.
 bool stealth_asset_halted( const database& db, asset_id_type asset )
@@ -198,7 +198,7 @@ fc::time_point_sec stealth_v1_sunset_time( const database& db )
 
 fc::time_point_sec stealth_turnstile_g2_time( const database& db )
 {
-   // Task 5 disposition (audit "recorded but no gate"): turnstile_g2_time IS
+   // disposition (audit "recorded but no gate"): turnstile_g2_time IS
    // v1_sunset_time by construction (recorded equal at activation, :186, and
    // pinned equal by turnstile_migration). There is no separate G2 event to
    // gate — the V1-spend freeze on every leg (op104 :344-346, legacy sunset
@@ -239,7 +239,7 @@ void stealth_maybe_record_activation( database& db )
       if( dyn.confidential_supply.value != 0 )
          seed[ a.get_id() ] = dyn.confidential_supply;
    }
-   // G1c: snapshot the transfer_to_blind fee schedule once — the true
+   // snapshot the transfer_to_blind fee schedule once — the true
    // pre-parity levels feeding the cost anchor's max().
    const auto& k39 = db.current_fee_schedule()
       .get<protocol::transfer_to_blind_operation>();
@@ -258,7 +258,7 @@ void stealth_reconcile_supplies( database& db )
    if( !stealth_passed( db ) )
       return;
    stealth_maybe_record_activation( db );
-   // Monero-2018 rule, per-asset scope (Task 6, SUP-07): the independent
+   // Monero-2018 rule, per-asset scope (SUP-07): the independent
    // shadow of confidential_supply must match the live counter EXACTLY for
    // every asset. A diverged asset is recorded in diverged_assets (instead
    // of flapping the global blind_halted flag): blind ops OF THAT ASSET
@@ -269,7 +269,7 @@ void stealth_reconcile_supplies( database& db )
    // committee-only action. Fail-closed: while listed, every blind op of
    // that asset rejects in do_evaluate.
    //
-   // SCOPE (Task 5, GC-08 qualification): this is a COUNTER-level tripwire
+   // SCOPE (GC-08 qualification): this is a COUNTER-level tripwire
    // only. It compares the per-asset confidential_supply counter against its
    // shadow — both move on the same fee/amount deltas in the same evaluators.
    // It provably CANNOT see value-level forgery that preserves the counters:
@@ -318,7 +318,7 @@ void stealth_check_blind_gate( const database& db )
               "Per-block blind-operation budget exhausted" );
 }
 
-/// Per-asset leg of the blind gate (Task 6, SUP-07): called by every blind
+/// Per-asset leg of the blind gate (SUP-07): called by every blind
 /// op evaluator with the op's asset right after stealth_check_blind_gate.
 /// Deposits are NOT exempt (a diverged asset's books are untrusted until
 /// reconciliation passes for it — fail-closed both directions).
@@ -408,7 +408,7 @@ uint32_t stealth_work_for_pool_exchange( uint32_t ring_size )
 
 uint32_t stealth_work_for_turnstile()
 {
-   // Task 4 (nullifier migration): one BP+ output + the conservation kernel
+   // (nullifier migration): one BP+ output + the conservation kernel
    // + the recovery-proof kernel, always. The recovery unit was conditional
    // on !o.extensions.empty() while the extension was optional; with the
    // turnstile proving on every path it is unconditionally charged. Fixed
@@ -606,7 +606,7 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
               o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Unknown proof version" );
-   // G1c parity float rule (BSIP-2 §2): pool-empty / cap-hit /
+   // parity float rule (BSIP-2 §2): pool-empty / cap-hit /
    // review-missed floats the required fee to the cost anchor. Skipped
    // exactly when the fee-schedule check is skipped (no fee paid, no subsidy
    // consumed — same context as genesis/test/generator paths). Rule R (EE-1b):
@@ -629,7 +629,7 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( stealth_pool_depth( d, o.asset_id ) >= GRAPHENE_STEALTH_BLIND_POOL_FLOOR,
               "Blind pool below floor: stealth spends halted (availability yields to privacy)" );
 
-   // Task 5 (M05/GC-07): exactly two proof versions exist; every spend
+   // (M05/GC-07): exactly two proof versions exist; every spend
    // authorizes under both (dual-verify window [activation, sunset]). The
    // key image is version-domain (I = b*J1_v + v*J2_v, J bases differ per
    // version), so one opening yields two distinct nullifiers — both must be
@@ -699,7 +699,7 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
       FC_ASSERT( in.ring.size() >= GRAPHENE_STEALTH_RING_MIN &&
                  in.ring.size() <= GRAPHENE_STEALTH_RING_MAX,
                  "Ring size out of bounds" );
-      // Task 6 (R7 C-10): ring-scheme migration slot. Only the genesis
+      // (R7 C-10): ring-scheme migration slot. Only the genesis
       // scheme verifies here; unknown schemes fail closed (validate() is
       // relay-side only — proposal-embedded ops bypass it).
       FC_ASSERT( in.ring_scheme == protocol::GRAPHENE_STEALTH_RING_SCHEME_V1,
@@ -729,9 +729,9 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
          FC_ASSERT( itr != bbi.end(), "Ring member is not a live blinded balance" );
          FC_ASSERT( itr->asset_id == o.asset_id, "Ring member asset mismatch" );
          FC_ASSERT( itr->created_block != 0, "Grandfathered outputs are not decoy-eligible" );
-         // DELETED (Task 3, nullifier migration). The spent flag is retired;
+         // DELETED (nullifier migration). The spent flag is retired;
          // nullified outputs are decoy-eligible again — the set grows with
-         // use (Task 6: C-02's rationale evaporated; images unlinkable; §8.2).
+         // use (C-02's rationale evaporated; images unlinkable; §8.2).
          heights.push_back( itr->created_block );
          times.push_back( itr->created_time );
       }
@@ -813,12 +813,12 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
    // it by conservation), the evaluator framework debits it after do_apply.
    db().adjust_balance( o.fee_payer(), o.fee );
    // Record nullifiers (double-spend set) and create the new blinded balances
-   // with decoy metadata. Task 3 (nullifier migration): the real spent
+   // with decoy metadata. (nullifier migration): the real spent
    // inputs stay in the index AND stay decoy-eligible — re-spend is blocked
    // by the nullifier set alone. Griefing by decoy-inclusion is impossible:
    // a ring spend nullifies only the real input's images (a decoy's opening
    // is unknown to the spender), so the decoy owner spends normally.
-   // Task 5 (M05/GC-07): BOTH version legs are nullified (the opening was
+   // (M05/GC-07): BOTH version legs are nullified (the opening was
    // authorized under both; either leg alone would leave the other spendable).
    const uint8_t alt_version = stealth_alt_proof_version( o.proof_version );
    for( const auto& in : o.inputs )
@@ -834,7 +834,7 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
          n.created = db().head_block_time();
       } );
    }
-     // Task 3 (nullifier migration): the whole-ring spent write is retired
+     // (nullifier migration): the whole-ring spent write is retired
       // (griefing section above). A ring spend removes nothing from the
       // index, so it must not reduce the live count either — only the new
       // outputs join it below.
@@ -858,10 +858,10 @@ void_result stealth_transfer_evaluator::do_apply( const stealth_transfer_operati
       FC_ASSERT( obj.confidential_supply >= 0 );
    } );
    stealth_shadow_add( db(), o.asset_id, share_type( -o.fee.amount.value ) );
-   // Pool floor counter (live-set semantics, Task 3): the ring removes
+   // Pool floor counter (live-set semantics): the ring removes
    // nothing from the index, so only the new outputs join the count.
    stealth_pool_count_add( db(), o.asset_id, (int32_t)o.outputs.size() );
-   // G1c: settle the parity subsidy (pool debit + issuer credit + cap unit),
+   // settle the parity subsidy (pool debit + issuer credit + cap unit),
    // and count the new outputs in the skew histogram window.
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, (uint32_t)o.outputs.size(),
@@ -929,7 +929,7 @@ void_result freeze_blind_evaluator::do_apply( const freeze_blind_operation& o )
          st.blind_halted = true;
       else if( n_resume >= GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED )
       {
-         // Task 6 (SUP-07): the resume quorum is refused while any asset's
+         // (SUP-07): the resume quorum is refused while any asset's
          // supply divergence is unresolved — the per-asset halt scope heals
          // asset-by-asset through reconciliation first. The votes stay
          // recorded (they are fresh); a later resume attempt after healing
@@ -955,7 +955,7 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
     // verifier as a spend, charged the flat kernel allowance).
     // R15 (Step 2): recovery verification adds two batched multiexps
     // (~kernel-class work: measured kernel 471us vs 2048us allowance, so the
-    // base allowance's headroom is borderline). Task 4: the R15 extension is
+    // base allowance's headroom is borderline). the R15 extension is
     // mandatory on every path, so the recovery kernel unit is always charged
     // via the single shared definition below — the do_evaluate gate and the
     // do_apply accounting call the same function and cannot drift (fail-closed
@@ -967,7 +967,7 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
    FC_ASSERT( o.fee.amount >= 0 );
    FC_ASSERT( o.new_proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Turnstile migrates to V2 (the surviving system)" );
-   // G1c parity float rule (one new blind output; same skip guard).
+   // parity float rule (one new blind output; same skip guard).
    // Rule R: turnstile is circulation (ΔD_a = 0) -> base fee only (n = 1),
    // which is the literal already passed here.
    stealth_require_blind_fee( d, core_fee_paid, !trx_state->skip_fee_schedule_check,
@@ -998,9 +998,9 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
     // recovery-proof verification (message identical; refusal order only).
     FC_ASSERT( bbi.find( o.new_output.commitment ) == bbi.end(),
                 "Turnstile new commitment already exists" );
-    // Task 4 (nullifier migration): the R15 extension is mandatory on every
+    // (nullifier migration): the R15 extension is mandatory on every
     // path. The deleted no-extension branch's only guard was the retired
-    // whole-ring spent flag (Task 3 stopped writing it), so a really-spent
+    // whole-ring spent flag (stopped writing it), so a really-spent
     // output could re-migrate with no proof. op106 is new on this branch
     // (operations.hpp:170), so requiring the extension is replay-safe.
     // The representation proof binds (I1,I2) to old_commitment's opening
@@ -1126,7 +1126,7 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    auto itr = bbi.find( o.old_commitment );
    FC_ASSERT( itr != bbi.end() );
    const bool had_metadata = ( itr->created_block != 0 );
-   // Task 3 (nullifier migration, reverts the earlier spent-flag-conditional decrement): the counter measures
+   // (nullifier migration, reverts the earlier spent-flag-conditional decrement): the counter measures
    // the LIVE metadata-bearing set, so every consumed metadata-bearing
    // balance leaves it exactly once — unconditionally on had_metadata. The
    // reverted guard (had_metadata && !was_spent) was correct under unspent
@@ -1152,14 +1152,14 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    if( had_metadata )
       stealth_pool_count_add( db(), o.asset_id, -1 );
    stealth_pool_count_add( db(), o.asset_id, 1 );
-   // G1c: parity subsidy settlement + skew histogram (one new output).
+   // parity subsidy settlement + skew histogram (one new output).
    stealth_consume_parity_subsidy( db(), !trx_state->skip_fee_schedule_check,
                                    o.fee.asset_id, 1,
                                    calculate_fee_for_operation( operation( o ) ), core_fee_paid,
                                    std::min( 1u, stealth_subsidy_output_count( operation( o ) ) ) );
     stealth_window_count_add( db(), 1 );
     stealth_count_blind_op( db() );
-    // Task 4: mirror the do_evaluate work gate exactly — one shared
+    // mirror the do_evaluate work gate exactly — one shared
     // definition (stealth_work_for_turnstile) so gate and accounting stay
     // in sync.
     stealth_count_blind_work( db(), stealth_work_for_turnstile() );
@@ -1172,7 +1172,7 @@ void turnstile_reproof_evaluator::pay_fee()
 }
 
 // ---------------------------------------------------------------------------
-// G1c parity economics (BSIP-2 §2)
+// parity economics (BSIP-2 §2)
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1607,7 +1607,7 @@ share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
       return share_type( 0 );
    if( inout_increment.value <= 0 )
       return share_type( 0 );
-   // Task 7 legacy gate (GP-01/GP-02): no opt-in, no diversion, ever. The
+   // legacy gate (GP-01/GP-02): no opt-in, no diversion, ever. The
    // increment is untouched, so the caller credits 100% to accumulated_fees.
    // Checked before any state access: legacy assets never dirty undo state.
    if( !parity_fee_share_opted_in( db, recv_asset ) )
@@ -1760,7 +1760,7 @@ void stealth_parity_maintenance( database& db )
       o.alarms.decoy_skew_warn = ( total > 0 && young * 100 > total * 40 );
       // Effective set: live copy of the decoy-candidate counters.
       o.alarms.effective_set = o.unspent_blind_count;
-      // Thin-pool warning (Task 6): any asset below the warn depth arms it.
+      // Thin-pool warning (): any asset below the warn depth arms it.
       // ALARM ONLY — nothing in consensus asserts on this flag (the pool
       // floor gate, not this flag, halts; deposits are never gated by it).
       {
@@ -1804,7 +1804,7 @@ void stealth_record_parity_review( database& db, uint8_t kind, account_id_type v
    const auto& s = get_or_create_stealth_status( db );
    fc::time_point_sec now = db.head_block_time();
    db.modify( s, [&]( stealth_status_object& o ) {
-      // Task 6 quorum: a lone attestation is recorded as PENDING only.
+      // quorum: a lone attestation is recorded as PENDING only.
       // Prune stale pendings (bounded by committee size), record this one
       // (latest wins per member), then count DISTINCT fresh members for the
       // same kind — the clocks move only at quorum (2).
@@ -1918,7 +1918,7 @@ void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explici
    // (stealth_evaluator.cpp:331-344 starts at GRAPHENE_STEALTH_WORK_US_PER_KERNEL) and
    // omitting it undercharges the blind->blind leg's excess verification.
    // Use the shared calculator so the gate and the accounting cannot drift;
-   // it saturates like stealth_work_for_stealth_transfer (see Task 2 Step 3a).
+   // it saturates like stealth_work_for_stealth_transfer (see Step 3a).
    stealth_check_blind_work_gate( d, stealth_work_for_explicit_spend( o ) );
    stealth_check_asset_gate( d, o.fee.asset_id );
 
@@ -1935,7 +1935,7 @@ void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explici
    FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
               o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Unknown proof version" );
-   // G1c parity float rule — every other blind op calls this in do_evaluate
+   // parity float rule — every other blind op calls this in do_evaluate
    // (ring :488, turnstile :879, op41 :145, op40 :225, op39 :63). Without it
    // op108 bypasses the fee-parity floor while still calling
     // stealth_consume_parity_subsidy in do_apply — a half-wired parity rule.
@@ -2372,7 +2372,7 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
     fc::uint128_t link4_rhs( (uint64_t)( _amounts.pool_pays.amount.value - _amounts.taker_market_fee.amount.value ) );
     FC_ASSERT( link4_lhs == link4_rhs, "Fee must exactly cover slippage: amount − F == pool_pays − taker_fee" );
 
-   // (9b) G1c parity float rule + Rule R (spec
+   // (9b) parity float rule + Rule R (spec
    // 2026-10-10-stealth-entropy-economics §4, finding F-02). Placement is
    // load-bearing twice over: it follows the pool math so F is final, and it
    // precedes acceptance (the ring message, nullifier, proof and kernel
@@ -2478,7 +2478,7 @@ void_result stealth_pool_exchange_evaluator::do_apply( const stealth_pool_exchan
    g2_route_market_fee_to_parity( db(), o.amount_to_sell.asset_id, _amounts.maker_market_fee.amount );
    g2_route_market_fee_to_parity( db(), o.min_to_receive.asset_id, _amounts.taker_market_fee.amount );
 
-    // G1c: parity subsidy settlement (Rule R, F-02). Sits beside the market-fee
+    // parity subsidy settlement (Rule R, F-02). Sits beside the market-fee
     // routing because that is where the pool's funds come from — op109 now
     // draws on parity_pool under the same availability assert every other
     // blind op uses. The (n, subsidy_n) pair mirrors the do_evaluate require
@@ -2541,7 +2541,7 @@ void_result stealth_pool_exchange_evaluator::do_apply( const stealth_pool_exchan
    } );
    stealth_shadow_add( db(), asset_b, share_type( _amounts.account_receives.amount.value ) );
 
-   // Pool counter (live-set semantics, Task 3): the ring removes nothing, so
+   // Pool counter (live-set semantics): the ring removes nothing, so
    // only the new counter-asset output joins the decoy set.
    stealth_pool_count_add( db(), asset_b, 1 );
    stealth_window_count_add( db(), 1 );

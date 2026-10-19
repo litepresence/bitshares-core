@@ -1016,7 +1016,7 @@ class wallet_api
                                          bool broadcast = false )const;
 
       /**
-       * Query the blind-by-default settings (BSIP-2 §2, G1c). Conformance
+       * Query the blind-by-default settings (BSIP-2 §2). Conformance
        * hook: tests and the browser-wallet contract assert these values.
        */
       blind_transfer_defaults get_blind_defaults()const;
@@ -1041,7 +1041,7 @@ class wallet_api
       void blind_broadcast_delay()const;
 
       /**
-       * Single choke point for the broadcast delay (Task 6): every
+       * Single choke point for the broadcast delay (): every
        * blind-sending path (transfer_from_blind, blind_transfer_help,
        * transfer_to_blind — including the transfer_default blind branch,
        * which routes through transfer_to_blind) calls this instead of
@@ -1068,7 +1068,7 @@ class wallet_api
       void set_unlocked_for_tests()const;
 
       /**
-       * Default-routed transfer (BSIP-2 §2, G1c): blind unless the caller
+       * Default-routed transfer (BSIP-2 §2): blind unless the caller
        * opts out. Blind routing needs the recipient's blind key or label
        * (same addressing as transfer_to_blind) and carries no memo — a
        * non-empty memo or an unresolvable blind recipient fails CLOSED

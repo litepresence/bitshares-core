@@ -45,7 +45,7 @@ using fc::ecc::range_proof_type;
 
 /// Floor ring size: the smallest ring the VERIFIER accepts (wire/verifier
 /// bound, kept for budget math and golden vectors). It is NOT the consensus
-/// floor: Task 6 (R7 C-01) raised the consensus floor to TARGET (16) in all
+/// floor: (R7 C-01) raised the consensus floor to TARGET (16) in all
 /// non-halted states, deep or thin. MIN-11 is reserved for a future
 /// governance-opened thin-pool emergency only (availability fallback when
 /// the pool cannot form target-size rings); no consensus path accepts it
@@ -76,7 +76,7 @@ constexpr uint32_t R17B_MIN_DISTINCT_WINDOWS = 12;
 /// (count AND work). Counts every blind op (legacy + stealth) so the
 /// reservation is one number. Reserved transparent/market space rides the
 /// same counter: when the budget is exhausted the block simply carries no
-/// more blind ops. Parity-pool fee subsidy and wallet defaults are G1c,
+/// more blind ops. Parity-pool fee subsidy and wallet defaults are ,
 /// explicitly NOT here.
 constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK = 100;
 
@@ -135,7 +135,7 @@ constexpr uint32_t GRAPHENE_STEALTH_DECOY_SKEW_MAX_PCT = 40;
 /// Availability yields to privacy, explicitly (thin-pool rings are worse
 /// than no rings: they mark the spender as one of few).
 /// The effective ring floor is GRAPHENE_STEALTH_RING_TARGET (16, the
-/// consensus floor everywhere since Task 6): a spend at live depth 11..15
+/// consensus floor everywhere since ): a spend at live depth 11..15
 /// passes this floor assert but then finds fewer than 16 decoy candidates,
 /// so ring FORMATION refuses (raw, not a clean pool-floor halt); below 11
 /// the floor halts cleanly instead. Both ranges are unreachable by design —
@@ -149,7 +149,7 @@ constexpr uint32_t GRAPHENE_STEALTH_BLIND_POOL_FLOOR = 11;
 /// 11 floor) and no 100-block window may contribute more than 25% (not
 /// 40%). Rationale: a $1 Sybil floods a thin pool cheaply (BSIP-2 admits
 /// the attack); small rings over attacker-majority windows are markings,
-/// not anonymity. Task 6 (R7 C-01) extended the TARGET floor to deep pools
+/// not anonymity. (R7 C-01) extended the TARGET floor to deep pools
 /// as well: 16 is the consensus floor everywhere; the thin regime now only
 /// tightens the skew ceiling, not the size.
 /// Auditors may raise any of these; the pre-G1 audit owns the final values.
@@ -164,7 +164,7 @@ constexpr uint32_t GRAPHENE_STEALTH_THIN_SKEW_MAX_PCT = 25;
 /// thin_pool_warn alarm. ALARM ONLY — never a consensus gate
 /// (no FC_ASSERT on any market, fee, or blind path reads it): availability
 /// degrades visibly before the floor halts it.
-/// Re-derived for live-set semantics (nullifier migration, Task 5): the old
+/// Re-derived for live-set semantics (nullifier migration): the old
 /// threshold was tuned against a monotonically SHRINKING pool, where every
 /// ring spend decremented the counter and the alarm fired on ordinary usage.
 /// Under live-set semantics a ring spend removes nothing and creates
@@ -182,7 +182,7 @@ constexpr uint32_t GRAPHENE_STEALTH_POOL_WARN_DEPTH = 22;
 constexpr uint8_t GRAPHENE_STEALTH_PROOF_V1 = 1;
 constexpr uint8_t GRAPHENE_STEALTH_PROOF_V2 = 2;
 
-/// Ring-scheme versions (Task 6 migration vehicle, R7 C-10). The proof
+/// Ring-scheme versions (migration vehicle, R7 C-10). The proof
 /// version above versions the RANGE proofs and nullifier domains; the ring
 /// SCHEME (signature construction: member statement, response count,
 /// message transcript) needs its own forward-migration slot, because a
@@ -201,12 +201,12 @@ constexpr uint8_t GRAPHENE_STEALTH_RING_SCHEME_V1 = 1;
 /// = [activation, sunset]: both nullifier sets enforced throughout.
 constexpr uint32_t GRAPHENE_STEALTH_V1_LIFETIME_SEC = 31536000;
 
-/// Committee freeze-backup quorum (Task 6: proposal): THREE distinct
+/// Committee freeze-backup quorum (proposal): THREE distinct
 /// committee-member votes required to (un)halt blind ops (was 2 — a 2-quorum
 /// lets any two colluding members halt alone; 3 forces a wider conspiracy).
 /// Named-operator role approximation: any elected member may vote; votes
 /// expire after 24h (was 48h — shorter auto-expiry so stale intent cannot
-/// linger into a later crisis; Task 6).
+/// linger into a later crisis; ).
 constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED = 3;
 constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC = 86400;
 
@@ -242,7 +242,7 @@ constexpr uint32_t GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS = 500;
 /// space for transparent/market operations. Each subsidized op consumes one
 /// unit; beyond the cap (or with an empty pool) blind fees float to cost.
 constexpr uint32_t GRAPHENE_STEALTH_PARITY_MAX_SUBSIDIZED_PER_BLOCK = 50;
-/// Parity attestation quorum (Task 6): TWO distinct committee members must
+/// Parity attestation quorum (): TWO distinct committee members must
 /// attest the same kind (review or set-report) for the clocks to move. A
 /// single-member attestation is recorded as pending only — it never resets
 /// a clock alone (a lone reporter could otherwise extend subsidies
@@ -317,7 +317,7 @@ constexpr uint8_t GRAPHENE_STEALTH_REVIEW_SET_REPORT = 1; ///< quarterly anonymi
  * creation metadata from chain state (blinded_balance_object, appended
  * fields); wire-claimed metadata would be a malleability surface.
  *
- * Cross-version linkage (Task 5, M05/GC-07): the prover knows the opening
+ * Cross-version linkage (M05/GC-07): the prover knows the opening
  * (b,v), so it authorizes under EVERY supported version at once. key_image /
  * ring_sig carry the op-version authorization; alt_key_image / alt_ring_sig
  * (appended-last) carry the same opening's authorization under the other
@@ -543,7 +543,7 @@ struct turnstile_reproof_operation : public base_operation
  * @brief Committee attestation of a parity review or set report (BSIP-2 §2).
  * @ingroup g1_stealth_parity
  *
- * Two-member attestation (Task 6 quorum: any two DISTINCT elected committee
+ * Two-member attestation (quorum: any two DISTINCT elected committee
  * members attesting the same kind while both attestations are fresh): the
  * heartbeat only PERMITS parity to continue, so a false attestation buys
  * nothing but continued subsidies — unlike freeze_blind, which halts the
@@ -657,7 +657,7 @@ struct stealth_pool_exchange_operation : public base_operation
       uint32_t price_per_output = 5*GRAPHENE_BLOCKCHAIN_PRECISION;
    };
 
-   asset                     fee;              ///< tx fee (G1c parity-routed); fee.asset_id == input asset
+   asset                     fee;              ///< tx fee (parity-routed); fee.asset_id == input asset
    liquidity_pool_id_type    pool;             ///< pool swapped through (instance feeds G2RM/G2VP transcripts)
    asset                     amount_to_sell;   ///< claimed input value; PINNED by the Schnorr value_pin, NOT trusted
    asset                     min_to_receive;   ///< slippage floor, enforced by the shared pool math

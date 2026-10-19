@@ -97,7 +97,7 @@ using account_storage_index = generic_index<account_storage_object, account_stor
 
 using account_storage_id_type = object_id<account_storage_object::space_id, account_storage_object::type_id>;
 
-} } //graphene::custom_operations
+} } // graphene::custom_operations
 
 FC_REFLECT_DERIVED( graphene::custom_operations::account_storage_object, (graphene::db::object),
                     (account)(catalog)(key)(value))

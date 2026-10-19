@@ -41,7 +41,7 @@ namespace graphene { namespace protocol {
        /// in bitasset options instead and must NOT set this (the two would disagree about
        /// what the token tracks). Appended last: extension tags are append-only.
        fc::optional<reference_mapping>         reference_asset_mapping;
-       /// G1 parity fee-share opt-in (BSIP-2 section 2, Task 7): when set to
+       /// G1 parity fee-share opt-in (BSIP-2 section 2): when set to
        /// true, a fixed share (GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS) of this
        /// asset's market/settlement fee increments funds the per-asset parity
        /// pool instead of landing in accumulated_fees. Absent (the default,

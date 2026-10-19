@@ -95,4 +95,4 @@ private:
 
 };
 
-} } //graphene::witness_plugin
+} } // graphene::witness_plugin

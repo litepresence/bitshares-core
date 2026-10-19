@@ -87,8 +87,8 @@ namespace rct {
         bool operator!=(const key &k) const { return crypto_verify_32(bytes, k.bytes); }
         unsigned char bytes[32];
     };
-    typedef std::vector<key> keyV; //vector of keys
-    typedef std::vector<keyV> keyM; //matrix of keys (indexed by column first)
+    typedef std::vector<key> keyV; // vector of keys
+    typedef std::vector<keyV> keyM; // matrix of keys (indexed by column first)
 
     //containers For CT operations
     //if it's  representing a private ctkey then "dest" contains the secret key of the address
@@ -97,7 +97,7 @@ namespace rct {
     //if it's representing a public ctkey, then "dest" = P the address, mask = C the commitment
     struct ctkey {
         key dest;
-        key mask; //C here if public
+        key mask; // C here if public
 
         bool operator==(const ctkey &other) const {
           return (dest == other.dest) && (mask == other.mask);
@@ -319,9 +319,9 @@ namespace rct {
     struct rctSigBase {
         uint8_t type;
         key message;
-        ctkeyM mixRing; //the set of all pubkeys / copy
+        ctkeyM mixRing; // the set of all pubkeys / copy
         //pairs that you mix with
-        keyV pseudoOuts; //C - for simple rct
+        keyV pseudoOuts; // C - for simple rct
         std::vector<ecdhTuple> ecdhInfo;
         ctkeyV outPk;
         xmr_amount txnFee; // contains b
@@ -426,7 +426,7 @@ namespace rct {
         std::vector<BulletproofPlus> bulletproofs_plus;
         std::vector<mgSig> MGs; // simple rct has N, full has 1
         std::vector<clsag> CLSAGs;
-        keyV pseudoOuts; //C - for simple rct
+        keyV pseudoOuts; // C - for simple rct
 
         // when changing this function, update cryptonote::get_pruned_transaction_weight
         template<bool W, template <bool> class Archive>

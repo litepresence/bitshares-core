@@ -439,7 +439,7 @@ namespace graphene { namespace net { namespace detail {
               _retrigger_connect_loop_promise->wait();
             }
           }
-          catch ( fc::timeout_exception& ) //intentionally not logged
+          catch ( fc::timeout_exception& ) // intentionally not logged
           {
           }  // catch
 #else
@@ -4857,7 +4857,7 @@ namespace graphene { namespace net { namespace detail {
     void node_impl::broadcast( const message& item_to_broadcast, const message_propagation_data& propagation_data )
     {
       VERIFY_CORRECT_THREAD();
-      // Task 6 (BSIP-2 §1, R7 C-03 disposition): blind-transfer timing
+      // (BSIP-2 §1, R7 C-03 disposition): blind-transfer timing
       // hygiene stops at the wallet (min_broadcast_delay_sec before first
       // broadcast). What it does NOT do: unlink a broadcast against a
       // network-wide observer watching few DPOS producers correlate

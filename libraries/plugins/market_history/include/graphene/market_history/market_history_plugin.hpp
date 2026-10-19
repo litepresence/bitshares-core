@@ -384,7 +384,7 @@ class market_history_plugin : public graphene::app::plugin
       std::unique_ptr<detail::market_history_plugin_impl> my;
 };
 
-} } //graphene::market_history
+} } // graphene::market_history
 
 // Other objects aren't mapped here because they are not used
 MAP_OBJECT_ID_TO_TYPE( graphene::market_history::liquidity_pool_ticker_object )

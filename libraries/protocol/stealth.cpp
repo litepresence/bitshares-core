@@ -59,14 +59,14 @@ void stealth_transfer_operation::validate()const
        FC_ASSERT( in.key_image.size() == 33, "key image must be 33 bytes" );
        FC_ASSERT( in.ring_sig.size() == 32 + 96 * in.ring.size(),
                   "ring signature size mismatch" );
-       // Task 5 (M05/GC-07): the alternate-version linkage rides the same
+       // (M05/GC-07): the alternate-version linkage rides the same
        // size rules (relay-side early failure mirrors the consensus gate;
        // see the stealth_ring_input doc for why an unverified alt would be
        // a bypass — consensus verifies, never just parses).
        FC_ASSERT( in.alt_key_image.size() == 33, "alt key image must be 33 bytes" );
        FC_ASSERT( in.alt_ring_sig.size() == 32 + 96 * in.ring.size(),
                   "alt ring signature size mismatch" );
-       // Task 6 (R7 C-10): the ring-scheme migration slot. Only the genesis
+       // (R7 C-10): the ring-scheme migration slot. Only the genesis
        // scheme exists; unknown schemes fail here (relay-side) AND in
        // consensus (proposal-embedded ops bypass validate — the evaluator
        // re-checks). A future scheme needs its own id, verifier, and

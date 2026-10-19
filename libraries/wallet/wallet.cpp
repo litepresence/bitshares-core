@@ -1519,7 +1519,7 @@ vector<asset>   wallet_api::get_blind_balances( const string& key_or_label )cons
    auto& to_asset_used_idx = my->_wallet.blind_receipts.get<by_to_asset_used>();
    auto start = to_asset_used_idx.lower_bound( std::make_tuple(pub_key,asset_id_type(0),false)  );
    auto end = to_asset_used_idx.lower_bound( std::make_tuple(pub_key,asset_id_type(uint32_t(0xffffffff)),true)  );
-   // G1c decoy-fetch batching (BSIP-2 §1): collect candidate commitments,
+   // decoy-fetch batching (BSIP-2 §1): collect candidate commitments,
    // then one RPC round-trip per chunk — never one per decoy (timing-link
    // defense: per-decoy fetch timing fingerprints the wallet's set).
    vector<commitment_type> candidates;
@@ -1605,7 +1605,7 @@ blind_confirmation wallet_api::transfer_from_blind( const string& from_blind_acc
    conf.trx.validate();
 
    ilog( "about to broadcast" );
-   maybe_delay_blind_broadcast( broadcast ); // Task 6 choke point (BSIP-2 §1)
+   maybe_delay_blind_broadcast( broadcast ); // choke point (BSIP-2 §1)
    conf.trx = sign_transaction( conf.trx, broadcast );
 
    if( broadcast && conf.outputs.size() == 2 ) {
@@ -1675,7 +1675,7 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    auto& to_asset_used_idx = my->_wallet.blind_receipts.get<by_to_asset_used>();
    auto start = to_asset_used_idx.lower_bound( std::make_tuple(from_key,amount.asset_id,false)  );
    auto end = to_asset_used_idx.lower_bound( std::make_tuple(from_key,amount.asset_id,true)  );
-   // Task 6 (BSIP-2 §1): enforce the optional N-block mix hold here, at
+   // (BSIP-2 §1): enforce the optional N-block mix hold here, at
    // spend-input selection (consensus never sees wallet receipt age, so the
    // wallet is the only place the hold can live). Head height comes from the
    // node; unknown-age receipts (received_block == 0) are ineligible while
@@ -1846,7 +1846,7 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    confirm.trx.operations.emplace_back( std::move(blind_tr) );
    ilog( "validate before" );
    confirm.trx.validate();
-   maybe_delay_blind_broadcast( broadcast ); // Task 6 choke point (BSIP-2 §1)
+   maybe_delay_blind_broadcast( broadcast ); // choke point (BSIP-2 §1)
    confirm.trx = sign_transaction(confirm.trx, broadcast);
 
    if( broadcast )
@@ -1977,7 +1977,7 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
    confirm.trx.operations.push_back( bop );
    my->set_operation_fees( confirm.trx, my->_remote_db->get_global_properties().parameters.get_current_fees());
    confirm.trx.validate();
-   maybe_delay_blind_broadcast( broadcast ); // Task 6 choke point (BSIP-2 §1)
+   maybe_delay_blind_broadcast( broadcast ); // choke point (BSIP-2 §1)
    confirm.trx = sign_transaction(confirm.trx, broadcast);
 
    if( broadcast )
@@ -2135,7 +2135,7 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    // my->_wallet.blinded_balances[memo.amount.asset_id][bal.to].push_back( bal );
 
    result.date = fc::time_point::now();
-   // Task 6 (BSIP-2 §1): record the chain height with the receipt so
+   // (BSIP-2 §1): record the chain height with the receipt so
    // min_mix_blocks input selection can enforce an N-block hold. Best
    // effort: 0 (unknown age) when offline or unreachable — and unknown-age
    // receipts are ineligible while any hold is configured (fail-closed).
@@ -2298,7 +2298,7 @@ order_book wallet_api::get_order_book( const string& base, const string& quote, 
 }
 
 // ---------------------------------------------------------------------------
-// G1c blind-by-default + network hygiene (BSIP-2 §2).
+// blind-by-default + network hygiene (BSIP-2 §2).
 //
 // Behavior contract (binding spec for the browser wallet lives in
 // libraries/wallet/BLIND_DEFAULTS_CONTRACT.md):
@@ -2344,7 +2344,7 @@ void wallet_api::blind_broadcast_delay()const
 
 void wallet_api::maybe_delay_blind_broadcast( bool broadcast )const
 {
-   // Task 6 choke point: one call per blind broadcast (including retries —
+   // choke point: one call per blind broadcast (including retries —
    // a retry is a new broadcast). broadcast=false paths (build/sign-only)
    // never sleep: there is no propagation timing to defend.
    if( broadcast )

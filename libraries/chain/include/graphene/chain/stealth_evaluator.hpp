@@ -169,7 +169,7 @@ uint32_t stealth_tripwire_fire_block( const database& db );
 uint32_t stealth_blind_count_this_block( const database& db );
 /// Live decoy-candidate blinded balances of an asset (O(1) cached
 /// counter, maintained on insert/spend by the blind evaluators; see
-/// stealth_pool_count_add). Task 3 (nullifier migration): live-set
+/// stealth_pool_count_add). (nullifier migration): live-set
 /// semantics — every indexed metadata-bearing balance counts, including
 /// nullified ones (they stay decoy-eligible, so the set grows with usage).
 /// Historical field name `unspent_blind_count` retained (object reflection
@@ -212,7 +212,7 @@ void stealth_reconcile_supplies( database& db );
 void stealth_maybe_record_activation( database& db );
 
 // ---------------------------------------------------------------------------
-// G1c parity economics (BSIP-2 §2): pool, float-to-cost, reviews, alarms
+// parity economics (BSIP-2 §2): pool, float-to-cost, reviews, alarms
 // ---------------------------------------------------------------------------
 
 /**
@@ -374,7 +374,7 @@ void stealth_consume_parity_subsidy( database& db, bool fees_enforced,
  * Fee-share routing (called from database::pay_market_fees, the single
  * choke point for market + settlement fees): post-STEALTH, while funding
  * is not halted, AND only when the fee asset's issuer opted in via
- * additional_asset_options.parity_fee_share_enabled (Task 7 legacy gate:
+ * additional_asset_options.parity_fee_share_enabled (legacy gate:
  * absent == false, so every legacy asset never diverts), move
  * inout_increment * PARITY_FEE_SHARE_BPS / 10000 into
  * parity_pool[recv_asset] (128-bit integer math) and reduce inout_increment
@@ -415,7 +415,7 @@ void stealth_parity_maintenance( database& db );
  * Record a committee attestation (called by parity_review_evaluator):
  * the attestation is stored as pending; the clocks move only when two
  * DISTINCT members have attested the same kind within the attest-expiry
- * window (Task 6 quorum). Kind 0 moves the 6-month parity-review clock,
+ * window (quorum). Kind 0 moves the 6-month parity-review clock,
  * kind 1 moves the set-report clock (clearing funding-halted).
  * head-block time only. Unknown kinds fail closed.
  */
@@ -488,14 +488,14 @@ uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend
 /// stealth_transfer for equal ring sizes (design §7). Called from
 /// do_evaluate (gate) and do_apply (accounting) by the G2 evaluator (G2-2).
 uint32_t stealth_work_for_pool_exchange( uint32_t ring_size );
-/// Work-model units consumed by one op106 turnstile migration (Task 4): one
+/// Work-model units consumed by one op106 turnstile migration (): one
 /// BP+ output + conservation kernel + recovery-proof kernel, always charged
 /// (the R15 extension is mandatory on every path). Pure, constant. Called
 /// from do_evaluate (gate) and do_apply (accounting) — one definition so the
 /// two cannot drift.
 uint32_t stealth_work_for_turnstile();
 /// Nullifier identity: sha256 over the 33-byte key image (single definition
-/// in stealth_evaluator.cpp; moved out of the anonymous namespace in Task 3
+/// in stealth_evaluator.cpp; moved out of the anonymous namespace in 
 /// so the test suite links the exact production identity — never duplicated).
 /// Takes vector<char>, NOT commitment_type; callers convert explicitly.
 fc::sha256 nullifier_key( const std::vector<char>& image33 );
@@ -522,7 +522,7 @@ void stealth_shadow_add( database& db, asset_id_type asset, share_type delta );
  * Positive delta on creation of a balance WITH post-fork metadata;
  * negative delta on consumption of such a balance (callers check
  * created_block != 0 for explicitly-consumed balances, which may be
- * grandfathered). Task 3 (nullifier migration): ring spends remove nothing
+ * grandfathered). (nullifier migration): ring spends remove nothing
  * from the index, so they add outputs.size() only — nullified outputs stay
  * indexed and decoy-eligible. Bounded: zero entries are removed.
  */

@@ -193,14 +193,14 @@ namespace rct {
                 addKeys2(L[prime][ii], bb.s1[ii], c, P2[ii]);
             }
         }
-        bb.ee = hash_to_scalar(L[1]); //or L[1]..
+        bb.ee = hash_to_scalar(L[1]); // or L[1]..
         key LL, cc;
         for (jj = 0 ; jj < 64 ; jj++) {
             if (!indices[jj]) {
                 sc_mulsub(bb.s0[jj].bytes, x[jj].bytes, bb.ee.bytes, alpha[jj].bytes);
             } else {
                 skGen(bb.s0[jj]);
-                addKeys2(LL, bb.s0[jj], bb.ee, P1[jj]); //different L0
+                addKeys2(LL, bb.s0[jj], bb.ee, P1[jj]); // different L0
                 cc = hash_to_scalar(LL);
                 sc_mulsub(bb.s1[jj].bytes, x[jj].bytes, cc.bytes, alpha[jj].bytes);
             }
@@ -222,7 +222,7 @@ namespace rct {
             ge_double_scalarmult_base_vartime(&p2, chash.bytes, &P2[ii], bb.s1[ii].bytes);
             ge_tobytes(Lv1[ii].bytes, &p2);
         }
-        key eeComputed = hash_to_scalar(Lv1); //hash function fine
+        key eeComputed = hash_to_scalar(Lv1); // hash function fine
         return equalKeys(eeComputed, bb.ee);
     }
 
@@ -412,9 +412,9 @@ namespace rct {
             toHash[3 * i + 3] = aHP[i];
             precomp(Ip[i].k, rv.II[i]);
         }
-        size_t ndsRows = 3 * dsRows; //non Double Spendable Rows (see identity chains paper)
+        size_t ndsRows = 3 * dsRows; // non Double Spendable Rows (see identity chains paper)
         for (i = dsRows, ii = 0 ; i < rows ; i++, ii++) {
-            skpkGen(alpha[i], aG[i]); //need to save alphas for later..
+            skpkGen(alpha[i], aG[i]); // need to save alphas for later..
             toHash[ndsRows + 2 * ii + 1] = pk[index][i];
             toHash[ndsRows + 2 * ii + 2] = aG[i];
         }
@@ -714,23 +714,23 @@ namespace rct {
             M[i][rows] = identity();
             for (j = 0; j < rows; j++) {
                 M[i][j] = pubs[i][j].dest;
-                addKeys(M[i][rows], M[i][rows], pubs[i][j].mask); //add input commitments in last row
+                addKeys(M[i][rows], M[i][rows], pubs[i][j].mask); // add input commitments in last row
             }
         }
         sc_0(sk[rows].bytes);
         for (j = 0; j < rows; j++) {
             sk[j] = copy(inSk[j].dest);
-            sc_add(sk[rows].bytes, sk[rows].bytes, inSk[j].mask.bytes); //add masks in last row
+            sc_add(sk[rows].bytes, sk[rows].bytes, inSk[j].mask.bytes); // add masks in last row
         }
         for (i = 0; i < cols; i++) {
             for (size_t j = 0; j < outPk.size(); j++) {
-                subKeys(M[i][rows], M[i][rows], outPk[j].mask); //subtract output Ci's in last row
+                subKeys(M[i][rows], M[i][rows], outPk[j].mask); // subtract output Ci's in last row
             }
             //subtract txn fee output in last row
             subKeys(M[i][rows], M[i][rows], txnFeeKey);
         }
         for (size_t j = 0; j < outPk.size(); j++) {
-            sc_sub(sk[rows].bytes, sk[rows].bytes, outSk[j].mask.bytes); //subtract output masks in last row..
+            sc_sub(sk[rows].bytes, sk[rows].bytes, outSk[j].mask.bytes); // subtract output masks in last row..
         }
         mgSig result = MLSAG_Gen(message, M, sk, index, rows, hwdev);
         memwipe(sk.data(), sk.size() * sizeof(key));
@@ -838,12 +838,12 @@ namespace rct {
         for (j = 0; j < rows; j++) {
             for (i = 0; i < cols; i++) {
                 M[i][j] = pubs[i][j].dest;
-                addKeys(M[i][rows], M[i][rows], pubs[i][j].mask); //add Ci in last row
+                addKeys(M[i][rows], M[i][rows], pubs[i][j].mask); // add Ci in last row
             }
         }
         for (i = 0; i < cols; i++) {
             for (j = 0; j < outPk.size(); j++) {
-                subKeys(M[i][rows], M[i][rows], outPk[j].mask); //subtract output Ci's in last row
+                subKeys(M[i][rows], M[i][rows], outPk[j].mask); // subtract output Ci's in last row
             }
             //subtract txn fee output in last row
             subKeys(M[i][rows], M[i][rows], txnFeeKey);
@@ -1077,7 +1077,7 @@ namespace rct {
         rv.ecdhInfo.resize(destinations.size());
 
         size_t i = 0;
-        keyV masks(destinations.size()); //sk mask..
+        keyV masks(destinations.size()); // sk mask..
         outSk.resize(destinations.size());
         for (i = 0; i < destinations.size(); i++) {
             //add destination to sig
@@ -1163,7 +1163,7 @@ namespace rct {
         rv.ecdhInfo.resize(destinations.size());
 
         size_t i;
-        keyV masks(destinations.size()); //sk mask..
+        keyV masks(destinations.size()); // sk mask..
         outSk.resize(destinations.size());
         for (i = 0; i < destinations.size(); i++) {
 
@@ -1239,7 +1239,7 @@ namespace rct {
             rv.p.CLSAGs.resize(inamounts.size());
         else
             rv.p.MGs.resize(inamounts.size());
-        key sumpouts = zero(); //sum pseudoOut masks
+        key sumpouts = zero(); // sum pseudoOut masks
         keyV a(inamounts.size());
         for (i = 0 ; i < inamounts.size() - 1; i++) {
             skGen(a[i]);

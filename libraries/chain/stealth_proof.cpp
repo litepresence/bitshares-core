@@ -1310,7 +1310,7 @@ bool stealth_check_decoy_policy( const std::vector<uint32_t>& heights,
                                   uint32_t pool_depth )
 {
    const size_t n = heights.size();
-   // Task 6 (R7 C-01): TARGET (16) is the consensus floor in ALL non-halted
+   // (R7 C-01): TARGET (16) is the consensus floor in ALL non-halted
    // states — deep or thin. The old deep floor-11 accepted rings an
    // attacker-majority window could mark; MIN-11 survives only as the
    // verifier bound (and a future governance-opened thin-pool emergency).

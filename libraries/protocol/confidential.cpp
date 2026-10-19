@@ -107,7 +107,7 @@ void blind_transfer_operation::validate()const
 { try {
    vector<commitment_type> in(inputs.size());
    vector<commitment_type> out(outputs.size());
-   int64_t                 net_public = fee.amount.value;//from_amount.value - to_amount.value;
+   int64_t                 net_public = fee.amount.value;// from_amount.value - to_amount.value;
    for( uint32_t i = 0; i < in.size(); ++i )
    {
       in[i] = inputs[i].commitment;

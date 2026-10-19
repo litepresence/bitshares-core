@@ -128,8 +128,11 @@ namespace graphene { namespace protocol {
      * member. The challenge must be in a terminal guilty-or-inconclusive
      * state — SUSTAINED (the vote proved the supermajority) or
      * EXPIRED_FROZEN (the window closed with no supermajority, which can be
-     * cartel-abstention, so it is never exoneration). Both execute into the
-     * identical exit-only wind-down: the vault's bonds segregate into a
+     * cartel-abstention, so it is never exoneration); an EXPIRED_FROZEN
+     * resolution additionally requires that the vault fail maintenance or be
+     * provably drained at resolve time — a healthy vault with live claims
+     * stays frozen (claim-bounded seating is a filed design). Both execute
+     * into the same exit-only wind-down: the vault's bonds segregate into a
      * wind-down vault that only ever pays from that slice — never another
      * vault's bonds, never the issuance reserve — and the vault never
      * returns to operation except through fresh re-registration.

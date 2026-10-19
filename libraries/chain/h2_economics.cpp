@@ -247,9 +247,10 @@ namespace {
     /// windows never clear a theft finding. Note the asymmetry with the
     /// oracle half: a guilty oracle clears through committee oracle_unfreeze,
     /// while a guilty/inconclusive vault exits only through vault_resolve
-    /// into a wind-down (R5C fail-closed split: sustained executes by vote,
-    /// expired executes exit-only on any seated member's trigger —
-    /// cartel-abstention can veto sustain but can never veto exit). Fresh
+    /// into a wind-down (R5C fail-closed split: sustained executes by vote;
+    /// expired executes on any seated member's trigger when the vault fails
+    /// maintenance or is provably drained — a healthy holdout vault stays
+    /// frozen pending the filed claim-bounded seating design). Fresh
     /// re-registration (new vault object, new bonds) is the sole path back
     /// to operation; neither resolve path can restore HEALTHY.
     bool h2_vault_has_guilty_history( const database& d, vault_id_type vid )

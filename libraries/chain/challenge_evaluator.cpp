@@ -753,7 +753,9 @@ void process_expired_h2_challenges( database& d )
       // No decisive voter exists, so the finder slice returns to the
       // challenger; the pool slice accrues to the vault's forfeit pool; the
       // burn leaves supply. The vault still freezes fail-closed and still
-      // resolves exit-only through vault_resolve.
+      // resolves through vault_resolve's exit path: an expired challenge
+      // requires the vault to fail maintenance or be provably drained (a
+      // healthy vault with live claims stays frozen).
       share_type burn, pool, finder;
       h2_split_forfeit( itr->challenge_bond, itr->challenge_bond_usd_cents,
                         burn, pool, finder );

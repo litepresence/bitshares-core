@@ -465,8 +465,11 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
     _challenge = d.find( op.challenge );
     FC_ASSERT( nullptr != _challenge, "Challenge ${c} does not exist", ("c", op.challenge) );
     // Fail-closed split (R5C expired-resolve-to-winddown): SUSTAINED and
-    // EXPIRED_FROZEN both execute into the IDENTICAL wind-down path below
-    // (exit-only: segregated bond, seniors first, rmax cap, haircut math).
+    // EXPIRED_FROZEN both execute into the same wind-down path below
+    // (exit-only: segregated bond, seniors first, rmax cap, haircut math);
+    // the expired path additionally requires the vault to fail maintenance
+    // or be provably drained at resolve time (R17-C + C1 design 2, gated
+    // below — a healthy vault with live claims stays frozen).
     // Expiry is inconclusive — no 48h supermajority was reached — and expiry
     // can be cartel-abstention (withholding votes past the deadline vetoes
     // sustain at the 5000bps quorum gate), so expiry must NEVER equal

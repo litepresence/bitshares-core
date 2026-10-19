@@ -76,9 +76,11 @@ namespace graphene { namespace protocol {
     /// closed with no supermajority, which can be cartel-abstention
     /// (withholding votes past the deadline vetoes sustain at the 5000bps
     /// quorum gate). It therefore pins fail-closed (frozen stays, guilty
-    /// history sticks) — but it is exit-only resolvable: vault_resolve
-    /// accepts EXPIRED_FROZEN into the identical wind-down path as SUSTAINED
-    /// (R5C fail-closed split). There is NO path back to operation except
+    /// history sticks) — but it is exit-only resolvable when the vault fails
+    /// maintenance or is provably drained: vault_resolve accepts
+    /// EXPIRED_FROZEN into the wind-down path as SUSTAINED (R5C fail-closed
+    /// split); a healthy vault with live claims stays frozen (claim-bounded
+    /// seating is a filed design). There is NO path back to operation except
     /// fresh re-registration (new vault object, new bonds).
     constexpr uint8_t GRAPHENE_H2_CHALLENGE_OPEN = 0;
    constexpr uint8_t GRAPHENE_H2_CHALLENGE_EXONERATED = 1;

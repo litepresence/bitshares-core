@@ -1068,7 +1068,7 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
                ("r", GRAPHENE_H2_ISSUE_RMIN_BPS) );
     // Genesis secure-ratio gate (H2-07/SUP-12, wired): the vault's live
     // vault bonds gate the mint at the genesis-committed secure_ratio_bps.
-    // Only live-covered bonds count (Task 3 predicate: unseized, vesting
+    // Only live-covered bonds count (the predicate: unseized, vesting
     // present in BTS, balance still covering the encumbered amount --
     // seized or drawn-down bonds secure nothing). rmin above prices the
     // RESERVE book through the bonded price; this gate meters the VAULT's

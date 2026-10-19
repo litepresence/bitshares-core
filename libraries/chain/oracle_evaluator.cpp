@@ -451,7 +451,7 @@ void_result oracle_publish_evaluator::do_apply( const oracle_publish_operation& 
 
    const auto& oracle_name = _oracle->name;
    d.modify( *_oracle, [&op, now, delay_sec, maint_sec, &oracle_name]( oracle_object& o ) {
-      // H1-FINAL-01 (round-16): the update_current_value prune relies on this
+      // H1-FINAL-01: the update_current_value prune relies on this
       // invariant -- writes happen only for producers that are in the set right
       // now; a producer removed later keeps its row only until the next
       // update_current_value prunes it. do_evaluate already refuses

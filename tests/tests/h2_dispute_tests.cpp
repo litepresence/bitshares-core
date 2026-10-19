@@ -1642,7 +1642,7 @@ BOOST_AUTO_TEST_CASE( owner_cannot_clear_open_or_expiry_freeze )
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// GOV-R9-01 (round-9 REPAIR-33): committee gates sit on the ELECTED set
+// GOV-R9-01 (REPAIR-33): committee gates sit on the ELECTED set
 // ---------------------------------------------------------------------------
 
 /// RED: registration is permissionless (is_lifetime_member + op-29 fee, see
@@ -1716,10 +1716,10 @@ BOOST_AUTO_TEST_CASE( gov_r9_01_elected_seat_still_votes )
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// GOV-R17-02 (round-17): the deciding_set is the ELECTED set, never the registry
+// GOV-R17-02: the deciding_set is the ELECTED set, never the registry
 // ---------------------------------------------------------------------------
 
-/// RED (GOV-R17-02, carried since round-10): GOV-R9-01 already refuses votes
+/// RED (GOV-R17-02): GOV-R9-01 already refuses votes
 /// from non-elected rows, but the resolution DENOMINATOR at
 /// challenge_evaluator.cpp still counts the unpruned registry. Registration is
 /// permissionless (op-29, LTM only) and rows are never pruned: K fresh
@@ -1779,7 +1779,7 @@ BOOST_AUTO_TEST_CASE( gov_r17_02_unelected_registrants_do_not_shrink_supermajori
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// GOV-R9-02 (round-9 REPAIR-87): the unfreeze time-lock after a cleared dispute
+// GOV-R9-02 (REPAIR-87): the unfreeze time-lock after a cleared dispute
 // ---------------------------------------------------------------------------
 
 /// GOV-R9-02: a sustained freeze costs a 2/3 supermajority of the deciding set;
@@ -2063,7 +2063,7 @@ BOOST_AUTO_TEST_CASE( h2_x02_pair_freeze_allowed_on_h2_only_oracle )
    PUSH_TX( db, tx );
    BOOST_REQUIRE( vid( db ).bound_oracle.valid() );
    BOOST_CHECK( *vid( db ).bound_oracle == oid );
-   // R11R2 (first-mint reachability, spec-approved at 4dd0ed22): at zero
+   // R11R2 (first-mint reachability, spec-approved): at zero
    // outstanding debt the bind pins but the door stays open (flags close
    // only over live debt), so this fresh zero-debt freeze binds the H2-only
    // oracle without freezing. Original intent kept: H2-only bind works.
@@ -2072,7 +2072,7 @@ BOOST_AUTO_TEST_CASE( h2_x02_pair_freeze_allowed_on_h2_only_oracle )
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// GOV-R9-04 + CQ-R9-04 (round-9): neither side of a target may vote on it
+// GOV-R9-04 + CQ-R9-04: neither side of a target may vote on it
 // ---------------------------------------------------------------------------
 
 /// GOV-R9-04 dispute leg: the defender (producer/owner accused) holds a seat,

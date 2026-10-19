@@ -585,8 +585,8 @@ BOOST_AUTO_TEST_CASE( h2_object_ids_pinned_25_to_38 )
 }
 
 /// Appended-last fields survive pack/unpack with positions intact: the H2c
-/// rotate co_signers (before extensions per the append-last rule, fixed in
-/// audit-round-2 E-04), the wind-down claim, and the H2d fallback set.
+/// rotate co_signers (before extensions per the append-last rule, fixed by
+/// E-04), the wind-down claim, and the H2d fallback set.
 BOOST_AUTO_TEST_CASE( h2_appended_fields_round_trip )
 {
    {

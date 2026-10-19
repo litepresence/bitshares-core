@@ -37,7 +37,7 @@ class database;
  * @brief H2 activation legs (BSIP-1 section 6: gateway Track B before price
  * Track B, enforced as consensus-reject rules, never a sequencing promise).
  *
- * Three gates, one invariant (E-03 audit-round-2: BONDS < GATEWAY < PRICE):
+ * Three gates, one invariant (E-03: BONDS < GATEWAY < PRICE):
  * - Primitives gate (`HARDFORK_H2_BONDS_TIME`, 2029-11-01): the shared
  *   bond/dispute/challenge primitives built once (vault_challenge,
  *   oracle_dispute, oracle_dispute_escalate, challenge_vote). Usable by both

@@ -71,7 +71,7 @@ namespace graphene { namespace protocol {
    /// Upper bound on the committee-set guard delay (1 day). Bounds the pending queue's
    /// time span; enforced in chain_parameters::validate().
    constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC = 86400;
-   /// H1-FINAL-06 (round-16) + R17G: coded floor on the committee-set OSM
+   /// H1-FINAL-06 + R17G: coded floor on the committee-set OSM
    /// delay. Sub-minute values are refused at validate (the unset default is
    /// the floor), and the whole-hour stall classes are covered by the R17G
    /// bucket repair plus the t8b2 regression.
@@ -89,7 +89,7 @@ namespace graphene { namespace protocol {
     * many seconds after the oracle's `open_disputes` last reached 0 (the
     * clear anchor is recorded then; never recorded = never cleared = never
     * unfrozen through this op). Integer seconds against head-block time
-    * only: no wall-clock, no floats (audit round-9 REPAIR-87).
+    * only: no wall-clock, no floats.
     */
    constexpr uint32_t GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC = 14 * 24 * 60 * 60;
 

@@ -908,7 +908,7 @@ BOOST_AUTO_TEST_CASE( cap_function_qualified_depth_binds )
    deposit_to_liquidity_pool( alice_id, p2.get_id(),
                               asset( share_type( 10000000000LL ), asset_id_type() ),
                               asset( share_type( 100000000LL ), d.pair ) );
-    // Round 1: 1e8 BTS through each pool (1% of pool: deviation ~1%, clean).
+    // Pass 1: 1e8 BTS through each pool (1% of pool: deviation ~1%, clean).
     exchange_with_liquidity_pool( alice_id, p1.get_id(),
                                   asset( share_type( 100000000LL ), asset_id_type() ),
                                   asset( share_type( 1 ), d.pair ) );
@@ -922,7 +922,7 @@ BOOST_AUTO_TEST_CASE( cap_function_qualified_depth_binds )
     const liquidity_pool_id_type p2_id = p2.get_id();
     BOOST_REQUIRE( db.find( p1_id ) != nullptr );
     BOOST_REQUIRE( db.find( p2_id ) != nullptr );
-    // Rotate: old window takes round 1 (evaluation stays clean: ~1% moves).
+    // Rotate: old window takes the first pass (evaluation stays clean: ~1% moves).
     // The opening publish aged on the way, so approach, republish, then
     // cross: the sweep must read a live bonded price (stale reads breach
     // fail-closed), and publishing touches no tripwire window.
@@ -935,7 +935,7 @@ BOOST_AUTO_TEST_CASE( cap_function_qualified_depth_binds )
     // if the pre-rotation references went stale).
     BOOST_REQUIRE( db.find( p1_id ) != nullptr );
     BOOST_REQUIRE( db.find( p2_id ) != nullptr );
-    // Round 2: same again into the fresh window.
+    // Pass 2: same again into the fresh window.
     exchange_with_liquidity_pool( alice_id, p1_id,
                                   asset( share_type( 100000000LL ), asset_id_type() ),
                                   asset( share_type( 1 ), d.pair ) );
@@ -1916,7 +1916,7 @@ BOOST_AUTO_TEST_CASE( band_quantas_floor_per_leg_with_anchor_advance )
    BOOST_CHECK( h2j_band_sum_face( r1 ) == r1->stable_supply );
 } FC_LOG_AND_RETHROW() }
 
-/// Pilot ceiling (AC-02, audit-round-7): total senior outstanding per pair is
+/// Pilot ceiling (AC-02): total senior outstanding per pair is
 /// consensus-capped at $20,000 face. Red test for the mint-door gate in
 /// `hybrid_mint_evaluator::do_evaluate` (issuance.cpp) and the issuer-direct
 /// gate in `asset_issue_evaluator::do_evaluate` (asset_evaluator.cpp): the
@@ -2126,7 +2126,7 @@ BOOST_AUTO_TEST_CASE( pilot_ceiling_binds_vault_registration )
    BOOST_CHECK( vid( db ).vault_pair == ok );
 } FC_LOG_AND_RETHROW() }
 
-/// PC-01 (audit-round-9, Critical): the $20,000 face pilot ceiling must hold
+/// PC-01 (Critical): the $20,000 face pilot ceiling must hold
 /// across the SUPPLY-RESTORING paths, not only the mint doors. Exploit shape:
 /// fill the pair to the cap, redeem X (the face parks in an unvested door
 /// escrow), mint X back (pre-fix: BOTH door legs still read `<= cap`), then
@@ -2708,7 +2708,7 @@ BOOST_AUTO_TEST_CASE( seasoning_gate_refuses_unseasoned_mint_ac08 )
    BOOST_CHECK( r->stable_supply == share_type( 1000 ) );
 } FC_LOG_AND_RETHROW() }
 
-/// ISS-R14-16 (round-14, carried to round-17): the issuer-direct supply door
+/// ISS-R14-16: the issuer-direct supply door
 /// must clear the SAME seasoning gate the mint door enforces (AC-08). Twin of
 /// seasoning_gate_refuses_unseasoned_mint_ac08: un-seasoned pair, direct
 /// issue refused at the seasoning assertion, then the seasoned backdate
@@ -2762,7 +2762,7 @@ BOOST_AUTO_TEST_CASE( seasoning_gate_refuses_unseasoned_issue_ac08 )
    BOOST_CHECK_EQUAL( d.pair( db ).dynamic_asset_data_id( db ).current_supply.value, 1 );
 } FC_LOG_AND_RETHROW() }
 
-/// R17-A (round-17): the R11-R1 senior wind-down burn moved the reserve
+/// R17-A: the R11-R1 senior wind-down burn moved the reserve
 /// stable ledger WITHOUT the band partition (vault_lifecycle_evaluator.cpp
 /// senior leg), so sum(band_stable) diverged from stable_supply at the very
 /// first settled senior claim and every later verify (next settle sweep,
@@ -2816,7 +2816,7 @@ BOOST_AUTO_TEST_CASE( winddown_senior_burn_moves_bands_r17a )
 
    // Deposit the oracle's bonded-price leg before any claim: claims are
    // conversion-dependent (vault_lifecycle_evaluator.cpp:631-634) and halt
-   // on a dual-stale bound price by design (round-16 price-validity gate).
+   // on a dual-stale bound price by design (the price-validity gate).
    h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
 
    const winddown_vault_id_type wdid {

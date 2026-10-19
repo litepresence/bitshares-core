@@ -836,7 +836,7 @@ BOOST_AUTO_TEST_CASE( complete_predicate_against_hand_set_state )
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// AC-16 (round-9): an attestation cannot be issued by a party to the pair
+// AC-16: an attestation cannot be issued by a party to the pair
 // ---------------------------------------------------------------------------
 
 /// RED: the verifier op only checked committee membership, so the pair's own
@@ -884,7 +884,7 @@ BOOST_AUTO_TEST_CASE( related_party_verifier_refused )
    BOOST_CHECK_EQUAL( h2s_find_record( *this, pair_b ).verifier_set, false );
 } FC_LOG_AND_RETHROW() }
 
-/// GOV-R17-04 / ATR-R17-02 (round-17): the verifier gate admitted ANY
+/// GOV-R17-04 / ATR-R17-02: the verifier gate admitted ANY
 /// committee_member_index row. committee_member_create is permissionless at
 /// one LTM fee (op-29) and registry rows are never pruned, so a pair
 /// operator could register a second account, self-attest the 90-day clock,

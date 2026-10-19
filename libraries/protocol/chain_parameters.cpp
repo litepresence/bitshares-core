@@ -116,7 +116,7 @@ namespace graphene { namespace protocol {
          FC_ASSERT( *extensions.value.oracle_guard_delay_sec <= GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC,
                     "The oracle_guard_delay_sec parameter can not exceed ${m} seconds",
                     ("m", GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC) );
-         // H1-FINAL-06 (round-16) + R17G (round-17): a coded floor keeps a
+         // H1-FINAL-06 + R17G: a coded floor keeps a
          // committee majority from zeroing the Track A delay (or voting a
          // stalling sub-hour value); together with the R17G bucket repair a
          // whole-hour delay promotes at its boundary (t8b2 pins 7200).

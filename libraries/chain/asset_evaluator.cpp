@@ -467,7 +467,7 @@ void_result asset_issue_evaluator::do_evaluate( const asset_issue_operation& o )
     // bind a vault, so the lookup misses and this gate never fires for
     // them. No hardfork date needed: vault rows only exist post-H2, so
     // pre-fork the index is empty. Equality admits (inclusive cap).
-    // PC-01 (audit-round-9): this door counts pending + queued restore face
+    // PC-01: this door counts pending + queued restore face
     // the same way the mint door does, because issuer-direct issue grows the
     // token WITHOUT touching the book -- on its own it would refill a
     // redeemed/exited pair back to the cap while the restore face still sat
@@ -480,7 +480,7 @@ void_result asset_issue_evaluator::do_evaluate( const asset_issue_operation& o )
              d.get_index_type<vault_index>().indices().get<by_vault_pair>();
        if( vault_by_pair.find( o.asset_to_issue.asset_id ) != vault_by_pair.end() )
        {
-          // Seasoning on the second supply door (ISS-R14-16, round-14):
+          // Seasoning on the second supply door (ISS-R14-16):
           // the mint door (issuance.cpp:950) already refuses senior prints
           // on an unseasoned pair; issuer-direct issue printing senior face
           // on the SAME pair must clear the identical gate, or a fresh

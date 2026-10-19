@@ -70,7 +70,7 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       oracle_options  options;
 
       /// Latest submission per producer: one value per declared series, in order.
-      /// Bounded by options.producers. (H1-FINAL-01, round-16: "bounded by
+      /// Bounded by options.producers. (H1-FINAL-01: "bounded by
       /// options.producers" is now CODE, not a comment -- update_current_value
       /// prunes rows for producers no longer in the set, mirroring the
       /// reputation prune, so rotation churn cannot grow this map.)
@@ -167,7 +167,7 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        /// Last dispute open (24h cooldown anchor).
        time_point_sec last_dispute_time;
 
-      /// H1-FINAL-02 (round-16, carried since round-9 H1-08): the rate limiter's
+      /// H1-FINAL-02 (carried from H1-08): the rate limiter's
       /// reference that no reset path can destroy. Written at every confirmed
       /// promotion, never cleared: a transient quorum gap or a defensive early
       /// return cannot remove the guard's baseline, so the re-entry promotion is

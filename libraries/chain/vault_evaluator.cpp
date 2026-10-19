@@ -171,7 +171,7 @@ void_result vault_register_evaluator::do_evaluate( const vault_register_operatio
                     "Pair ${a} carries a wound-down vault whose claims are not "
                     "settled; re-registration refused until the wind-down "
                     "completes", ("a", op.pair) );
-         // R17-E (round-17): never remove a vault that still carries an OPEN
+         // R17-E: never remove a vault that still carries an OPEN
          // challenge. The removal strands the challenge row behind a dangling
          // vault id and the next expiry sweep (process_expired_h2_challenges)
          // dereferences it and halts the chain. vault_rotate carries the same

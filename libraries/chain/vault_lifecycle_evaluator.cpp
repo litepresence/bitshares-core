@@ -48,14 +48,14 @@
 
 namespace graphene { namespace chain {
 
-/// R17-A (round-17): the exported center-out band spend. Defined beside its
+/// R17-A: the exported center-out band spend. Defined beside its
 /// wind-down consumer because this TU's include closure resolves the plain
 /// vector/share_type aliases (verified); declared for all TUs in
 /// issuance_evaluator.hpp next to ensure/verify.
 void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
 {
    h2_issue_ensure_bands( bands );
-   // NC-07 (round-9): the table is sized by DEDUCTION, never by an explicit
+   // NC-07: the table is sized by DEDUCTION, never by an explicit
    // N_BANDS bound: a fixed-size `order[7]` stays well-formed when the band
    // count is raised (its tail is silently zero-filled, and band 0 would be
    // hit twice), while the form below turns that bump into a compile error.
@@ -74,10 +74,9 @@ void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
               "Band spend exceeds the partitioned total; conservation broken" );
 }
 
-// Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §2
-// Defends against: confiscation beyond the filed exit formula (seating capped at
-// seat_bound = min(reserve, need) + min(bonds, remainder); leftover bonds stay
-// unseized and releasable under CDD rules).
+// Defends against: confiscation beyond the filed exit formula at zero-claims resolutions
+// (C1 design 2: a provably drained vault seats nothing - empty book, no reserve sweep,
+// no bond seizure), and against stranded bond stacks at sustained zero-claim resolves.
 const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault )
 {
    // ISSUANCE-2 REVERT-vs-ABSORB (issuance pairs only; legacy pairs return
@@ -99,7 +98,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
    // liquid even in wind-down.
     if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
     {
-       // PC-01 pilot ceiling (audit-round-9): this refund RE-MINTS face with
+       // PC-01 pilot ceiling: this refund RE-MINTS face with
        // no door in front of it, so it must hold the same $20,000 face cap
        // the mint doors enforce. `h2_issue_on_pair_halt` above has already
        // applied (and capped) every halt revert for this pair, so this
@@ -145,7 +144,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
       }
       if( !r->exit_queue.empty() )
          d.modify( *r, []( reserve_object& res ) { res.exit_queue.clear(); } );
-      // C1 design 2 (round-19): at zero outstanding (provably drained) the
+      // C1 design 2: at zero outstanding (provably drained) the
       // reserve is NOT extinguished -- no bts_balance move, no band zeroing --
       // so the empty book seats nothing and no funds move. Only the scalar
       // housekeeping fields clear, as in every wind-down (a nonzero
@@ -177,7 +176,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
          } );
       }
    }
-   // C1 design 2 (round-19): at zero claims (provably drained) no bond is
+   // C1 design 2: at zero claims (provably drained) no bond is
    // seized -- the stack stays unseized and releasable, and the book is
    // created empty. Only claims > 0 runs the seizure loop. The claims snapshot
    // is taken AFTER the halt-revert and exit-queue refunds above, which can
@@ -230,9 +229,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
    return wd;
 }
 
-// Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §3.2
-// Defends against: dead-price settlement on bound vaults (refuses when claims
-// present and price is dual-stale; claim-free vaults settle price-free).
+// Maintenance holds while outstanding is zero; a dual-stale price leg refuses resolution when claims are present (fail-closed).
 bool h2_vault_meets_maintenance( database& d, const vault_object& vault )
 {
    if( vault.outstanding <= share_type( 0 ) )
@@ -499,7 +496,7 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
                  "Resolver ${a} is registered but not on the elected committee",
                  ("a", op.resolver) );
    }
-   // R17-C (round-17): the resolver must not overlap the challenger, mirroring
+   // R17-C: the resolver must not overlap the challenger, mirroring
    // the vote leg's self-dealing bans (challenge_evaluator.cpp). Without this,
    // an $837.50-floor challenger could resolve its own expiry straight into a
    // wind-down and cash the seized stack as its finder slice.
@@ -511,7 +508,7 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    FC_ASSERT( nullptr != vault, "Challenged vault no longer exists" );
    FC_ASSERT( vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
               "Vault is already wound down; no second wind-down" );
-   // R17-C (round-17) + C1 design 2 (round-19): expiry is INCONCLUSIVE, not
+   // R17-C + C1 design 2: expiry is INCONCLUSIVE, not
    // guilty. An EXPIRED_FROZEN wind-down runs only when the vault genuinely
    // fails maintenance at resolve time, OR when it is provably drained (no
    // outstanding face and no restorable face from the halt-revert or

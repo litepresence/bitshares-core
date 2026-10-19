@@ -288,7 +288,7 @@ void_result seasoning_verify_evaluator::do_evaluate( const seasoning_verify_oper
     const auto mitr = member_idx.find( op.verifier );
     FC_ASSERT( mitr != member_idx.end(),
                "Verifier ${a} is not a seated committee member", ("a", op.verifier) );
-    // GOV-R17-04 / ATR-R17-02 (round-17, merged at synthesis): committee_member_create
+    // GOV-R17-04 / ATR-R17-02: committee_member_create
     // is permissionless (op-29, LTM only) and registry rows are never pruned, so
     // registry membership alone is a sybil door -- a pair operator could register a
     // second committee account, attest their own vault, and self-issue the AC-08
@@ -300,7 +300,7 @@ void_result seasoning_verify_evaluator::do_evaluate( const seasoning_verify_oper
     FC_ASSERT( std::find( elected.begin(), elected.end(), mitr->get_id() ) != elected.end(),
                "Verifier ${a} is not in the elected committee set", ("a", op.verifier) );
 
-    // AC-16 (round-9): the attestation judges the pair's bonded backing, so
+    // AC-16: the attestation judges the pair's bonded backing, so
     // no party to the pair may issue it -- a self-attested 90-day clock is
     // worth nothing to a downstream USD-issuance gate. Both legs are walked
     // with the SAME bounded authority graph the challenge self-dealing ban

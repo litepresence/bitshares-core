@@ -87,7 +87,7 @@ share_type h2_issue_sat_add( share_type a, share_type b )
    return share_type( int64_t( uint64_t( sum ) ) );
 }
 
-/// NC-08 (round-9): the band partition is a CONSENSUS invariant, not a
+/// NC-08: the band partition is a CONSENSUS invariant, not a
 /// construction argument. Every reserve writer must leave
 /// sum(band_bts) == bts_balance AND sum(band_stable) == stable_supply; this
 /// is the single fail-closed check those writers share (external linkage:
@@ -710,7 +710,7 @@ void h2_issue_on_pair_halt( database& d, asset_id_type pair )
    const vector<h2_pending_vesting> pending = reserve->pending_vestings; // copy: reverts below
    if( !pending.empty() )
    {
-      // PC-01 pilot ceiling (audit-round-9): this loop RE-MINTS face with no
+      // PC-01 pilot ceiling: this loop RE-MINTS face with no
       // door in front of it, so it must hold the same $20,000 face cap the
       // mint doors enforce. Project the whole restore FIRST -- current_supply
       // plus every still-unvested face_burned about to come back -- and
@@ -987,7 +987,7 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
       FC_ASSERT( fxr_asset->precision == pair_asset->precision,
                  "FXR/pair precision must match: parity math is unit-exact" );
       FC_ASSERT( fxr_asset->can_create_new_supply(), "FXR asset can create no new supply" );
-      // ISS-R9-07 / R9-I8 provenance guards (audit round-9), fail-closed.
+      // ISS-R9-07 / R9-I8 provenance guards, fail-closed.
       // (a) Uniqueness first, so the refusal names the double pin even when
       // the shared token also carries standing supply: two reserves pinning
       // one FXR run two fxr_supply ledgers over ONE asset current_supply,
@@ -1120,7 +1120,7 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
     // audit, never a vote toggle: scale is fail-closed by construction.
     // Exact integer math (saturating adds), no price input, deterministic
     // on every node. Equality admits (inclusive cap).
-    // PC-01 (audit-round-9): the two supply-RESTORING paths (halt revert,
+    // PC-01: the two supply-RESTORING paths (halt revert,
     // wind-down exit-queue refund) re-mint face with no door in front of
     // them, so the doors count the restore face too -- current/book PLUS
     // the pending + queued face those paths would hand back. Without this

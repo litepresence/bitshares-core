@@ -44,7 +44,7 @@ namespace graphene { namespace protocol {
    /// Load-bearing (R2 audit): without it oracle profit-from-corruption is
    /// unbounded. DEX legs are NOT capped (market + slippage) -- door-only.
     constexpr uint64_t GRAPHENE_H2_ISSUE_DOOR_CAP_BTS = 200000000000ULL;
-    /// Pilot ceiling proposal (AC-02, audit-round-7): total senior
+    /// Pilot ceiling proposal (AC-02): total senior
     /// outstanding per pair may never exceed $20,000 face while the pilot
     /// phase holds (HONEST-scale pilot, 90 days, before $1 of USD-scale
     /// issuance). Metered in whole face dollars here and precision-scaled

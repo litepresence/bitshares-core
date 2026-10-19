@@ -1442,7 +1442,7 @@ BOOST_AUTO_TEST_CASE( winddown_sweeps_reserve_backing_and_refunds_queue )
 } FC_LOG_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// NC-08 (round-9): the band partition is a consensus invariant, not a
+// NC-08: the band partition is a consensus invariant, not a
 // construction argument
 // ---------------------------------------------------------------------------
 

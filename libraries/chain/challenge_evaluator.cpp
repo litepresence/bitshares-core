@@ -465,7 +465,7 @@ void h2_apply_challenge_resolution( database& d, const vault_challenge_object& c
    d.modify( core_data, [&burn]( asset_dynamic_data_object& data ) {
       data.current_supply -= burn;
    } );
-   // CQ-R9-04 (defense in depth, round-9): GOV-R9-04 refuses a party vote
+   // CQ-R9-04 (defense in depth): GOV-R9-04 refuses a party vote
    // before recording, so a decisive voter below cannot be the challenger.
    // Assert it at the money anyway: the finder slice is a capped payment
    // ($83.75) to whoever decides, and a future call site or a reordered gate
@@ -555,7 +555,7 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
    d.modify( core_data, [&burn]( asset_dynamic_data_object& data ) {
       data.current_supply -= burn;
    } );
-   // CQ-R9-04 (defense in depth, round-9): same self-payment ban as the
+   // CQ-R9-04 (defense in depth): same self-payment ban as the
    // challenge track -- neither party may collect the finder slice as the
    // decisive voter. The SUSTAIN branch above pays the vindicated challenger
    // by design and stays outside this assert.
@@ -580,7 +580,7 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
 } // namespace
 
 // Defends against: chain-halt null deref on a correctly-typed id naming a
-// nonexistent vote target (R24-01 / H2-24-01, round-24).
+// nonexistent vote target (R24-01 / H2-24-01).
 void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operation& op )
 { try {
    database& d = db();
@@ -598,7 +598,7 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
    else
       FC_ASSERT( false, "Vote target must be a vault challenge or an oracle dispute" );
 
-   // R24-01 (round-24 H2-24-01): a correctly-typed id naming a nonexistent
+   // R24-01 / H2-24-01: a correctly-typed id naming a nonexistent
    // object leaves both pointers null; the ternary below would null-deref in
    // consensus and halt every applying node. Fail closed instead.
    FC_ASSERT( _challenge != nullptr || _dispute != nullptr,
@@ -626,7 +626,7 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
     FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
                "Voter ${a} is registered but not on the elected committee",
                ("a", op.voter) );
-    // GOV-R9-04 (round-9): neither side of the target may vote on it. The
+    // GOV-R9-04: neither side of the target may vote on it. The
     // challenge track names its challenger directly and its defender is the
     // VAULT's own authority (vault_challenge_object carries no defender
     // field); the dispute track names both sides. The walk below is the same
@@ -677,7 +677,7 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
 void_result challenge_vote_evaluator::do_apply( const challenge_vote_operation& op ) const
 { try {
    database& d = db();
-   // GOV-R17-02 (round-17): the deciding set is the ELECTED set, not the
+   // GOV-R17-02: the deciding set is the ELECTED set, not the
    // unpruned registry. Registration is permissionless (op-29, LTM only) and
    // registry rows are never pruned; GOV-R9-01 already refuses votes from
    // non-elected rows, but with the registry still in the denominator K sybil
@@ -736,7 +736,7 @@ void process_expired_h2_challenges( database& d )
    {
       if( itr->state != GRAPHENE_H2_CHALLENGE_OPEN )
          continue;
-      // R17-E (round-17): a stranded OPEN challenge row may point at a vault
+      // R17-E: a stranded OPEN challenge row may point at a vault
       // that no longer exists (removal once admitted such a state). The sweep
       // is null-tolerant on the vault leg: skip the zombie rather than
       // dereference it and halt the chain. The row stays bounded (fixed

@@ -1402,7 +1402,7 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
    const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
    BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
    BOOST_CHECK( wd_idx.begin()->source_vault == vid );
-   // C1 design 2 (round-19): zero-claims (this vault never minted) seats
+   // C1 design 2: zero-claims (this vault never minted) seats
    // nothing; the bond stack stays unseized and releasable.
    BOOST_CHECK( wd_idx.begin()->segregated_bond == share_type( 0 ) );
    BOOST_CHECK( wd_idx.begin()->total_claims == share_type( 0 ) );
@@ -1416,7 +1416,7 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount >= share_type( 0 ) );
 } FC_LOG_AND_RETHROW() }
 
-// C1 design 2 (round-19): claims > 0 sustained resolve seats the bond stack
+// C1 design 2: claims > 0 sustained resolve seats the bond stack
 // exactly as before (regression guard for the zero-claims branch).
 BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown_with_claims )
 { try {
@@ -2154,7 +2154,7 @@ BOOST_AUTO_TEST_CASE( h2_09_winddown_settled_pair_reregisters_and_mints_again )
    BOOST_CHECK( vid2( db ).outstanding == share_type( 1000 ) );
    BOOST_CHECK( db.get_balance( bob_id, pair ).amount == share_type( 1000 ) );
 
-   // VAC-R17-11 (round-17): the recovery must survive the next maintenance
+   // VAC-R17-11: the recovery must survive the next maintenance
    // sweep AND a second reserve writer after it. As written this test stopped
    // one transaction short of both: the post-recovery book was never crossed
    // by the sweep's fold nor by a later writer, so these extensions close that
@@ -2303,7 +2303,7 @@ BOOST_AUTO_TEST_CASE( h2_09_complete_winddown_state_also_reregisters )
    BOOST_CHECK( wdid( db ).state == GRAPHENE_H2_WINDDOWN_COMPLETE );
    BOOST_CHECK_EQUAL( vid2( db ).forfeit_pool_balance.value, carried_shell.value );
 
-   // VAC-R17-11 (round-17): a COMPLETE-shape recovery must also survive the
+   // VAC-R17-11: a COMPLETE-shape recovery must also survive the
    // next maintenance sweep and a subsequent reserve writer -- without them
    // this test asserted the surviving (re-registered, empty) book as correct
    // without ever crossing it (sweep fold or second writer). (The pre-R17A
@@ -2455,7 +2455,7 @@ BOOST_AUTO_TEST_CASE( r11r3_third_party_vault_register_on_legacy_uia_refused )
    BOOST_CHECK( vid( db ).vault_pair == own );
 } FC_LOG_AND_RETHROW() }
 
-/// R17-E (round-17): a challenge opened while the vault is HEALTHY survives
+/// R17-E: a challenge opened while the vault is HEALTHY survives
 /// the whole TOPUP -> WINDDOWN -> settle path (open challenges never freeze
 /// and no maintenance leg drains them), so re-registration's terminal-vault
 /// removal must refuse while open_challenges > 0. Without the gate the
@@ -2581,7 +2581,7 @@ BOOST_AUTO_TEST_CASE( r17e_regristration_refuses_open_challenge_no_zombie_halt )
    BOOST_CHECK( db.find( vid ) != nullptr );
 } FC_LOG_AND_RETHROW() }
 
-/// R17-C (round-17): expiry is inconclusive, never exoneration, and it must
+/// R17-C: expiry is inconclusive, never exoneration, and it must
 /// never be a half-price seizure lever: a nil-merit (EXPIRED_FROZEN) challenge
 /// resolves into a wind-down only when the vault genuinely fails maintenance.
 /// Working side: the seated responder cannot be the challenger (directly or
@@ -2647,7 +2647,7 @@ BOOST_AUTO_TEST_CASE( r17c_expired_resolve_needs_coverage_breach_and_non_overlap
       try { PUSH_TX( db, rtx ); } catch( const fc::exception& e ) { return e.to_string(); }
       return string();
    }();
-   // C1 design 2 (round-19): a provably drained vault (zero outstanding, no
+   // C1 design 2: a provably drained vault (zero outstanding, no
    // restorable face) now admits the resolve into an empty book. This vault
    // never minted, so it is drained; the holdout refusal lives in
    // r19c_healthy_holdout_still_refused.
@@ -2660,7 +2660,7 @@ BOOST_AUTO_TEST_CASE( r17c_expired_resolve_needs_coverage_breach_and_non_overlap
    BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
 } FC_LOG_AND_RETHROW() }
 
-/// R18-H2-04 (round-18): pin the R17-C resolver self-deal bans on this leg.
+/// R18-H2-04: pin the R17-C resolver self-deal bans on this leg.
 /// The r17c case above vectors its direct-ban attempt as carol-the-challenger
 /// holding no committee row: the push dies at the seated-member gate before
 /// reaching the R17-C asserts, so the bans were code-reachable but
@@ -2745,7 +2745,7 @@ BOOST_AUTO_TEST_CASE( r18h204_resolver_selfdeal_and_overlap_bans_pinned )
    BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().empty() );
 } FC_LOG_AND_RETHROW() }
 
-/// VAC-R17-10 (round-17, REPAIR-?): the rmax guard needs an ENABLED
+/// VAC-R17-10 (REPAIR-?): the rmax guard needs an ENABLED
 /// binding vector. The existing enabled junior refusals (erin's claim=1
 /// below winddown_claim_pays_seniors_first...) die on the frozen-liabilities
 /// gate (:589-592) or the dust assert, never on rmax. Construct: tiny senior

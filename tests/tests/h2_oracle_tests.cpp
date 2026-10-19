@@ -1064,7 +1064,7 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    BOOST_CHECK_THROW( PUSH_TX( db, stx ), fc::exception );
 } FC_LOG_AND_RETHROW() }
 
-/// ATR-R17-01 (round-17, CONFIRMED_IMPORTANT): an administrative freeze of
+/// ATR-R17-01 (CONFIRMED_IMPORTANT): an administrative freeze of
 /// the bound oracle must hold at the pair read. The owner-controlled backup
 /// covers staleness/liveness loss of the bound series only -- never a freeze
 /// (committee tripwire, challenge, pair_freeze). RED pre-fix: the frozen

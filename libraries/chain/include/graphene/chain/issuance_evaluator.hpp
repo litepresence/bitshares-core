@@ -239,7 +239,7 @@ namespace graphene { namespace chain {
     void h2_issue_ensure_bands( std::vector<share_type>& bands );
 
     /**
-     * NC-08 (round-9): the band partition is a consensus invariant. Refuses
+     * NC-08: the band partition is a consensus invariant. Refuses
      * (fail-closed) unless @p r holds exactly GRAPHENE_H2_ISSUE_N_BANDS
      * entries on BOTH band legs AND the leg sums equal the totals they
      * partition: sum(band_bts) == bts_balance, sum(band_stable) ==
@@ -251,7 +251,7 @@ namespace graphene { namespace chain {
      */
     void h2_issue_verify_bands( const reserve_object& r );
 
-/// R17-A (round-17): externally-linkable partition spend, previously file-local.
+/// R17-A: externally-linkable partition spend, previously file-local.
 /// Spends @p amount from @p bands center-outward (order 3,4,2,5,1,6,0) and
 /// leaves sum(bands) equal to the caller's new totals; conservation across
 /// the physical totals is the caller's job (spend + total move in one modify,

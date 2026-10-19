@@ -756,7 +756,7 @@ optional<protocol::oracle_value> h2_read_pair_price(
    const auto primary = h2_read_consumed_price( d, *vault.bound_oracle, series, now );
    if( primary.valid() )
       return *primary;
-   // ATR-R17-01 (round-17, CONFIRMED_IMPORTANT): the owner-controlled backup
+   // ATR-R17-01: the owner-controlled backup
    // covers staleness/liveness loss of the bound series, never an
    // administrative freeze of the bound oracle itself (committee tripwire,
    // challenge, pair_freeze). h2_read_consumed_price refuses a frozen oracle,

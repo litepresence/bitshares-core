@@ -30,7 +30,7 @@
 #include <algorithm> // std::max
 
 namespace graphene { namespace protocol {
-      // AGI-08 (round-9): the four legs are NOT grief-equal — sha1 (~2^63
+      // AGI-08: the four legs are NOT grief-equal — sha1 (~2^63
       // collision) lets a lock author equivocate a published digest; the
       // G1 create path keeps all four at legacy parity (accepted-risk label
       // at htlc_create_evaluator::do_evaluate), and the sha1 SUNSET ships

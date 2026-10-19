@@ -114,7 +114,7 @@ fc::sha256 nullifier_key( const std::vector<char>& image33 )
    return fc::sha256::hash( image33.data(), image33.size() );
 }
 
-// AGI-04 (round-9): THE V1<->V2 linkage, single definition (declared in
+// AGI-04: THE V1<->V2 linkage, single definition (declared in
 // stealth_evaluator.hpp). Replaces the four historical inline ternaries
 // (op40 evaluate/apply, op109 evaluate/apply) so they cannot drift; the
 // op108 absolute tagging agrees by construction (its key_image_v1 field is
@@ -1126,7 +1126,7 @@ void_result turnstile_reproof_evaluator::do_apply( const turnstile_reproof_opera
    auto itr = bbi.find( o.old_commitment );
    FC_ASSERT( itr != bbi.end() );
    const bool had_metadata = ( itr->created_block != 0 );
-   // Task 3 (nullifier migration, reverts 113202ea): the counter measures
+   // Task 3 (nullifier migration, reverts the earlier spent-flag-conditional decrement): the counter measures
    // the LIVE metadata-bearing set, so every consumed metadata-bearing
    // balance leaves it exactly once — unconditionally on had_metadata. The
    // reverted guard (had_metadata && !was_spent) was correct under unspent
@@ -1495,7 +1495,7 @@ bool stealth_parity_available( const database& db, asset_id_type fee_asset,
       return false;
    if( s->blind_halted )
       return false;
-    // R-05 (audit-round-2) + G3-03: 80% burn-critical halts NEW subsidies
+    // R-05 + G3-03: 80% burn-critical halts NEW subsidies
     // by rule — was signal-only, so a drain proceeded while the alarm
     // watched. Existing grants keep paying until empty; only new subsidy
     // availability gates here.
@@ -1714,7 +1714,7 @@ void stealth_parity_maintenance( database& db )
          if( pct > worst )
             worst = pct;
       }
-      // SUP-R-10 (round-9, CDR-10/CDR-11): append the per-interval flow to
+      // SUP-R-10 (CDR-10/CDR-11): append the per-interval flow to
       // the cumulative counters BEFORE clearing. Never cleared: the flow
       // series is now retrievable from chain state (get_objects), closing
       // the E0-measurability gap. Zero entries are not written (sparse).
@@ -2083,7 +2083,7 @@ void_result stealth_explicit_spend_evaluator::do_apply( const stealth_explicit_s
       // o.proof_version — an op with proof_version==V2 still has a V1 image
       // in key_image_v1. The ring path tags with o.proof_version because
       // its key_image/alt_key_image fields are RELATIVE (primary/alternate);
-      // op108's fields are absolute. AGI-04 (round-9): this absolute tagging
+      // op108's fields are absolute. AGI-04: this absolute tagging
       // IS the stealth_alt_proof_version mapping — key_image_v1 is the
       // V1-domain image (tag V1), key_image_v2 the V2-domain image (tag V2);
       // a future V3 must extend the helper AND this pair together.

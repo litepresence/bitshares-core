@@ -151,7 +151,7 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
    // Resample loop: fresh shuffle per attempt (bounded; exhaustion throws
    // — availability yields to privacy, explicitly).
    //
-   // R17B window-admission switch (round-17 Critical, PRV-R17-02; the
+   // R17B window-admission switch (Critical finding PRV-R17-02; the
    // floor's derivation is at the constant): the stratified draw below
    // admits the real input's window into the decoy draw whenever the
    // eligible set spans FEWER than R17B_MIN_DISTINCT_WINDOWS distinct
@@ -160,13 +160,13 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
    // privileged and the draw stays window-distinct under the wire shuffle.
    // Below the
    // R17B floor, ALL windows (the real's included) participate with
-   // multiplicity: the pre-round-17 exclusion left the real's window at
+   // multiplicity: the pre-R17B exclusion left the real's window at
    // zero decoy occupancy, a signature that names the real input from the
    // public creation-block grid alone (k-sweep posterior 1.0 at <= 8
    // windows, ~0.5 at 9, ~0.24 at 10), and admission gives it a multi-decoy
    // occupancy no other window is guaranteed to lack. The 12..15 middle
-   // band keeps the pre-round-17 residual and is owned by the round-18
-   // re-audit k-sweep, NOT claimed by this instrument. (See the g1_stealth
+   // band keeps the pre-R17B residual and stays a documented open item for
+   // the k-sweep instrument, NOT claimed by this repair. (See the g1_stealth
    // suite R17B instrument for the drawn-window-exact repair check.)
    std::vector<size_t> order( others.size() );
    for( size_t i = 0; i < order.size(); ++i ) order[i] = i;
@@ -197,7 +197,7 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
        // anti-Sybil property (a single-window dust dump earns one slot per
        // pass, never an output-proportional share).
        //
-       // R17B (round-17 Critical, PRV-R17-02): the real's window is
+       // R17B (Critical finding PRV-R17-02): the real's window is
        // admitted as a decoy bucket whenever the eligible set spans fewer
        // than R17B_MIN_DISTINCT_WINDOWS distinct windows. On a thin window
        // set the exclusion gives the real's window a unique single
@@ -206,8 +206,8 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
        // occupancy shape no other window is guaranteed to lack. On a WIDE
        // pool (>= R17B_MIN_DISTINCT_WINDOWS windows) the exclusion stands
        // and the round-robin spreads the 15 decoys over the non-real
-       // windows with the pre-round-17 residual only (exactly uniform from
-       // 16 distinct windows up; the round-18 k-sweep owns 12..15). All
+       // windows with the pre-R17B residual only (exactly uniform from
+       // 16 distinct windows up; the 12..15 band stays a documented open item). All
        // window-eligibility is measured over the SAME index
        // loop that built "others" — sampler and evaluator agree by
        // construction.
@@ -256,7 +256,7 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
       FC_ASSERT( ok, "Prover RNG failed" );
       picked.insert( picked.begin() + at, real_c );
 
-       // PRV-01 (round-9 Critical) + PRV-R11-01: the final EMISSION ORDER
+       // PRV-01 (Critical) + PRV-R11-01: the final EMISSION ORDER
        // is re-randomized here over the ENTIRE ring (decoys + real) under
        // RAND_bytes, so the real's position is uniform and independent of
        // the window structure. The draw above already visits buckets in

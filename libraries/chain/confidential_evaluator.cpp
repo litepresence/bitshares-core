@@ -115,7 +115,7 @@ void_result transfer_to_blind_evaluator::do_apply( const transfer_to_blind_opera
    // pre-fork creates are grandfathered (helper no-ops pre-fork anyway).
    stealth_pool_count_add( db(), o.amount.asset_id, (int32_t)o.outputs.size() );
    // G1c: parity subsidy settlement + skew histogram (decoy-eligible creates).
-   // CI-01 (round-9): consume re-derives stealth_op39_subsidy_count, which
+   // CI-01: consume re-derives stealth_op39_subsidy_count, which
    // reads the depositor window. It MUST see the same pre-add window that
    // do_evaluate's require saw (evaluate runs before any histogram write),
    // or a deposit that tips the depositor past the 1/16 dominance boundary

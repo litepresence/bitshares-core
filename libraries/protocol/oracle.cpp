@@ -92,7 +92,7 @@ void oracle_value::validate()const
 
 bool operator < ( const oracle_value& a, const oracle_value& b )
 {
-   // Round-14 ratio-order determinism fix: the order must be TOTAL over the
+   // Ratio-order determinism fix: the order must be TOTAL over the
    // struct so the weighted-median representative is a function of the value
    // set, never of std::sort stability. Ratio-equal, raw-different values
    // ((1,1) vs (3,3)) are otherwise equivalent elements whose permutation is

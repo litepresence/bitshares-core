@@ -271,13 +271,13 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// boundary has their deposit subsidy capped at 1 output. It does NOT
       /// permit or refuse the op itself — the fee subsidy is money, not a
       /// gate — but it is consensus-live through the fee schedule, not
-      /// dead state. (G1-10/round-9: the old "STATE ONLY — nothing reads
+      /// dead state. (G1-10: the old "STATE ONLY — nothing reads
       /// it" doc predated the A3/A4 effective-N wiring.) Appended-last;
       /// zero-initialized, so history reconciles by default. Sparse: entries
       /// exist only for assets with post-STEALTH deposits.
       /// flat_map is ORDERED.
       flat_map<asset_id_type, stealth_depositor_window> deposit_windows;
-      /// SUP-R-10 (round-9, CDR-10/CDR-11): append-only per-asset grant/route
+      /// SUP-R-10 (CDR-10/CDR-11): append-only per-asset grant/route
       /// flow totals. Appended from interval_routed/interval_granted at each
       /// stealth_parity_maintenance immediately before the interval_*.clear()
       /// — NEVER cleared. Bounded by the number of opted-in assets that have

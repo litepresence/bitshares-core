@@ -22,8 +22,8 @@ namespace graphene { namespace chain {
  * NEW code, not a copy: the CLSAG construction (Goodell et al. 2019-654 §3,
  * curve-generic) and the Bulletproofs+ protocol (2020-735 §3-§4) are
  * re-instantiated over secp256k1. Lineage references vendored under
- * libraries/chain/stealth/vendor/ (S1 monero @ e4fbca88, S2
- * mimblewimble/secp256k1-zkp @ b247e1ec). The pre-G1 specialist audit is the
+ * libraries/chain/stealth/vendor/ (S1 monero, S2 mimblewimble/secp256k1-zkp;
+ * exact revisions recorded in vendor/README.md). The pre-G1 specialist audit is the
  * acceptance gate for this file's soundness (BSIP-2 §4): every assumption a
  * reviewer must check is cited inline with "AUDIT:".
  *
@@ -44,7 +44,7 @@ std::vector<unsigned char> stealth_G_point();
  * Pedersen value base H (paper's g / S1's rct::H role).
  *
  * AUDIT: this is the S2/Elements H constant VERBATIM
- * (secp256k1_generator_const_h, src/modules/generator/main_impl.h @ b247e1ec):
+ * (secp256k1_generator_const_h, src/modules/generator/main_impl.h; revision recorded in vendor/README.md):
  * reusing it is MANDATORY, not optional, because every legacy fc::blind
  * commitment in history was made under it and turnstile/excess checks must
  * verify those commitments. The quoted Sage NUMS one-liner in that file does

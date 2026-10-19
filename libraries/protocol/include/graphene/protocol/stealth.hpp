@@ -56,12 +56,12 @@ constexpr uint32_t GRAPHENE_STEALTH_RING_TARGET = 16;
 /// Ceiling ring size: bounds verifier work per input (DoS cap, not privacy).
 constexpr uint32_t GRAPHENE_STEALTH_RING_MAX = 32;
 
-/// R17B (round-17): op109 input sampling blends the real input's creation
+/// R17B: op109 input sampling blends the real input's creation
 /// window into the decoy draw whenever the eligible window set has fewer
 /// distinct windows than this value. Below it the exclusion's zero-occupancy
 /// signature names the real input (posterior 1.0 at <= 8 windows, ~0.5 at
 /// 9, ~0.24 at 10); at and above it the round-robin's residual is the
-/// pre-round-17 mild shape (exactly uniform from 16 distinct windows up).
+/// pre-R17B mild shape (exactly uniform from 16 distinct windows up).
 /// 12 = the measured crossover. Prover-side only (no evaluator reads it).
 constexpr uint32_t R17B_MIN_DISTINCT_WINDOWS = 12;
 
@@ -91,12 +91,12 @@ constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_TX_PER_BLOCK = 100;
 /// blocks (100 x 1-output deposits = 632200us) still fit.
 constexpr uint32_t GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK = 750000;
 /// Dual-verified ring-member cost, ceil of both measured points (space-bunny
-/// g1-verifier-bench-partial.log @ e7d978c3: ring-16 verify 19337us = 1208.6
+/// bench: ring-16 verify 19337us = 1208.6
 /// per member; ring-32 verify 38665us = 1208.3 per member; single-threaded
 /// OpenSSL EC, container hardware — a LOWER bound, so ceil is the safe
 /// direction). Each stealth input pays 2 x ring.size() units (main + alt leg).
 constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_RING_MEMBER = 1210;
-/// Range-proof cost per blind output (same log: BP+ m=1 verify 6322us).
+/// Range-proof cost per blind output (same measurement: BP+ m=1 verify 6322us).
 /// Legacy V1 Borromean outputs are charged at the same rate. Measured
 /// (R9C, r9c_v1_verify_cost_pin, same container hardware): one V1 verify
 /// over the consensus path is ~1100us (1059-1109us best-of-21 across runs),

@@ -80,7 +80,7 @@ namespace graphene { namespace protocol {
        vault_id_type   vault;         ///< Target vault; must exist
        authority       new_authority; ///< Replaces vault_authority in full
         optional<string> memo;         ///< Rotation rationale carrier; never authorizes mint
-        /// Old-set co-signers (E-04 audit-round-2: moved before extensions so the
+        /// Old-set co-signers (E-04: moved before extensions so the
         /// append-last rule holds; pre-activation wire change, unactivated tags
         /// shift freely). Each named account's active authority is
         /// signature-required; the evaluator sums rotator + co-signer weights

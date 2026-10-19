@@ -483,7 +483,7 @@ namespace graphene { namespace wallet { namespace detail {
       }
       catch(...)
       {
-         // WPC-R17-01 (round-17; carry WPC-R11-07/WPC-R14-01): the whole-wallet
+         // WPC-R17-01 (carry WPC-R11-07/WPC-R14-01): the whole-wallet
          // pretty-string dump leaked every stored blind receipt's opening
          // (blind_receipts[].data is stealth_confirmation::memo_data, whose
          // FC_REFLECT carries blinding_factor) into the log on any save

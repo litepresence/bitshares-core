@@ -408,7 +408,7 @@ T_dual_dry_run_result T_dual_dry_run( uint8_t v_main, uint8_t v_alt,
 /**
  * Test-only BP+ prover (m=1, n=64).
  *
- * Ported from S1 bulletproof_plus_PROVE (monero @ e4fbca88, vendored) to
+ * Ported from S1 bulletproof_plus_PROVE (monero, vendored) to
  * secp256k1/OpenSSL with the G1 transcript (stealth_bp_hash domains
  * "G1BPy"/"G1BPz"/"G1BPr"/"G1BPf", R9C-chained S1-style) and prime-order form (S1's x8/INV_EIGHT cofactor
  * clearing dropped as identity — no cofactor exists on secp256k1, same
@@ -938,7 +938,7 @@ static void T_r15_nullify( database& db,
 
 BOOST_FIXTURE_TEST_SUITE( g1_stealth_tests, database_fixture )
 
-/// V-03 (audit-round-2): every stealth operation must be refused before the
+/// V-03: every stealth operation must be refused before the
 /// hardfork, or a node running this code could produce a block that a node
 /// running the previous release cannot validate. The shape below passes
 /// validate() (11 distinct members, 33-byte image, well-sized sig, V1 output
@@ -1145,7 +1145,7 @@ BOOST_AUTO_TEST_CASE( generator_provenance_vectors )
    std::vector<unsigned char> H = stealth_H_point();
    BOOST_REQUIRE_EQUAL( H.size(), 33u );
    // Golden: S2 secp256k1-zkp generator H, compressed.
-   // Provenance: src/modules/generator/main_impl.h @ b247e1ec
+   // Provenance: src/modules/generator/main_impl.h
    // (secp256k1_generator_const_h). The quoted Sage NUMS one-liner in that
    // file does NOT reproduce (its G_bytes hex carries a typo'd Y), so H's
    // authority is deployment history + on-curve + blind-equality below.
@@ -1516,11 +1516,11 @@ BOOST_AUTO_TEST_CASE( decoy_rules_enforced )
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_BLIND_POOL_FLOOR, 11u );
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_RING_MIN, 11u );
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_RING_MAX, 32u );
-   // R17B window-blend floor (round-17): the sampler's real-window
+   // R17B window-blend floor: the sampler's real-window
    // admission switch at thin window sets; consensus-visible through
    // stealth_sample_pool_ring's drawn-window distribution. 12 = the
    // measured crossover: admission dominates at <= 11 windows, and at/above
-   // it the exclusion's pre-round-17 residual is the weaker signature.
+   // it the exclusion's pre-R17B residual is the weaker signature.
    BOOST_REQUIRE_EQUAL( R17B_MIN_DISTINCT_WINDOWS, 12u );
 
    auto now = db.head_block_time();
@@ -3428,7 +3428,7 @@ BOOST_AUTO_TEST_CASE( freeze_blind_committee_backup )
 } FC_CAPTURE_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// GOV-R9-01 (round-9 REPAIR-33): committee gates sit on the ELECTED set
+// GOV-R9-01 (REPAIR-33): committee gates sit on the ELECTED set
 // ---------------------------------------------------------------------------
 
 /// RED: committee_member_create is permissionless (is_lifetime_member + op-29
@@ -4015,7 +4015,7 @@ BOOST_AUTO_TEST_CASE( r9b_ring_scalar_canonicality_vectors )
    { stealth_ring_input bad = good; // A3-last: rb_{n-1} == n (per-member)
      std::copy( nbytes, nbytes + 32, bad.ring_sig.begin() + 32 + 96 * ( n - 1 ) );
      expect_ring_reject( bad, "responses not canonical" ); }
-   // NC-16 (round-9): zero is not canonical either (0 < s < n). The old
+   // NC-16: zero is not canonical either (0 < s < n). The old
    // parse admitted c0 == 0 with a comment claiming it "is legal"; the
    // strict S1 discipline refuses it at the parse layer so it never
    // reaches the multiexp legs.
@@ -4028,7 +4028,7 @@ BOOST_AUTO_TEST_CASE( r9b_ring_scalar_canonicality_vectors )
    BN_free( n1 ); BN_free( bs ); BN_free( bprime );
 } FC_CAPTURE_AND_RETHROW() }
 
-// NC-16 (round-9): the recovery proof's response scalars obey the same
+// NC-16: the recovery proof's response scalars obey the same
 // strict 0 < s < n parse as the ring path. Pure verifier vectors — no
 // chain state; a true proof with s_b / s_v zeroed must refuse at the
 // parse layer, never reach the equation legs.
@@ -4066,7 +4066,7 @@ BOOST_AUTO_TEST_CASE( r16_recovery_zero_scalars_refuse )
      BOOST_CHECK_EQUAL( err, std::string( "recovery s_v not canonical" ) ); }
 } FC_CAPTURE_AND_RETHROW() }
 
-// AGI-04 (round-9): the V1<->V2 linkage is ONE mapping. The four historical
+// AGI-04: the V1<->V2 linkage is ONE mapping. The four historical
 // ternaries (op40 evaluate/apply nullifier tags, op109 evaluate/apply
 // nullifier tags) collapse into this helper, and the op108 absolute
 // tagging must agree with it. Semantics pinned: alt(V1)==V2, alt(V2)==V1,
@@ -4095,7 +4095,7 @@ BOOST_AUTO_TEST_CASE( agi04_alt_proof_version_linkage )
                             GRAPHENE_STEALTH_PROOF_V2 ) ), GRAPHENE_STEALTH_PROOF_V2 );
 } FC_CAPTURE_AND_RETHROW() }
 
-// CI-05 (round-9 crypto-agility): the G1 typelist DECLARES the H2 tag block
+// CI-05 (crypto-agility): the G1 typelist DECLARES the H2 tag block
 // (83..103) but db_init registers no evaluator for it — contact must fail
 // closed at apply_operation with the generic refusal, before any hardfork
 // or fee logic. Both vehicles the finding names: (a) direct dispatch of
@@ -8380,7 +8380,7 @@ BOOST_AUTO_TEST_CASE( r15_recovery_honest_challenge_nonzero )
 // the two new outputs join: 16 -> 18), and a turnstile recovery swaps the
 // consumed member for the migrated one 1:1 (net 0: -1 on had_metadata, +1 on
 // create). The counter must equal the chain-derived live set after every leg.
-// (The reverted 113202ea guard is behavior-neutral here — was_spent is now
+// (The reverted spent-flag guard is behavior-neutral here — was_spent is now
 // unwritable, so both guards agree — but the read of the retired field had
 // to go with the field's retirement.)
 BOOST_AUTO_TEST_CASE( r15_recovery_pool_count_preserved )
@@ -10014,7 +10014,7 @@ BOOST_AUTO_TEST_CASE( value_pin_rejects_malformed )
    BOOST_CHECK( !stealth_verify_value_pin( P, amount, pool, T33,
                                            std::string( 32, (char)0xff ), err ) );
    BOOST_CHECK_EQUAL( err, std::string( "pin s not canonical" ) );
-   // NC-16 (round-9): zero is not a canonical response scalar (strict
+   // NC-16: zero is not a canonical response scalar (strict
    // discipline is 0 < s < n, same as scalar_canonical_nz / the S1
    // is_reduced rule). Refusal must be the parse-layer refusal, not an
    // equation failure — a zero s would otherwise reach the multiexp and
@@ -10133,7 +10133,7 @@ BOOST_AUTO_TEST_CASE( g2rm_work_exceeds_transfer )
    // Schnorr-pin kernel allowance, the conservation-kernel allowance (both
    // kernels the evaluator runs — value-pin then verify_excess), 2x range
    // allowance (output BP+ m=1 + conceptual pin cost), plus the pool-math
-   // leg. NC-14 (round-9): the model had been charging one kernel while the
+   // leg. NC-14: the model had been charging one kernel while the
    // evaluator verifies two; the work gate must pay for what it runs.
    const uint32_t n = 16;
    stealth_transfer_operation small;
@@ -11465,7 +11465,7 @@ BOOST_AUTO_TEST_CASE( poolswap_no_real_account_writes )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
-// VAC-R17-05 (round-17): the op109 nullifier rejection branch had no enabled
+// VAC-R17-05: the op109 nullifier rejection branch had no enabled
 // PUSH case (op104/op108 pins at :2689/:5884 never cover the poolswap path).
 // Two vectors follow the evaluator's real gate order (commitment freshness
 // :2302 -> owner -> ring liveness/sigs -> nullifier (11) :2416 -> range
@@ -12123,7 +12123,7 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_matches_consensus )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
-// R17B (round-17, PRV-R17-02): on a THIN window setup (5 distinct windows,
+// R17B (PRV-R17-02): on a THIN window setup (5 distinct windows,
 // fewer than R17B_MIN_DISTINCT_WINDOWS) the sampler must blend the real's
 // window into the decoy draw, not exclude it — the excluded real window
 // carries a unique single-occupancy signature over the ring, naming the
@@ -12444,7 +12444,7 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_tamper_fails )
        BOOST_FAIL( "tampered-P poolswap was ACCEPTED" );
     }
     catch( const fc::exception& e ) {
-       // V-07 (round-9): anchor the refusal to its gate. The value-pin
+       // V-07: anchor the refusal to its gate. The value-pin
        // binds P to amount_to_sell and runs BEFORE the ring legs (do_evaluate
        // step 7 vs step 10), so a flipped P byte (the prefix stays a valid
        // 0x02/0x03, so point-parse passes) must land on the value-pin
@@ -12913,7 +12913,7 @@ BOOST_AUTO_TEST_CASE( subsidy_rule_table )
 // ============================================================================
 // EE-2: adversarial + regression suite for Rule R.
 //
-// The production behaviour under test (EE-1 bed7c6ef, EE-1b 529968a1) is
+// The production behaviour under test (EE-1, EE-1b) is
 // ALREADY BUILT, so this suite is a regression/attack suite, not a TDD-red
 // feature build: the RED evidence demanded by the brief is GUARD DELETION —
 // mutate the load-bearing production line, watch the named case go RED, revert.
@@ -13132,7 +13132,7 @@ BOOST_AUTO_TEST_CASE( wallet_sampler_stratifies_windows )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
-// ---- PRV-01 (round-9 Critical; seats PRV-01 / WPC-01 / SC-09 / V-09):
+// ---- PRV-01 (Critical; seats PRV-01 / WPC-01 / SC-09 / V-09):
 // the op109 sampler's EMISSION ORDER must not fingerprint the real input.
 //
 // Defect (stealth_pool_builder.cpp pre-fix): candidates are bucketed by
@@ -13307,7 +13307,7 @@ BOOST_AUTO_TEST_CASE( poolswap_sampler_no_window_order_fingerprint )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
-// ---- PRV-R11-01 (round-11 Critical, seat privacy-adversarial-audit): the
+// ---- PRV-R11-01 (Critical, seat privacy-adversarial-audit): the
 // op109 sampler's decoy WINDOW SET must not be canonical on the wire.
 //
 // Defect (stealth_pool_builder.cpp:159-187 pre-fix): candidates are bucketed
@@ -13315,7 +13315,7 @@ BOOST_AUTO_TEST_CASE( poolswap_sampler_no_window_order_fingerprint )
 // bucket-key order with the real's window eligible, so with >=16 non-empty
 // windows the 15 decoy windows are ALWAYS the 15 oldest non-empty windows:
 // the wire set is {15 oldest} UNION {real window} (canonical-minus/plus the
-// real's window) and the final Fisher-Yates (:214-228, R9 38c80dad) only
+// real's window) and the final Fisher-Yates (:214-228) only
 // reorders it. Every member's created_block is public chain state, so a
 // passive observer names the real's window in 100% of rings (rig:
 // tooling/r11r4_window_set_rig.py DEFECTIVE window_hit_rate=1.0000 at
@@ -13418,7 +13418,7 @@ BOOST_AUTO_TEST_CASE( poolswap_sampler_window_set_posterior_uniform )
       distinct_sets.insert( dsorted );
       if( dsorted == canon )
          ++canonical_hits;
-      // The round-10 attacker: unique member outside the canonical set, else
+      // The modeled attacker: unique member outside the canonical set, else
       // the unique doubled window, else no pointer (scores a miss here — a
       // uniform follow-up guess hits at 1/16, counted in the rig, not here).
       std::vector<size_t> outside;
@@ -15289,7 +15289,7 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
 } FC_CAPTURE_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
-// CI-01 (round-9, Important): op39 require/consume window mirror at the
+// CI-01 (Important): op39 require/consume window mirror at the
 // dominance boundary.
 //
 // stealth_op39_subsidy_count reads the depositor window. do_evaluate's
@@ -15493,7 +15493,7 @@ BOOST_AUTO_TEST_CASE( ci01_op39_dominance_boundary_mirror )
    verify_asset_supplies( db );
 } FC_CAPTURE_AND_RETHROW() }
 
-// SUP-R-10 (round-9, CDR-10/CDR-11): cumulative_routed/cumulative_granted are
+// SUP-R-10 (CDR-10/CDR-11): cumulative_routed/cumulative_granted are
 // append-only per-asset counters written from interval_routed/interval_granted
 // at each stealth_parity_maintenance, never cleared. Makes the per-asset flow
 // series retrievable from chain state, closing the E0-measurability gap.

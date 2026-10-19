@@ -76,7 +76,7 @@ namespace graphene {
           graphene::chain::database& d = db();
           optional<htlc_options> htlc_options = get_committee_htlc_options(db());
 
-          // AGI-08 (round-9) ACCEPTED RISK — read before touching this gate:
+          // AGI-08 ACCEPTED RISK — read before touching this gate:
           // hash_algo griefing. The four HTLC hash legs are NOT equal:
           //  - sha1: ~2^63 collision cost. A LOCK AUTHOR can grind two
           //    preimages for one published digest and equivocate the lock

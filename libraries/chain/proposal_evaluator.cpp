@@ -261,7 +261,7 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.extensions.value.oracle_guard_delay_sec.valid(),
                    "Unable to set the oracle guard delay before the oracle hardfork");
       }
-      // E-01 (audit-round-2): H2 fee-schedule votes are gated by leg, mirroring the
+      // E-01: H2 fee-schedule votes are gated by leg, mirroring the
       // execution pre-checks below (primitives/BONDS, gateway, price). Without this,
       // a committee could price H2 fees before the code activates.
       if (!HARDFORK_H2_BONDS_PASSED(block_time)) {

@@ -1858,7 +1858,7 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    }
 
    return confirm;
-   // WPC-R17-02 (round-17): (confirm) removed from the capture below —
+   // WPC-R17-02: (confirm) removed from the capture below —
    // confirm.outputs[].decrypted_memo.blinding_factor holds freshly generated
    // blinds at this point, and fc::exception serializes captured args deep
    // into to_detail_string()/stderr on any later throw (validate/broadcast/sign).

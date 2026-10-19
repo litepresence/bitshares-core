@@ -3249,7 +3249,7 @@ BOOST_AUTO_TEST_CASE( t8e_legacy_feed_path_is_untouched )
                 == GRAPHENE_DEFAULT_MAINTENANCE_COLLATERAL_RATIO );
 } FC_LOG_AND_RETHROW() }
 
-/// V-02 (audit-round-2): bounded oracle state has attack-input coverage. The 65th
+/// V-02: bounded oracle state has attack-input coverage. The 65th
 /// subscriber bind is refused (asset_evaluator.cpp:914); the delay queue needs no
 /// refusal path by design — it self-trims to GRAPHENE_ORACLE_GUARD_MAX_PENDING
 /// with time-bucketed sampling — so the test pins the bound instead.

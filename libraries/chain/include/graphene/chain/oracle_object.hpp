@@ -142,7 +142,7 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        bool rate_limited = false;
       /// Holds counted in the current maintenance interval. Reset to 0 at each
       /// interval boundary (and on every successful promotion).
-      /// R-04 (round-9): DIAGNOSTIC ONLY — no consensus rule, escalation, or
+      /// R-04: DIAGNOSTIC ONLY — no consensus rule, escalation, or
       /// economic consumer reads this counter. Holds still bite through the
       /// rate_limited flag and last-good-standing price fallback; this field
       /// merely makes the hold pressure VISIBLE on the object (mirrored to

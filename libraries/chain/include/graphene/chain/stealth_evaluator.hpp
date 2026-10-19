@@ -243,13 +243,13 @@ void stealth_maybe_record_activation( database& db );
  * NARROWING (EE3-M1). This used to read "... which no user's fee is computed
  * against differently after this function exists". True when written — op109
  * then called neither `stealth_require_blind_fee` nor
- * `stealth_consume_parity_subsidy` and had no float rule at all (`ee67fd75`) —
- * but no longer a universal: `bed7c6ef` put op109 inside the mechanism, so an
+ * `stealth_consume_parity_subsidy` and had no float rule at all —
+ * but no longer a universal: Rule R's parity wiring put op109 inside the mechanism, so an
  * op109 fee is now computed against the anchor where before it was not. What
  * survives is the weaker and load-bearing claim: this classifier never GOVERNS
  * the floor. Callers hand `stealth_cost_anchor_core` the op's REAL
  * n_blind_outputs, so Rule R can only shrink the gap, never move the floor;
- * the anchor function itself is unmodified (byte-identical since `ee67fd75`,
+ * the anchor function itself is unmodified (byte-identical since Rule R,
  * tooling/verify_stealth_cost_anchor_unchanged.py). op109's floor is
  * `anchor(1)` — the same for every 1-in/1-out swap, because it passes the
  * literal 1 (stealth_evaluator.cpp:2210) and a ring of any size cannot change
@@ -499,7 +499,7 @@ uint32_t stealth_work_for_turnstile();
 /// so the test suite links the exact production identity — never duplicated).
 /// Takes vector<char>, NOT commitment_type; callers convert explicitly.
 fc::sha256 nullifier_key( const std::vector<char>& image33 );
-/// AGI-04 (round-9): THE V1<->V2 linkage. Exactly two proof versions exist;
+/// AGI-04: THE V1<->V2 linkage. Exactly two proof versions exist;
 /// every dual-verify spend authorizes under both, so each op carries a
 /// primary leg (o.proof_version) and an alternate leg whose domain is this
 /// mapping. One definition — the four historical inline ternaries (op40

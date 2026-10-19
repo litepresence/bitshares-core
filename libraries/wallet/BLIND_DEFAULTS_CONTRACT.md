@@ -129,7 +129,7 @@ types or supply totals; no custodial tumbling presented as a substitute.
 Wallets MUST surface this section before the first blind receive (6th
 MUSE-R12 item, BSIP-2 §4):
 
-- **Nullifier migration IS consensus at the round-9 audited tip `06dcd808`**
+- **Nullifier migration IS consensus**
   (op108 `stealth_explicit_spend_operation`, same STEALTH gate as ops 104–107;
   proof verified before the nullifier lookup; whole-ring spent flag retired).
   Ring membership alone no longer marks a decoy spent: only the real input's
@@ -141,7 +141,7 @@ MUSE-R12 item, BSIP-2 §4):
   who does NOT know an opening cannot nullify your output by including it as
   a decoy (nullifiers require the representation proof, verified first).
 - Under the retired spent-flag regime (pre-op108), one ring-16 spend burned
-  16 decoy candidates (16→2). That burn is historical. At the current tip the
+  16 decoy candidates (16→2). That burn is historical. Under the op108 regime the
   live-set cost of a spend is the anonymity-set dilution of adding decoys,
   not permanent destruction of every ring member; pool-burn economics at
   pilot scale (≤$20k book) still mean early sets are thin until volume
@@ -153,4 +153,4 @@ MUSE-R12 item, BSIP-2 §4):
   the ≤$20k pilot economics as a general property of this protocol, and MUST
   NOT describe longer disclosure as a remedy. Activation of op108/Rule R
   remains gated on the named CLSAG/BP+ specialist audit covering those ops
-  and on the activation checklist (round-9: still NO_GO).
+  and on the activation checklist (not yet activated).

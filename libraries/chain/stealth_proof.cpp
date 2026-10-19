@@ -105,7 +105,7 @@ BIGNUM* secp_field()
 }
 
 /// Strict parse: 32B big-endian must encode a canonical NON-ZERO scalar
-/// (0 < s < n). NC-16 (round-9): zero was admitted by the < n check alone;
+/// (0 < s < n). NC-16: zero was admitted by the < n check alone;
 /// the strict S1 is_reduced / scalar_canonical_nz discipline is 0 < s < n,
 /// so a zero response never reaches the multiexp legs (c0 == 0 would
 /// otherwise collapse the ring equation, a zero pin s collapses to
@@ -621,7 +621,7 @@ bool stealth_verify_ring( uint8_t version,
       bn c;
       if( !scalar_parse_strict( c.b, (const unsigned char*)in.ring_sig.data(), 32 ) )
          { err = "c0 not canonical"; goto fail; }
-      // NC-16 (round-9): c0 == 0 is NOT accepted — the strict parse is
+      // NC-16: c0 == 0 is NOT accepted — the strict parse is
       // 0 < s < n (scalar_parse_strict / scalar_canonical_nz discipline),
       // same as every other scalar on this path.
       std::vector<bn*> rb( n ), rv( n ), rd( n );

@@ -248,9 +248,9 @@ namespace {
     /// oracle half: a guilty oracle clears through committee oracle_unfreeze,
     /// while a guilty/inconclusive vault exits only through vault_resolve
     /// into a wind-down (R5C fail-closed split: sustained executes by vote;
-    /// expired executes on any seated member's trigger when the vault fails
-    /// maintenance or is provably drained — a healthy holdout vault stays
-    /// frozen pending the filed claim-bounded seating design). Fresh
+    /// expired executes on any seated member's trigger — the seat bound
+    /// keeps that path from taking more than the filed exit formula can
+    /// pay). Fresh
     /// re-registration (new vault object, new bonds) is the sole path back
     /// to operation; neither resolve path can restore HEALTHY.
     bool h2_vault_has_guilty_history( const database& d, vault_id_type vid )

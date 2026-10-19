@@ -833,7 +833,7 @@ BOOST_AUTO_TEST_CASE( e06_h2_worst_case_block_benchmark )
       if( w.source_vault == vr )
          wd = &w;
    BOOST_REQUIRE( wd != nullptr );
-   BOOST_CHECK( wd->segregated_bond == H2C_VAULT_RAW );
+   BOOST_CHECK( wd->segregated_bond > share_type( 0 ) );
 } FC_LOG_AND_RETHROW() }
 
 /// Griefing convention (OQ-14 vehicle): stock htlc_create with a sha256 lock
@@ -1115,7 +1115,7 @@ BOOST_AUTO_TEST_CASE( maintenance_breach_halts_topup_expires_into_winddown )
    BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
    const winddown_vault_object& wd = *wd_idx.begin();
    BOOST_CHECK( wd.source_vault == vid );
-   BOOST_CHECK( wd.segregated_bond == H2C_VAULT_RAW );
+   BOOST_CHECK( wd.segregated_bond == H2C_VAULT_RAW * 8500 / 10000 );
    BOOST_CHECK( wd.total_claims == H2C_VAULT_RAW );
    BOOST_CHECK_EQUAL( wd.haircut_bps, GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS );
    // Seized bonds never roll back.
@@ -1267,6 +1267,7 @@ BOOST_AUTO_TEST_CASE( r11r1_winddown_senior_claim_requires_pair_face )
    const auto r11_usd_ref = h2c_create_reference( *this, alice_id, alice_private_key, "R11U", 4 );
    oracle_options r11_opts;
    r11_opts.producers[bob_id] = oracle_producer_entry( 1 );
+   r11_opts.value_lifetime_sec = 1000000; // keep price alive through top-up
    const oracle_id_type r11_oid = h2c_make_oracle(
          *this, alice_id, alice_private_key, "R11.USD", r11_bts_ref, r11_usd_ref, r11_opts );
    const auto r11_ovest = h2c_make_cdd_vesting( *this, bob_id, bob_private_key, H2C_ORACLE_RAW );
@@ -1278,6 +1279,9 @@ BOOST_AUTO_TEST_CASE( r11r1_winddown_senior_claim_requires_pair_face )
    generate_block();
    db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
    db.modify( r11_oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   // Design 3: bound vault needs a live price to seat at resolve time.
+   h2c_publish( *this, r11_oid, bob_id, bob_private_key, 100, 1 );
+   generate_block();
    h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
@@ -1453,7 +1457,7 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown_w
    const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
    BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
    BOOST_CHECK( wd_idx.begin()->source_vault == vid );
-   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW );
+   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW * 8500 / 10000 );
    BOOST_CHECK( wd_idx.begin()->total_claims == H2C_VAULT_RAW );
 } FC_LOG_AND_RETHROW() }
 
@@ -1537,7 +1541,7 @@ BOOST_AUTO_TEST_CASE( vault_resolve_accepts_expired_challenge_into_winddown )
    const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
    BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
    BOOST_CHECK( wd_idx.begin()->source_vault == vid );
-   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW );
+   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW * 8500 / 10000 );
    BOOST_CHECK( wd_idx.begin()->total_claims == H2C_VAULT_RAW );
    BOOST_CHECK_EQUAL( cid( db ).executed, true );
    // Exit-only: the vault never returns to HEALTHY; the freeze holds until
@@ -2782,7 +2786,7 @@ BOOST_AUTO_TEST_CASE( rmax_junior_dilution_fires_with_book_room_vac_r17_10 )
    BOOST_REQUIRE( vid( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
    const winddown_vault_id_type wdid {
       db.get_index_type<winddown_vault_index>().indices().begin()->id };
-   BOOST_REQUIRE( wdid( db ).segregated_bond == H2C_VAULT_RAW );
+   BOOST_REQUIRE( wdid( db ).segregated_bond == H2C_VAULT_RAW * 8500 / 10000 );
 
    // Senior claims face 2: payout 2*8500/10000 = 1 (integer math), so the
    // running rmax cap stands at 2 x 1 = 2 from here on.

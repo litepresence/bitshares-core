@@ -93,6 +93,12 @@ uint32_t h2_seasoning_coverage_bps( share_type backing, share_type debt )
 /// h2_vault_meets_maintenance: seized bonds back nothing).
 share_type h2_seasoning_vault_backing( const database& d, vault_id_type vid )
 {
+   // C1 design 3: a wind-down vault measures zero seasoning backing even
+   // when it holds unseized leftover bonds (surplus stays with the owner
+   // under CDD rules and must not count as coverage for the pair's record).
+   const vault_object* vault = d.find( vid );
+   if( vault != nullptr && vault->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN )
+      return share_type( 0 );
    share_type backing( 0 );
    const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
    const auto range = bond_idx.equal_range( vid );

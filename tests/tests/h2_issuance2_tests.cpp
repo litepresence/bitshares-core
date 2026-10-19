@@ -2795,14 +2795,29 @@ BOOST_AUTO_TEST_CASE( winddown_senior_burn_moves_bands_r17a )
    BOOST_REQUIRE_EQUAL( db.get_balance( alice_id, d.pair ).amount.value, 1000 );
 
    // Force the 150% maintenance trigger next sweep (surgery precedent;
-   // outstanding far above any 150% cover at this bonded price).
+   // outstanding far above any 150% cover at this bonded price). The book
+   // is surgical so the breach survives a LIVE price too: the bonded read
+   // covers 1.34e10 face against 1e10 face outstanding, which is 134% and
+   // still short of the 150% trigger.
    db.modify( d.vault( db ), []( vault_object& m ) {
-      m.outstanding = share_type( 2000000 );
+      m.outstanding = share_type( 10000000000LL );
    } );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
-   generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+   // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+   // book through the bonded price, so the sweep that expires the top-up
+   // window needs a live price; with a dead price it defers the wind-down
+   // to the next sweep instead of seating a half-empty book. Land just
+   // before that sweep, republish there (the price is live for one print
+   // lifetime), then cross it.
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < d.vault( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
 
@@ -2851,6 +2866,95 @@ BOOST_AUTO_TEST_CASE( winddown_senior_burn_moves_bands_r17a )
       band_sum += band;
    BOOST_CHECK( band_sum == r->stable_supply );
    h2_issue_verify_bands( *r );
+} FC_LOG_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Design 3: the seat bound, the deferred wind-down, and the owner's surplus
+// ---------------------------------------------------------------------------
+
+/// The wind-down seat is bounded by what the filed exit formula can ever pay
+/// (design 3, section 1). A bound vault's seat converts the frozen claim book
+/// through the bonded price, the reserve's own backing is swept first, the
+/// bonds fill the rest, and the surplus the bound never reaches stays with
+/// its owner. A dead price defers the wind-down to the next sweep instead of
+/// seating a half-empty book (section 3.2).
+BOOST_AUTO_TEST_CASE( seat_bound_caps_seating_and_leaves_the_surplus_with_its_owner )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYWBNDY", "HYWBNDYF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "W" );
+
+   h2j_mint( *this, alice_id, alice_private_key, d, share_type( 140000 ), share_type( 1000 ) );
+   generate_block();
+
+   // Surgical book: the bonded read covers 1.34e10 face against 1e10 face
+   // outstanding (134%), short of the 150% trigger, and the breach survives
+   // a live price.
+   db.modify( d.vault( db ), []( vault_object& m ) {
+      m.outstanding = share_type( 10000000000LL );
+   } );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
+
+   // Dead price at the sweep that expires the top-up window: the wind-down
+   // is deferred to the next sweep (no book, no funds moved), not seated
+   // against a dead price.
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < d.vault( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
+   BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().begin()
+                == db.get_index_type<winddown_vault_index>().indices().end() );
+
+   // A live price at the next sweep seats the bounded book.
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
+
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+   // claims 1e10 face -> 85% scratch 8.5e9 face -> converted at the bonded
+   // price (100 base / 1 quote) 8.5e11 bond units.
+   BOOST_CHECK( wdid( db ).total_claims == share_type( 10000000000LL ) );
+   // The reserve's 140000 BTS is swept first (the cheapest money for the
+   // frozen book); the bond fills the rest (849860000 of 1.34e12).
+   BOOST_CHECK( wdid( db ).segregated_bond == share_type( 850000000LL ) );
+   const reserve_object* r = h2j_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r != nullptr );
+   BOOST_CHECK( r->bts_balance == share_type( 0 ) );
+   BOOST_CHECK( r->stable_supply == share_type( 1000 ) );
+   h2_issue_verify_bands( *r );
+
+   // The surplus the bound never reached stays with its owner: the bond's
+   // vesting balance holds it, the visited bond is marked seized, and the
+   // CDD schedule (not the wind-down) still governs the withdrawal.
+   const auto& bond_idx = db.get_index_type<vault_bond_index>().indices()
+                                .get<by_bond_vault>();
+   const auto range = bond_idx.equal_range( vault_id_type( d.vault( db ).id ) );
+   share_type seized( 0 );
+   for( auto itr = range.first; itr != range.second; ++itr )
+   {
+      BOOST_CHECK( itr->seized );
+      seized += itr->bond_amount;
+      const vesting_balance_object* vesting = db.find( itr->vesting_balance );
+      BOOST_REQUIRE( vesting != nullptr );
+      BOOST_CHECK( vesting->balance.amount == H2J_VAULT_RAW - share_type( 849860000 ) );
+   }
+   BOOST_CHECK( seized == H2J_VAULT_RAW );
 } FC_LOG_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -754,8 +754,10 @@ void process_expired_h2_challenges( database& d )
       // challenger; the pool slice accrues to the vault's forfeit pool; the
       // burn leaves supply. The vault still freezes fail-closed and still
       // resolves through vault_resolve's exit path: an expired challenge
-      // requires the vault to fail maintenance or be provably drained (a
-      // healthy vault with live claims stays frozen).
+      // executes into the same exit-only wind-down as a sustained one. The
+      // seat bound keeps that path from taking more than the filed exit
+      // formula can pay, and a healthy vault with live claims freezes until
+      // its challenge resolves.
       share_type burn, pool, finder;
       h2_split_forfeit( itr->challenge_bond, itr->challenge_bond_usd_cents,
                         burn, pool, finder );

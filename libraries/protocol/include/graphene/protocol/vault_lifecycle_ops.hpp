@@ -105,7 +105,9 @@ namespace graphene { namespace protocol {
     * Lifts the encumbrance only: funds stay in the vesting balance under normal
     * vesting rules. Seized bonds never release. This is the old-set exit of the
     * rotate lifecycle and the healthy-vault exit path; distressed exits go
-    * through wind-down claims, never here.
+    * through wind-down claims, never here. A wind-down whose seat bound left a
+    * bond unseized needs no release path: that bond's funds are already the
+    * owner's and the CDD withdrawal schedule governs them.
     */
    struct vault_bond_release_operation : public base_operation
    {
@@ -128,14 +130,16 @@ namespace graphene { namespace protocol {
      * member. The challenge must be in a terminal guilty-or-inconclusive
      * state — SUSTAINED (the vote proved the supermajority) or
      * EXPIRED_FROZEN (the window closed with no supermajority, which can be
-     * cartel-abstention, so it is never exoneration); an EXPIRED_FROZEN
-     * resolution additionally requires that the vault fail maintenance or be
-     * provably drained at resolve time — a healthy vault with live claims
-     * stays frozen (claim-bounded seating is a filed design). Both execute
-     * into the same exit-only wind-down: the vault's bonds segregate into a
+     * cartel-abstention, so it is never exoneration). Both execute into the
+     * same exit-only wind-down: the vault's bonds segregate into a
      * wind-down vault that only ever pays from that slice — never another
      * vault's bonds, never the issuance reserve — and the vault never
-     * returns to operation except through fresh re-registration.
+     * returns to operation except through fresh re-registration. The seat
+     * is bounded by what the filed exit formula can pay, so the wind-down
+     * can never take more than the claimants are owed; the surplus stays
+     * with its owner. A bound vault with claims present needs a live
+     * bonded price to seat: a dead price refuses the resolve and it is
+     * retried when the price lives.
      */
    struct vault_resolve_operation : public base_operation
    {

@@ -25,6 +25,7 @@
 #include <graphene/chain/evaluator.hpp>
 
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
+#include <graphene/protocol/oracle.hpp>
 
 namespace graphene { namespace chain {
 
@@ -64,6 +65,10 @@ namespace graphene { namespace chain {
          object_id_type do_apply( const vault_resolve_operation& op );
 
          const vault_challenge_object* _challenge = nullptr;
+         /// Seat price fixed at evaluate time (design 3): the wind-down seat
+         /// converts the frozen claim book through the bonded price, so the
+         /// price that admitted the resolve is the price the seat uses.
+         optional<protocol::oracle_value> _seat_price;
    };
 
    class pair_freeze_evaluator : public evaluator<pair_freeze_evaluator>
@@ -100,17 +105,26 @@ namespace graphene { namespace chain {
    };
 
     /**
-     * Segregates a vault's unseized bonds into a new wind-down object: marks
-     * each bond seized, debits its vesting balance (saturating at the vested
-     * balance, so a partially-drawn vesting seizes only what is there), and
-     * books the debited sum as segregated_bond with total_claims set to the
-     * vault's outstanding at freeze. Shared by the 150% maintenance hook and
-     * vault_resolve (sustained OR expired-frozen challenge execution, R5C
-     * fail-closed split): one rulebook, all paths. Supply-neutral by
-     * construction (every vesting debit is booked into the wind-down
-     * remainder the audit counts as escrowed).
+     * Creates a vault's wind-down book: seats the reserve's backing first and
+     * the vault's unseized bonds second, both capped at the seat bound (the
+     * most the filed exit formula can ever pay), marks each visited bond
+     * seized, debits its vesting balance (saturating at the vested balance,
+     * so a partially-drawn vesting seizes only what is there), and books the
+     * debited sum as segregated_bond with total_claims set to the vault's
+     * outstanding after the exit-queue refunds. Shared by the 150%
+     * maintenance hook and vault_resolve (sustained OR expired-frozen
+     * challenge execution, R5C fail-closed split): one rulebook, all paths.
+     * Supply-neutral by construction (every vesting debit is booked into the
+     * wind-down remainder the audit counts as escrowed).
+     *
+     * `seat_price` is the bonded price the seat bound converts through, fixed
+     * at admission so the checked economics and the seated economics cannot
+     * diverge. A bound vault with claims present is admitted only with a
+     * live price, so an empty price here means a provably claim-free book
+     * (seat 0).
      */
-   const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault );
+   const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault,
+                                                 const optional<protocol::oracle_value>& seat_price );
 
    /**
     * Coverage predicate (declared integer math, no floats): healthy while

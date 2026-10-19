@@ -1021,11 +1021,25 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first,
    BOOST_CHECK( db.get_balance( alice_id, d.fxr ).amount == share_type( 100000000000LL ) );
 
    // Breach (1.34e12/9.5e11 = 141% < 150%) -> top-up -> wind-down. The price
-   // ages past its 24h lifetime on the way, so republish fresh before claiming.
+   // ages past its 24h lifetime on the way, so republish fresh before the
+   // wind-down sweep (the seat needs a live price) and again at (1,1) before
+   // claiming, where the claim-time conversion is what the haircut leg uses.
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
-   generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+   // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+   // book through the bonded price, so the sweep that expires the top-up
+   // window needs a live price; with a dead price it defers the wind-down
+   // to the next sweep instead of seating a half-empty book. Land just
+   // before that sweep, republish there (the price is live for one print
+   // lifetime), then cross it.
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < d.vault( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2i_publish( *this, d.oracle, bob_id, bob_private_key, H2I_BASE, H2I_QUOTE );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
    h2i_publish( *this, d.oracle, bob_id, bob_private_key, 1, 1 );
@@ -1417,7 +1431,19 @@ BOOST_AUTO_TEST_CASE( winddown_sweeps_reserve_backing_and_refunds_queue )
    generate_blocks( seal_time + print_lifetime + 600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
-   generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+   // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+   // book through the bonded price, so the sweep that expires the top-up
+   // window needs a live price; with a dead price it defers the wind-down
+   // to the next sweep instead of seating a half-empty book. Land just
+   // before that sweep, republish there (the price is live for one print
+   // lifetime), then cross it.
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < d.vault( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2i_publish( *this, d.oracle, bob_id, bob_private_key, H2I_BASE, H2I_QUOTE );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE_EQUAL( d.vault( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
 
@@ -1427,8 +1453,13 @@ BOOST_AUTO_TEST_CASE( winddown_sweeps_reserve_backing_and_refunds_queue )
    const winddown_vault_id_type wdid {
       db.get_index_type<winddown_vault_index>().indices().begin()->id };
     BOOST_CHECK( wdid( db ).total_claims == share_type( 10000000200LL ) );
-   BOOST_CHECK( wdid( db ).segregated_bond
-                == H2I_VAULT_RAW + share_type( 700000 ) );
+   // Design 3: the seat is bounded by what the filed exit formula can ever
+   // pay. claims 10000000200 face -> 85% scratch 8500000170 face -> converted
+   // at the bonded price (100 base / 1 quote) 850000017000 bond units. The
+   // reserve's 700000 BTS is swept first (the cheapest money for the frozen
+   // book) and the bond fills the rest (849999317000 of the 1.34e12 bond);
+   // the bond's unseized remainder stays with its owner.
+   BOOST_CHECK( wdid( db ).segregated_bond == share_type( 850000017000LL ) );
    BOOST_CHECK( db.get_balance( alice_id, d.pair ).amount == share_type( 1000 ) );
    const reserve_object* r = h2i_find_reserve( *this, d.pair );
    BOOST_REQUIRE( r != nullptr );

@@ -77,55 +77,53 @@ void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
 // Defends against: confiscation beyond the filed exit formula at zero-claims resolutions
 // (C1 design 2: a provably drained vault seats nothing - empty book, no reserve sweep,
 // no bond seizure), and against stranded bond stacks at sustained zero-claim resolves.
-const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault )
+const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault,
+                                                 const optional<protocol::oracle_value>& seat_price )
 {
-   // ISSUANCE-2 REVERT-vs-ABSORB (issuance pairs only; legacy pairs return
-   // inside with no state touched): unvested door outputs REVERT first so
-   // the outstanding snapshot below includes reverted face (reverted holders
-   // claim here), then the offset pool absorbs what it can of any residual
-   // shortfall. Runs before segregation: reverted face is holder property,
-   // never segregated bond.
+   // C1 design 3: claim-bounded seating. The wind-down seats only what the
+   // filed exit formula can ever pay (the seat bound); the surplus stays with
+   // its owner. Design 2's drained case is subsumed (need == 0 seats
+   // nothing). Defends against: confiscation beyond the filed exit formula,
+   // and stranded bond stacks at sustained zero-claim resolves.
    h2_issue_on_pair_halt( d, vault.vault_pair );
    share_type segregated( 0 );
+   share_type claims( 0 );
+   share_type need( 0 );
    // ISS-13 terminal disposition (issuance pairs only): the reserve's BTS
-   // backing follows the liability into the segregated remainder (holders'
-   // backstop), and the reserve extinguishes around a frozen liability
-   // record. Queued exits refund to face FIRST (the request-time burn
-   // reverses on all four mirrors) so the outstanding snapshot below lets
-   // queued holders claim in the wind-down like everyone else; without this
-   // their face would stay burned and unpaid (the post-wind-down maintenance
-   // sweep never settles). Offset pools are NOT swept: funded claims pay
-   // liquid even in wind-down.
-    if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
-    {
-       // PC-01 pilot ceiling: this refund RE-MINTS face with
-       // no door in front of it, so it must hold the same $20,000 face cap
-       // the mint doors enforce. `h2_issue_on_pair_halt` above has already
-       // applied (and capped) every halt revert for this pair, so this
-       // projects the NEXT restore only: current_supply plus the whole exit
-       // queue about to come back. Refuse fail-closed BEFORE the first
-       // refund: no partial refund, no silent clamp (a half-refunded queue
-       // would leave balances, book, bands, and the queue entry count
-       // disagreeing). Exact integer math, no price input; equality admits
-       // (inclusive cap), same as the doors. Unreachable by construction:
-       // the mint and issuer-direct doors count pending + queued restore
-       // face, which is exactly `current + restore` here -- so the
-       // maintenance sweep that enters through this function can never
-       // reject a block over it.
-       if( !r->exit_queue.empty() )
-       {
-          const asset_object& pair_asset = vault.vault_pair( d );
-          const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset.precision );
-          const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
-          const share_type projected = h2_issue_sat_add(
-                pair_dyn.current_supply, h2_issue_queued_restore_face( *r ) );
-          FC_ASSERT( projected <= pilot_cap,
-                     "Pilot ceiling: wind-down exit-queue refund would restore "
-                     "token supply ${s} past the $20,000 face pilot cap for "
-                     "this pair; scale-up needs a new binary",
-                     ("s", projected) );
-       }
-       for( const h2_exit_request& q : r->exit_queue )
+   // leg is swept into the book's segregated remainder (the offset pool is
+   // the book's backstop), and the reserve extinguishes around a frozen
+   // liability record. Queued exits refund to face FIRST (the request-time
+   // burn reverses on all four mirrors) so the outstanding snapshot below
+   // lets queued holders claim in the wind-down like everyone else.
+   if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
+   {
+      // PC-01 pilot ceiling: this refund RE-MINTS face with no door in
+      // front of it, so it must hold the same $20,000 face cap the mint
+      // doors enforce. `h2_issue_on_pair_halt` above has already applied
+      // (and capped) every halt revert for this pair, so this projects the
+      // NEXT restore only: current_supply plus the whole exit queue about
+      // to come back. Refuse fail-closed BEFORE the first refund: no
+      // partial refund, no silent clamp (a half-refunded queue would leave
+      // balances, book, bands, and the queue entry count disagreeing).
+      // Exact integer math, no price input; equality admits (inclusive
+      // cap), same as the doors. Unreachable by construction: the mint and
+      // issuer-direct doors count pending + queued restore face, which is
+      // exactly `current + restore` here -- so the maintenance sweep that
+      // enters through this function can never reject a block over it.
+      if( !r->exit_queue.empty() )
+      {
+         const asset_object& pair_asset = vault.vault_pair( d );
+         const share_type pilot_cap = h2_issue_pilot_cap_face( pair_asset.precision );
+         const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
+         const share_type projected = h2_issue_sat_add(
+               pair_dyn.current_supply, h2_issue_queued_restore_face( *r ) );
+         FC_ASSERT( projected <= pilot_cap,
+                    "Pilot ceiling: wind-down exit-queue refund would restore "
+                    "token supply ${s} past the $20,000 face pilot cap for "
+                    "this pair; scale-up needs a new binary",
+                    ("s", projected) );
+      }
+      for( const h2_exit_request& q : r->exit_queue )
       {
          d.adjust_balance( q.requester, asset( q.face, vault.vault_pair ) );
          const asset_object& pair_asset = vault.vault_pair( d );
@@ -139,53 +137,91 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
             h2_issue_ensure_bands( res.band_stable );
             res.band_stable[3] += q.face;
          } );
-         // NC-08: the refund restored a total with its band; assert both.
          h2_issue_verify_bands( *r );
       }
       if( !r->exit_queue.empty() )
          d.modify( *r, []( reserve_object& res ) { res.exit_queue.clear(); } );
-      // C1 design 2: at zero outstanding (provably drained) the
-      // reserve is NOT extinguished -- no bts_balance move, no band zeroing --
-      // so the empty book seats nothing and no funds move. Only the scalar
-      // housekeeping fields clear, as in every wind-down (a nonzero
-      // uncovered_shortfall would halt the next book's mint door). The exit
-      // queue refunds above already ran and can only have raised outstanding.
-      if( vault.outstanding > share_type( 0 ) )
+   }
+
+   // Claims snapshot AFTER the halt-revert and the exit-queue refunds, which
+   // can only have raised outstanding.
+   claims = vault.outstanding;
+
+   // The seat bound: the most the filed exit formula can ever pay out of
+   // this book. Every claim pays at most floor((10000 - haircut_bps) / 10000)
+   // of its face, those floors are subadditive, and the pro-rata leg sums to
+   // at most the segregated pool, so the lifetime disbursement can never
+   // exceed the bound. Seating more than the bound never reaches a
+   // claimant; it only strands.
+   // Invariant: segregated_bond <= seat bound.
+   if( claims > share_type( 0 ) )
+   {
+      const fc::uint128_t scratch = fc::uint128_t( uint64_t( claims.value ) )
+                                  * fc::uint128_t( uint64_t( 10000 - GRAPHENE_H2_WINDDOWN_HAIRCUT_BPS ) )
+                                  / fc::uint128_t( 10000 );
+      const share_type face_scratch = share_type( int64_t( uint64_t( scratch ) ) );
+      if( vault.bound_oracle.valid() )
       {
-         const share_type swept = r->bts_balance;
-         d.modify( *r, [&]( reserve_object& res ) {
-            h2_issue_ensure_bands( res.band_bts );
-            std::fill( res.band_bts.begin(), res.band_bts.end(), share_type( 0 ) );
-            res.bts_balance = share_type( 0 );
-            res.uncovered_shortfall = share_type( 0 );
-            res.last_ratio_bps = 0;
-            res.snapshot_block = d.head_block_num();
-         } );
-         // NC-08: extinction zeroes one leg of the partition; the other leg
-         // stays (frozen liability record), so both sums must still equal their
-         // totals after the sweep.
-         h2_issue_verify_bands( *r );
-         segregated += swept;
+         // Bound vault: the frozen claim book is denominated in face, so
+         // the seat is converted through the bonded price and then compared
+         // against bond-denominated balances (the reserve's BTS and the
+         // bonds' vesting balances). A dead price with claims present is
+         // refused at both admission paths, so an empty seat price here
+         // means a provably claim-free book: the seat stays 0.
+         if( seat_price.valid() && seat_price->base_amount > share_type( 0 )
+             && seat_price->quote_amount > share_type( 0 ) )
+            need = h2_convert_face_to_bond( face_scratch, *seat_price );
       }
       else
       {
+         // Unbound vault: the legacy same-asset book, seated in the claim's
+         // own units (mirrors the payout_for haircut leg).
+         need = face_scratch;
+      }
+   }
+
+   // Reserve leg, capped and first: the reserve's own backing is the
+   // cheapest money for the frozen book, so it moves first and only up to
+   // the seat bound.
+   // Invariant: the band partition still sums to the balance after the
+   // sweep (NC-08).
+   if( const reserve_object* r = h2_find_reserve( d, vault.vault_pair ) )
+   {
+      const share_type swept = ( need < r->bts_balance ) ? need : r->bts_balance;
+      if( swept > share_type( 0 ) )
+      {
          d.modify( *r, [&]( reserve_object& res ) {
+            h2_issue_ensure_bands( res.band_bts );
+            h2_issue_bands_spend( res.band_bts, swept );
+            res.bts_balance -= swept;
             res.uncovered_shortfall = share_type( 0 );
             res.last_ratio_bps = 0;
             res.snapshot_block = d.head_block_num();
          } );
+         h2_issue_verify_bands( *r );
+         segregated += swept;
+         need -= swept;
+      }
+      else
+      {
+         d.modify( *r, []( reserve_object& res ) {
+            res.uncovered_shortfall = share_type( 0 );
+            res.last_ratio_bps = 0;
+         } );
       }
    }
-   // C1 design 2: at zero claims (provably drained) no bond is
-   // seized -- the stack stays unseized and releasable, and the book is
-   // created empty. Only claims > 0 runs the seizure loop. The claims snapshot
-   // is taken AFTER the halt-revert and exit-queue refunds above, which can
-   // only have raised outstanding, so a zero here is stable.
-   if( vault.outstanding > share_type( 0 ) )
+
+   // Bond leg: capped seizure -- iterate the unseized bonds and take
+   // min(vesting available, bond amount, seat bound still open) until the
+   // bound is met. A bond the bound never reaches stays unseized with its
+   // vesting balance untouched, so the surplus stays with its owner under the
+   // CDD withdrawal schedule. A visited bond is marked seized even when its
+   // vesting holds less than its face (the saturating legacy semantics).
+   if( need > share_type( 0 ) )
    {
       const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
       const auto range = bond_idx.equal_range( vault_id_type( vault.id ) );
-      for( auto itr = range.first; itr != range.second; ++itr )
+      for( auto itr = range.first; itr != range.second && need > share_type( 0 ); ++itr )
       {
          if( itr->seized )
             continue;
@@ -193,12 +229,16 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
          const vesting_balance_object* vesting = d.find( itr->vesting_balance );
          if( vesting != nullptr && vesting->balance.amount > share_type( 0 ) )
          {
-            // Saturating seizure: a partially-drawn vesting yields only what is
-            // there, never a negative balance. Vesting objects are supply-visible,
-            // so every debit here is booked into the wind-down remainder below.
+            // Saturating seizure: a partially-drawn vesting yields only what
+            // is there, never a negative balance. Vesting objects are
+            // supply-visible, so every debit here is booked into the
+            // wind-down remainder below.
             const int64_t avail = vesting->balance.amount.value;
             const int64_t want = itr->bond_amount.value;
-            debit = share_type( std::min( avail, want ) );
+            int64_t take = std::min( avail, want );
+            if( take > need.value )
+               take = need.value;
+            debit = share_type( take > 0 ? take : 0 );
             if( debit > share_type( 0 ) )
                d.modify( *vesting, [&debit]( vesting_balance_object& v ) {
                   v.balance.amount -= debit;
@@ -206,9 +246,10 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
          }
          d.modify( *itr, []( vault_bond_object& b ) { b.seized = true; } );
          segregated += debit;
+         need -= debit;
       }
    }
-   const share_type claims = vault.outstanding;
+
    const auto& wd = d.create<winddown_vault_object>(
          [&vault, &segregated, &claims]( winddown_vault_object& w ) {
       w.pair            = vault.vault_pair;
@@ -227,6 +268,23 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
       v.frozen = true; // failed closed: mints halt, wind-down claims continue
    } );
    return wd;
+}
+
+// Design 3 section 3.2 (price leg): the wind-down seat converts the frozen
+// claim book through the bonded price, so a bound vault needs a live price
+// exactly when its claims snapshot can be nonzero. The two apply-side
+// restorers (the halt transition's door-output reverts and the exit-queue
+// refunds) are the only paths that can raise outstanding after admission,
+// so the predicate closes over both.
+static bool h2_winddown_claims_present( const database& d, const vault_object& vault )
+{
+   if( vault.outstanding > share_type( 0 ) )
+      return true;
+   const reserve_object* r = h2_find_reserve( d, vault.vault_pair );
+   if( r == nullptr )
+      return false;
+   return ( h2_issue_pending_restore_face( d, *r, d.head_block_time() ) > share_type( 0 ) )
+       || ( h2_issue_queued_restore_face( *r ) > share_type( 0 ) );
 }
 
 // Maintenance holds while outstanding is zero; a dual-stale price leg refuses resolution when claims are present (fail-closed).
@@ -326,7 +384,22 @@ void process_h2_vault_maintenance( database& d )
              } );
          }
          else if( now >= itr->top_up_deadline )
-            h2_create_winddown( d, *itr );
+         {
+            // Design 3 section 3.2: the seat converts the frozen claim book
+            // through the bonded price, so a bound vault with claims present
+            // needs a live price. With a dead price this block is skipped and
+            // retried at the next sweep: the breach-time halt transition
+            // already ran, so nothing is missed, and no partial state is
+            // written.
+            const auto seat_price = h2_read_pair_price( d, *itr, 0, now );
+            const bool seat_price_ok = !itr->bound_oracle.valid()
+                                       || !h2_winddown_claims_present( d, *itr )
+                                       || ( seat_price.valid()
+                                            && seat_price->base_amount > share_type( 0 )
+                                            && seat_price->quote_amount > share_type( 0 ) );
+            if( seat_price_ok )
+               h2_create_winddown( d, *itr, seat_price );
+         }
          continue;
       }
       if( !meets )
@@ -451,8 +524,8 @@ void_result vault_bond_release_evaluator::do_apply( const vault_bond_release_ope
 // Spec: docs/superpowers/specs/2026-10-17-expired-exit-drained-design.md §1.1
 //       docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §3.1
 // Defends against: nil-merit challenge seizing a healthy vault's bond stack
-// (R17-C); and the C1 exit re-brick (drained vaults admit; holdouts refused
-// until design 3).
+// (R17-C, closed by design 3's claim-bounded seating); and the C1 exit
+// re-brick (drained vaults admit; holdouts now settle under the bound too).
 void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation& op )
 { try {
    database& d = db();
@@ -466,10 +539,12 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
     FC_ASSERT( nullptr != _challenge, "Challenge ${c} does not exist", ("c", op.challenge) );
     // Fail-closed split (R5C expired-resolve-to-winddown): SUSTAINED and
     // EXPIRED_FROZEN both execute into the same wind-down path below
-    // (exit-only: segregated bond, seniors first, rmax cap, haircut math);
-    // the expired path additionally requires the vault to fail maintenance
-    // or be provably drained at resolve time (R17-C + C1 design 2, gated
-    // below — a healthy vault with live claims stays frozen).
+    // (exit-only: segregated bond, seniors first, rmax cap, haircut math).
+    // C1 design 3 supersedes the R17-C admission condition: the expired
+    // path no longer requires the vault to fail maintenance or to be
+    // drained, so EXPIRED_FROZEN admits unconditionally again (R5C
+    // semantics). The seat bound is what makes that safe: a resolve can
+    // never move more than the filed exit formula can pay.
     // Expiry is inconclusive — no 48h supermajority was reached — and expiry
     // can be cartel-abstention (withholding votes past the deadline vetoes
     // sustain at the 5000bps quorum gate), so expiry must NEVER equal
@@ -511,26 +586,23 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    FC_ASSERT( nullptr != vault, "Challenged vault no longer exists" );
    FC_ASSERT( vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
               "Vault is already wound down; no second wind-down" );
-   // R17-C + C1 design 2: expiry is INCONCLUSIVE, not
-   // guilty. An EXPIRED_FROZEN wind-down runs only when the vault genuinely
-   // fails maintenance at resolve time, OR when it is provably drained (no
-   // outstanding face and no restorable face from the halt-revert or
-   // exit-queue paths): then there is nothing left to protect and the pair
-   // must be recoverable. Sustained challenges keep the seizure (the vote is
-   // the merit finding there).
-   if( _challenge->state == GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN )
+   // C1 design 3: R17-C admission reverted -- EXPIRED_FROZEN admits
+   // unconditionally (R5C semantics). Bounded seating (seat_bound) makes it
+   // safe: a resolve can never move more than the exit formula pays.
+   // Price gate (design 3 section 3.2): a bound vault with claims needs a
+   // live price to seat. Fail closed when the price is dead and claims are
+   // present; claim-free (drained) vaults settle price-free.
+   _seat_price = optional<protocol::oracle_value>();
+   if( vault->bound_oracle.valid() && h2_winddown_claims_present( d, *vault ) )
    {
-      const reserve_object* r = h2_find_reserve( d, vault->vault_pair );
-      const share_type restorable = ( r == nullptr ) ? share_type( 0 )
-         : h2_issue_sat_add(
-              h2_issue_pending_restore_face( d, *r, d.head_block_time() ),
-              h2_issue_queued_restore_face( *r ) );
-      const bool provably_drained =
-         vault->outstanding <= share_type( 0 ) && restorable == share_type( 0 );
-      if( !provably_drained )
-         FC_ASSERT( !h2_vault_meets_maintenance( d, *vault ),
-                    "Expired challenge cannot wind down a vault that still "
-                    "meets maintenance; resolve refused without coverage breach" );
+      const auto price = h2_read_pair_price( d, *vault, 0, d.head_block_time() );
+      FC_ASSERT( price.valid() && price->base_amount > share_type( 0 )
+                 && price->quote_amount > share_type( 0 ),
+                 "Conversion-dependent settlement halted: no live price "
+                 "for bound vault with claims" );
+      // The price that admitted the resolve is the price the seat uses, so
+      // the checked economics and the seated economics cannot diverge.
+      _seat_price = price;
    }
 
    return void_result();
@@ -540,7 +612,7 @@ object_id_type vault_resolve_evaluator::do_apply( const vault_resolve_operation&
 { try {
    database& d = db();
    const vault_object& vault = _challenge->vault(d);
-   const winddown_vault_object& wd = h2_create_winddown( d, vault );
+   const winddown_vault_object& wd = h2_create_winddown( d, vault, _seat_price );
    d.modify( *_challenge, []( vault_challenge_object& c ) { c.executed = true; } );
    return object_id_type( wd.id );
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE

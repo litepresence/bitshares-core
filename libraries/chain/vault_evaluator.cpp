@@ -48,10 +48,12 @@ namespace {
 /// of the frozen-liability book has been claimed. Two equivalent readings,
 /// both admission-grade: the wind-down reached COMPLETE (segregated bond
 /// exhausted exactly; fires when the full claim face pays out the whole
-/// seized slice), or claimed_total caught total_claims (COMPLETE can lag by
-/// truncation dust on the payout floor, and a fully-backed book never
-/// exhausts its segregated slice at all — the haircut remainder is
-/// protocol-retained — so COMPLETE alone would re-bar those pairs forever).
+/// seized slice), or claimed_total caught total_claims. A same-asset book
+/// exhausts its slice exactly, modulo the truncation dust on the payout
+/// floor; a bound book may retain drift, because the seat holds only what
+/// the filed exit formula can pay and the haircut remainder is
+/// protocol-retained. COMPLETE alone would re-bar those pairs forever, so
+/// the claim-side reading carries them.
 /// A vault in wind-down always has exactly one winddown_vault_object (no
 /// second wind-down: resolve and the maintenance sweep both refuse).
 bool h2_winddown_book_settled( const database& d, vault_id_type vault )

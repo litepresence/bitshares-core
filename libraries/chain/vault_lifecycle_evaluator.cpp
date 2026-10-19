@@ -141,44 +141,69 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
       }
       if( !r->exit_queue.empty() )
          d.modify( *r, []( reserve_object& res ) { res.exit_queue.clear(); } );
-      const share_type swept = r->bts_balance;
-      d.modify( *r, [&]( reserve_object& res ) {
-         h2_issue_ensure_bands( res.band_bts );
-         std::fill( res.band_bts.begin(), res.band_bts.end(), share_type( 0 ) );
-         res.bts_balance = share_type( 0 );
-         res.uncovered_shortfall = share_type( 0 );
-         res.last_ratio_bps = 0;
-         res.snapshot_block = d.head_block_num();
-      } );
-      // NC-08: extinction zeroes one leg of the partition; the other leg
-      // stays (frozen liability record), so both sums must still equal their
-      // totals after the sweep.
-      h2_issue_verify_bands( *r );
-      segregated += swept;
-   }
-   const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
-   const auto range = bond_idx.equal_range( vault_id_type( vault.id ) );
-   for( auto itr = range.first; itr != range.second; ++itr )
-   {
-      if( itr->seized )
-         continue;
-      share_type debit( 0 );
-      const vesting_balance_object* vesting = d.find( itr->vesting_balance );
-      if( vesting != nullptr && vesting->balance.amount > share_type( 0 ) )
+      // C1 design 2 (round-19): at zero outstanding (provably drained) the
+      // reserve is NOT extinguished -- no bts_balance move, no band zeroing --
+      // so the empty book seats nothing and no funds move. Only the scalar
+      // housekeeping fields clear, as in every wind-down (a nonzero
+      // uncovered_shortfall would halt the next book's mint door). The exit
+      // queue refunds above already ran and can only have raised outstanding.
+      if( vault.outstanding > share_type( 0 ) )
       {
-         // Saturating seizure: a partially-drawn vesting yields only what is
-         // there, never a negative balance. Vesting objects are supply-visible,
-         // so every debit here is booked into the wind-down remainder below.
-         const int64_t avail = vesting->balance.amount.value;
-         const int64_t want = itr->bond_amount.value;
-         debit = share_type( std::min( avail, want ) );
-         if( debit > share_type( 0 ) )
-            d.modify( *vesting, [&debit]( vesting_balance_object& v ) {
-               v.balance.amount -= debit;
-            } );
+         const share_type swept = r->bts_balance;
+         d.modify( *r, [&]( reserve_object& res ) {
+            h2_issue_ensure_bands( res.band_bts );
+            std::fill( res.band_bts.begin(), res.band_bts.end(), share_type( 0 ) );
+            res.bts_balance = share_type( 0 );
+            res.uncovered_shortfall = share_type( 0 );
+            res.last_ratio_bps = 0;
+            res.snapshot_block = d.head_block_num();
+         } );
+         // NC-08: extinction zeroes one leg of the partition; the other leg
+         // stays (frozen liability record), so both sums must still equal their
+         // totals after the sweep.
+         h2_issue_verify_bands( *r );
+         segregated += swept;
       }
-      d.modify( *itr, []( vault_bond_object& b ) { b.seized = true; } );
-      segregated += debit;
+      else
+      {
+         d.modify( *r, [&]( reserve_object& res ) {
+            res.uncovered_shortfall = share_type( 0 );
+            res.last_ratio_bps = 0;
+            res.snapshot_block = d.head_block_num();
+         } );
+      }
+   }
+   // C1 design 2 (round-19): at zero claims (provably drained) no bond is
+   // seized -- the stack stays unseized and releasable, and the book is
+   // created empty. Only claims > 0 runs the seizure loop. The claims snapshot
+   // is taken AFTER the halt-revert and exit-queue refunds above, which can
+   // only have raised outstanding, so a zero here is stable.
+   if( vault.outstanding > share_type( 0 ) )
+   {
+      const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
+      const auto range = bond_idx.equal_range( vault_id_type( vault.id ) );
+      for( auto itr = range.first; itr != range.second; ++itr )
+      {
+         if( itr->seized )
+            continue;
+         share_type debit( 0 );
+         const vesting_balance_object* vesting = d.find( itr->vesting_balance );
+         if( vesting != nullptr && vesting->balance.amount > share_type( 0 ) )
+         {
+            // Saturating seizure: a partially-drawn vesting yields only what is
+            // there, never a negative balance. Vesting objects are supply-visible,
+            // so every debit here is booked into the wind-down remainder below.
+            const int64_t avail = vesting->balance.amount.value;
+            const int64_t want = itr->bond_amount.value;
+            debit = share_type( std::min( avail, want ) );
+            if( debit > share_type( 0 ) )
+               d.modify( *vesting, [&debit]( vesting_balance_object& v ) {
+                  v.balance.amount -= debit;
+               } );
+         }
+         d.modify( *itr, []( vault_bond_object& b ) { b.seized = true; } );
+         segregated += debit;
+      }
    }
    const share_type claims = vault.outstanding;
    const auto& wd = d.create<winddown_vault_object>(
@@ -474,16 +499,26 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    FC_ASSERT( nullptr != vault, "Challenged vault no longer exists" );
    FC_ASSERT( vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
               "Vault is already wound down; no second wind-down" );
-   // R17-C (round-17): expiry is INCONCLUSIVE, not guilty. A nil-merit
-   // challenge must never move a healthy vault's entire bond stack: execute
-   // an EXPIRED_FROZEN wind-down only when the vault genuinely fails
-   // maintenance at resolve time. Sustained challenges keep the seizure
-   // (the vote is the merit finding there).
+   // R17-C (round-17) + C1 design 2 (round-19): expiry is INCONCLUSIVE, not
+   // guilty. An EXPIRED_FROZEN wind-down runs only when the vault genuinely
+   // fails maintenance at resolve time, OR when it is provably drained (no
+   // outstanding face and no restorable face from the halt-revert or
+   // exit-queue paths): then there is nothing left to protect and the pair
+   // must be recoverable. Sustained challenges keep the seizure (the vote is
+   // the merit finding there).
    if( _challenge->state == GRAPHENE_H2_CHALLENGE_EXPIRED_FROZEN )
    {
-      FC_ASSERT( !h2_vault_meets_maintenance( d, *vault ),
-                 "Expired challenge cannot wind down a vault that still "
-                 "meets maintenance; resolve refused without coverage breach" );
+      const reserve_object* r = h2_find_reserve( d, vault->vault_pair );
+      const share_type restorable = ( r == nullptr ) ? share_type( 0 )
+         : h2_issue_sat_add(
+              h2_issue_pending_restore_face( d, *r, d.head_block_time() ),
+              h2_issue_queued_restore_face( *r ) );
+      const bool provably_drained =
+         vault->outstanding <= share_type( 0 ) && restorable == share_type( 0 );
+      if( !provably_drained )
+         FC_ASSERT( !h2_vault_meets_maintenance( d, *vault ),
+                    "Expired challenge cannot wind down a vault that still "
+                    "meets maintenance; resolve refused without coverage breach" );
    }
 
    return void_result();

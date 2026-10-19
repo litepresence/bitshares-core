@@ -1402,7 +1402,10 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
    const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
    BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
    BOOST_CHECK( wd_idx.begin()->source_vault == vid );
-   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW );
+   // C1 design 2 (round-19): zero-claims (this vault never minted) seats
+   // nothing; the bond stack stays unseized and releasable.
+   BOOST_CHECK( wd_idx.begin()->segregated_bond == share_type( 0 ) );
+   BOOST_CHECK( wd_idx.begin()->total_claims == share_type( 0 ) );
    BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
    // Resolving twice is refused (challenge already executed).
    signed_transaction tx2; tx2.operations.push_back( op );
@@ -1411,6 +1414,47 @@ BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown )
    tx2.sign( alice_private_key, db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( db, tx2 ), fc::exception );
    BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount >= share_type( 0 ) );
+} FC_LOG_AND_RETHROW() }
+
+// C1 design 2 (round-19): claims > 0 sustained resolve seats the bond stack
+// exactly as before (regression guard for the zero-claims branch).
+BOOST_AUTO_TEST_CASE( vault_resolve_executes_sustained_challenge_into_winddown_with_claims )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob)(carol) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+   fund( carol, asset( 30000000000000LL ) );
+   h2c_make_committee_member( *this, alice );
+
+   authority vault_auth( 1, alice_id, 1 );
+   const vault_id_type vid = h2c_register_vault_default( *this, alice_id, alice_private_key, vault_auth );
+   const auto vest = h2c_make_cdd_vesting( *this, alice_id, alice_private_key, H2C_VAULT_RAW );
+   h2c_lock_vault_bond( *this, alice_id, alice_private_key, vid, vest, H2C_VAULT_RAW, H2C_VAULT_USD_CENTS );
+   h2c_set_outstanding( *this, vid, H2C_VAULT_RAW );
+
+   const vault_challenge_id_type cid = h2c_post_challenge(
+         *this, bob_id, bob_private_key, vid, h2c_evidence( "real-theft" ) );
+   h2c_sustain_from_genesis( *this, object_id_type( cid ) );
+   BOOST_REQUIRE_EQUAL( cid( db ).state, GRAPHENE_H2_CHALLENGE_SUSTAINED );
+
+   vault_resolve_operation op;
+   op.resolver  = alice_id;
+   op.challenge = cid;
+   signed_transaction tx; tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx );
+   tx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, tx );
+
+   const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices();
+   BOOST_REQUIRE_EQUAL( wd_idx.size(), 1u );
+   BOOST_CHECK( wd_idx.begin()->source_vault == vid );
+   BOOST_CHECK( wd_idx.begin()->segregated_bond == H2C_VAULT_RAW );
+   BOOST_CHECK( wd_idx.begin()->total_claims == H2C_VAULT_RAW );
 } FC_LOG_AND_RETHROW() }
 
 /// Expired-resolve-to-winddown (R5C fail-closed split): an EXPIRED_FROZEN
@@ -2603,13 +2647,17 @@ BOOST_AUTO_TEST_CASE( r17c_expired_resolve_needs_coverage_breach_and_non_overlap
       try { PUSH_TX( db, rtx ); } catch( const fc::exception& e ) { return e.to_string(); }
       return string();
    }();
-   BOOST_CHECK_MESSAGE( !honest_err.empty(),
-         "R17C: expired-challenge wind-down ADMITTED on a healthy vault" );
-   BOOST_CHECK_MESSAGE( honest_err.find( "meets maintenance" ) != std::string::npos,
-         "R17C: resolve refused but not for the coverage predicate: "
+   // C1 design 2 (round-19): a provably drained vault (zero outstanding, no
+   // restorable face) now admits the resolve into an empty book. This vault
+   // never minted, so it is drained; the holdout refusal lives in
+   // r19c_healthy_holdout_still_refused.
+   BOOST_CHECK_MESSAGE( honest_err.empty(),
+         "R17C: expired-challenge wind-down REFUSED on a drained vault: "
          << honest_err );
-   BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().empty() );
-   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_HEALTHY );
+   BOOST_CHECK_EQUAL( db.get_index_type<winddown_vault_index>().indices().size(), 1u );
+   BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().begin()->segregated_bond
+                == share_type( 0 ) );
+   BOOST_CHECK_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
 } FC_LOG_AND_RETHROW() }
 
 /// R18-H2-04 (round-18): pin the R17-C resolver self-deal bans on this leg.

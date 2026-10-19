@@ -2651,7 +2651,7 @@ BOOST_AUTO_TEST_CASE( r17c_expired_resolve_needs_coverage_breach_and_non_overlap
    // restorable face) now admits the resolve into an empty book. This vault
    // never minted, so it is drained; the holdout refusal (outstanding > 0,
    // meets maintenance) has no test vector yet - open item in
-   // docs/superpowers/specs/2026-10-17-expired-exit-drained-design.md §6.
+   // docs/superpowers/specs/2026-10-17-expired-exit-drained-design.md §9.
    BOOST_CHECK_MESSAGE( honest_err.empty(),
          "R17C: expired-challenge wind-down REFUSED on a drained vault: "
          << honest_err );

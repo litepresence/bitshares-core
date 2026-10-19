@@ -115,7 +115,7 @@ void oracle_object::update_current_value( time_point_sec now, uint32_t delay_sec
    };
    vector<live_submission> live;
    live.reserve( submissions.size() );
-   // H1-FINAL-01 (round-16): prune rows for producers no longer in the set,
+   // H1-FINAL-01: prune rows for producers no longer in the set,
    // mirroring the reputation prune below. Without this, rotation churn grew
    // the map without bound: the aggregation loop only SKIPS stale rows, so
    // every owner rotation left its producers' rows behind forever and
@@ -154,8 +154,8 @@ void oracle_object::update_current_value( time_point_sec now, uint32_t delay_sec
       current_value.reset();
       current_value_producer_count = 0;
       // Quorum loss clears what is about to be consumed; the raw aggregate is
-      // absent and nothing is left ripening in the delay queue. (H1-FINAL-02,
-      // round-16: the rate limiter's baseline (consumed_value, now never
+      // absent and nothing is left ripening in the delay queue. (H1-FINAL-02:
+      // the rate limiter's baseline (consumed_value, now never
       // destroyed; the last_good pair below survives it too) must stay standing
       // so the re-entry promotion stays move-checked. Destroying the baseline
       // here let the oracle owner paste an arbitrary-size price step in one
@@ -358,7 +358,7 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    // Kept defensive anyway -- a guard must never invent a price.
    if( !current_value.valid() )
    {
-      // (H1-FINAL-02, round-16): a transient bare-queue state must not destroy
+      // (H1-FINAL-02): a transient bare-queue state must not destroy
       // the rate limiter's baseline; the delay queue is cleared, the baseline
       // stays, and the last_good pair below carries the reference anyway.
       pending_queue.clear();
@@ -373,7 +373,7 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
    // spans the delay whatever the publish rate; the newest bucket refreshes its value
    // in place, keeping its timestamp (or the bucket would never close -- the same
    // argument as the history ring above).
-   // R17G (round-17, PS-R17-01): the divisor is (MAX_PENDING-1), not
+   // R17G (PS-R17-01): the divisor is (MAX_PENDING-1), not
    // MAX_PENDING. With delay/MAX_PENDING buckets the 17th arrival clipped the
    // oldest entry at exactly its ripening age -- the capacity trim runs BEFORE
    // the ripen scan below, so the just-ripe entry was erased before any scan
@@ -439,7 +439,7 @@ void oracle_object::update_guarded_value( time_point_sec now, uint32_t delay_sec
 
    // Rate limit: if ANY series moved beyond the bound, the whole promotion holds.
    // Holding the whole vector (never per-series) keeps bid <= ask true by construction.
-   // H1-FINAL-02 (round-16): compare against the never-destroyed baseline.
+   // H1-FINAL-02: compare against the never-destroyed baseline.
    // consumed_value is no longer reset by any transient path (the quorum-loss
    // and defensive clears above were removed), so it normally equals
    // last_good_value; the pair keeps the guard sound even if a future reset

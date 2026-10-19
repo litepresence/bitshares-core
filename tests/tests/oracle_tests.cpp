@@ -549,7 +549,7 @@ BOOST_AUTO_TEST_CASE( a_stale_submission_stops_counting )
    BOOST_CHECK( oid(db).current_value->at( 0 ) == val( 100 ) );
 } FC_LOG_AND_RETHROW() }
 
-/// H1-FINAL-02 (round-16; RED first at the pre-fix tree): a transient quorum
+/// H1-FINAL-02 (RED first at the pre-fix tree): a transient quorum
 /// gap must not destroy the rate limiter's baseline. Pre-fix the quorum-loss
 /// branch reset consumed_value, so the owner could paste an arbitrary-size
 /// price step in one promotion: rotate the producers away (baseline wiped),
@@ -608,7 +608,7 @@ BOOST_AUTO_TEST_CASE( r32_quorum_gap_keeps_consumed_baseline )
    BOOST_CHECK( oid(db).last_good_time.valid() );
 } FC_LOG_AND_RETHROW() }
 
-/// H1-FINAL-01 (round-16; RED first at the pre-fix tree): submissions is
+/// H1-FINAL-01 (RED first at the pre-fix tree): submissions is
 /// pruned to the current producer set. Pre-fix the aggregation only SKIPPED
 /// rows for removed producers (it never erased them), so owner rotation left
 /// every removed producer's row behind forever and per-publish work grew
@@ -3605,7 +3605,7 @@ BOOST_AUTO_TEST_CASE( t8e_legacy_feed_path_is_untouched )
                 == GRAPHENE_DEFAULT_MAINTENANCE_COLLATERAL_RATIO );
 } FC_LOG_AND_RETHROW() }
 
-/// V-02 (audit-round-2): bounded oracle state has attack-input coverage. The 65th
+/// V-02: bounded oracle state has attack-input coverage. The 65th
 /// subscriber bind is refused (asset_evaluator.cpp:914); the delay queue needs no
 /// refusal path by design — it self-trims to GRAPHENE_ORACLE_GUARD_MAX_PENDING
 /// with time-bucketed sampling — so the test pins the bound instead.

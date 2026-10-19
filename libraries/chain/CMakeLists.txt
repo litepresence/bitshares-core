@@ -89,7 +89,7 @@ target_link_libraries( graphene_chain graphene_db graphene_protocol fc )
 target_include_directories( graphene_chain
                             PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/include" )
 
-# S-02 (audit-round-3): G1 vendored proofs under stealth/vendor/ are
+# S-02 (vendored-proof isolation): G1 vendored proofs under stealth/vendor/ are
 # REFERENCE ONLY (see stealth/vendor/README.md) — they must never compile
 # into consensus targets. Consensus sources here are an explicit list (no
 # file(GLOB) reaches stealth/vendor/), and this guard fails the configure

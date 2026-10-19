@@ -579,6 +579,8 @@ void h2_apply_dispute_resolution( database& d, const oracle_dispute_object& x,
 
 } // namespace
 
+// Defends against: chain-halt null deref on a correctly-typed id naming a
+// nonexistent vote target (R24-01 / H2-24-01, round-24).
 void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operation& op )
 { try {
    database& d = db();

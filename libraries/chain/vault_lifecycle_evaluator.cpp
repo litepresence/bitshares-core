@@ -74,6 +74,10 @@ void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
               "Band spend exceeds the partitioned total; conservation broken" );
 }
 
+// Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §2
+// Defends against: confiscation beyond the filed exit formula (seating capped at
+// seat_bound = min(reserve, need) + min(bonds, remainder); leftover bonds stay
+// unseized and releasable under CDD rules).
 const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault )
 {
    // ISSUANCE-2 REVERT-vs-ABSORB (issuance pairs only; legacy pairs return
@@ -226,6 +230,9 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
    return wd;
 }
 
+// Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §3.2
+// Defends against: dead-price settlement on bound vaults (refuses when claims
+// present and price is dual-stale; claim-free vaults settle price-free).
 bool h2_vault_meets_maintenance( database& d, const vault_object& vault )
 {
    if( vault.outstanding <= share_type( 0 ) )
@@ -444,6 +451,11 @@ void_result vault_bond_release_evaluator::do_apply( const vault_bond_release_ope
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
+// Spec: docs/superpowers/specs/2026-10-17-expired-exit-drained-design.md §1.1
+//       docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §3.1
+// Defends against: nil-merit challenge seizing a healthy vault's bond stack
+// (R17-C); and the C1 exit re-brick (drained vaults admit; holdouts refused
+// until design 3).
 void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation& op )
 { try {
    database& d = db();

@@ -2387,7 +2387,18 @@ BOOST_AUTO_TEST_CASE( pilot_ceiling_refuses_over_cap_winddown_refund )
    // entry that must refuse fail-closed: the refund would push cap + 200.
    bool refused = false;
    try {
-      generate_blocks( d.vault( db ).top_up_deadline + 2 * 86400 );
+      // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+      // book through the bonded price, so the sweep that expires the top-up
+      // window defers while the price is dead. Land just before that sweep,
+      // republish there (the price is live for one print lifetime), then
+      // cross it: the wind-down fires and the over-cap refund must refuse.
+      while( db.get_dynamic_global_properties().next_maintenance_time
+             < d.vault( db ).top_up_deadline )
+         generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+      h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
+      generate_block();
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    }
    catch ( const fc::exception& e )
    {
@@ -2931,8 +2942,8 @@ BOOST_AUTO_TEST_CASE( seat_bound_caps_seating_and_leaves_the_surplus_with_its_ow
    // price (100 base / 1 quote) 8.5e11 bond units.
    BOOST_CHECK( wdid( db ).total_claims == share_type( 10000000000LL ) );
    // The reserve's 140000 BTS is swept first (the cheapest money for the
-   // frozen book); the bond fills the rest (849860000 of 1.34e12).
-   BOOST_CHECK( wdid( db ).segregated_bond == share_type( 850000000LL ) );
+   // frozen book); the bond fills the rest (849999860000 of 1.34e12).
+   BOOST_CHECK( wdid( db ).segregated_bond == share_type( 850000000000LL ) );
    const reserve_object* r = h2j_find_reserve( *this, d.pair );
    BOOST_REQUIRE( r != nullptr );
    BOOST_CHECK( r->bts_balance == share_type( 0 ) );
@@ -2952,7 +2963,7 @@ BOOST_AUTO_TEST_CASE( seat_bound_caps_seating_and_leaves_the_surplus_with_its_ow
       seized += itr->bond_amount;
       const vesting_balance_object* vesting = db.find( itr->vesting_balance );
       BOOST_REQUIRE( vesting != nullptr );
-      BOOST_CHECK( vesting->balance.amount == H2J_VAULT_RAW - share_type( 849860000 ) );
+      BOOST_CHECK( vesting->balance.amount == H2J_VAULT_RAW - share_type( 849999860000LL ) );
    }
    BOOST_CHECK( seized == H2J_VAULT_RAW );
 } FC_LOG_AND_RETHROW() }

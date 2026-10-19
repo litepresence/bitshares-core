@@ -96,6 +96,7 @@ share_type h2_seasoning_vault_backing( const database& d, vault_id_type vid )
    // C1 design 3: a wind-down vault measures zero seasoning backing even
    // when it holds unseized leftover bonds (surplus stays with the owner
    // under CDD rules and must not count as coverage for the pair's record).
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md \u00a74
    const vault_object* vault = d.find( vid );
    if( vault != nullptr && vault->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN )
       return share_type( 0 );

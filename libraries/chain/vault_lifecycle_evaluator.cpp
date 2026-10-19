@@ -147,6 +147,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
    // can only have raised outstanding.
    claims = vault.outstanding;
 
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §1
    // The seat bound: the most the filed exit formula can ever pay out of
    // this book. Every claim pays at most floor((10000 - haircut_bps) / 10000)
    // of its face, those floors are subadditive, and the pro-rata leg sums to
@@ -180,6 +181,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
       }
    }
 
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §2
    // Reserve leg, capped and first: the reserve's own backing is the
    // cheapest money for the frozen book, so it moves first and only up to
    // the seat bound.
@@ -211,6 +213,7 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
       }
    }
 
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §2
    // Bond leg: capped seizure -- iterate the unseized bonds and take
    // min(vesting available, bond amount, seat bound still open) until the
    // bound is met. A bond the bound never reaches stays unseized with its
@@ -385,6 +388,7 @@ void process_h2_vault_maintenance( database& d )
          }
          else if( now >= itr->top_up_deadline )
          {
+            // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §3.2
             // Design 3 section 3.2: the seat converts the frozen claim book
             // through the bonded price, so a bound vault with claims present
             // needs a live price. With a dead price this block is skipped and
@@ -589,6 +593,7 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    // C1 design 3: R17-C admission reverted -- EXPIRED_FROZEN admits
    // unconditionally (R5C semantics). Bounded seating (seat_bound) makes it
    // safe: a resolve can never move more than the exit formula pays.
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md §3.2
    // Price gate (design 3 section 3.2): a bound vault with claims needs a
    // live price to seat. Fail closed when the price is dead and claims are
    // present; claim-free (drained) vaults settle price-free.

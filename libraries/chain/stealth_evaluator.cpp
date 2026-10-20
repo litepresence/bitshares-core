@@ -604,7 +604,8 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( o.fee.asset_id == o.asset_id, "Stealth transfer fee must be paid in the transferred asset" );
    FC_ASSERT( o.fee.amount >= 0 );
    FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
-              o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              o.proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+              o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
               "Unknown proof version" );
    // Per-output openings field gate (Decision 1): required for V3, empty for
    // V1/V2 (grandfathered).

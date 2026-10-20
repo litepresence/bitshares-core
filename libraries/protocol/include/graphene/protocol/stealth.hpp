@@ -432,11 +432,12 @@ struct stealth_transfer_operation : public base_operation
    vector<stealth_ring_input>     inputs;
    vector<stealth_blind_output>   outputs;
 
-   /// Per-output openings (appended-last). Empty for V1/V2; required (one per
-   /// output) for proof_version >= V3.
-   vector<blind_factor_type>      per_output_openings;
-
    extensions_type                extensions; ///< appended-last; new fields go here
+
+   /// Per-output openings (appended-after-extensions). Empty for V1/V2; required
+   /// (one per output) for proof_version >= V3. Appended after extensions so
+   /// that old binaries parsing extensions as the last field remain compatible.
+   vector<blind_factor_type>      per_output_openings;
 
    account_id_type fee_payer()const { return GRAPHENE_TEMP_ACCOUNT; }
    void            validate()const;
@@ -688,7 +689,7 @@ FC_REFLECT( graphene::protocol::stealth_recognition,
 FC_REFLECT( graphene::protocol::stealth_blind_output,
             (commitment)(range_proof)(owner)(recognition) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation,
-            (fee)(asset_id)(proof_version)(excess)(inputs)(outputs)(per_output_openings)(extensions) )
+            (fee)(asset_id)(proof_version)(excess)(inputs)(outputs)(extensions)(per_output_openings) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation,
             (fee)(voter)(freeze)(reason)(extensions) )
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation,

@@ -160,7 +160,8 @@ inline fc::sha256 stealth_pair_proof_digest( const graphene::protocol::public_ke
 ///                 is the SPEND-derived one and the memo's own value is
 ///                 IGNORED.
 ///
-/// The gate is the CHAIN's creation state, never the memo: a sender that
+/// The gate is the CHAIN's creation state, never the memo (the scan path; the out-of-band
+   path asks the chain about the commitment the memo names): a sender that
 /// chooses the marker (or ships an opening in a post-activation memo) must
 /// not be able to force the legacy interpretation of a new output.
 ///

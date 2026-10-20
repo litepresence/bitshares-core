@@ -705,6 +705,32 @@ void h2_observe_pool_exchange( database& d, liquidity_pool_id_type pool_id,
    } );
 }
 
+/// The promotion proof: the newest promotion-log record for the consumed
+/// value's sample time must show quorum, the absolute-grid anchor, and the
+/// current committee delay. This is what makes a consumed value a PRICE
+/// rather than a raw number. The live read and the settlement read share one
+/// definition of it, so they can never disagree about the value, only about
+/// whether it may be used.
+static bool h2_consumed_price_promotion_proven( const database& d,
+                                                oracle_id_type oracle,
+                                                const oracle_object& o )
+{
+   const guard_state_object* guard = h2_find_guard( d, oracle );
+   if( guard == nullptr )
+      return false;
+   const uint32_t delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
+   const uint32_t anchor = h2_osm_bucket_anchor(
+         uint32_t( o.consumed_value_time.sec_since_epoch() ), delay );
+   for( auto ritr = guard->promotion_log.rbegin();
+         ritr != guard->promotion_log.rend(); ++ritr )
+   {
+      if( ritr->promote_time != o.consumed_value_time )
+         continue;
+      return ritr->producer_count >= o.options.minimum_producers
+              && ritr->anchor == anchor && ritr->delay_sec == delay;
+   }
+   return false;
+}
 optional<protocol::oracle_value> h2_read_consumed_price(
       const database& d, oracle_id_type oracle, uint16_t series, time_point_sec now,
       h2_price_liveness liveness )
@@ -752,36 +778,11 @@ optional<protocol::oracle_value> h2_read_consumed_price(
    // so the settlement path does not refuse on it.
    if( liveness == h2_price_liveness::live && guard->consumption_hold )
       return optional<protocol::oracle_value>();
-   if( !h2_consumed_price_promotion_proven( d, *o ) )
+   if( !h2_consumed_price_promotion_proven( d, oracle, *o ) )
       return optional<protocol::oracle_value>();
    return ( *o->consumed_value )[ series ];
 }
 
-/// The promotion proof: the newest promotion-log record for the consumed
-/// value's sample time must show quorum, the absolute-grid anchor, and the
-/// current committee delay. This is what makes a consumed value a PRICE
-/// rather than a raw number. The live read and the settlement read share one
-/// definition of it, so they can never disagree about the value, only about
-/// whether it may be used.
-static bool h2_consumed_price_promotion_proven( const database& d,
-                                                const oracle_object& o )
-{
-   const guard_state_object* guard = h2_find_guard( d, o.id );
-   if( guard == nullptr )
-      return false;
-   const uint32_t delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
-   const uint32_t anchor = h2_osm_bucket_anchor(
-         uint32_t( o.consumed_value_time.sec_since_epoch() ), delay );
-   for( auto ritr = guard->promotion_log.rbegin();
-         ritr != guard->promotion_log.rend(); ++ritr )
-   {
-      if( ritr->promote_time != o.consumed_value_time )
-         continue;
-      return ritr->producer_count >= o.options.minimum_producers
-              && ritr->anchor == anchor && ritr->delay_sec == delay;
-   }
-   return false;
-}
 
 /// The oracle's LAST consumed price: the value the guard promoted, with the
 /// three conditions a DEAD feed trips dropped (the age beyond "never

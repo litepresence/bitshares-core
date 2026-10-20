@@ -428,7 +428,10 @@ void process_h2_vault_maintenance( database& d )
                   if( slashable <= share_type( 0 ) )
                      continue;
                   const vesting_balance_object* _vesting = d.find( _bitr->vesting_balance );
-                  if( _vesting != nullptr && _vesting->balance.amount > share_type( 0 ) )
+                  // Audit H2-26-03: only slash BTS vesting balances. A non-BTS
+                  // vesting cannot be credited into a BTS offset pool.
+                  if( _vesting != nullptr && _vesting->balance.asset_id == asset_id_type()
+                      && _vesting->balance.amount > share_type( 0 ) )
                   {
                      int64_t avail = _vesting->balance.amount.value;
                      int64_t take = std::min( avail, slashable.value );

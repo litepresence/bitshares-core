@@ -1356,4 +1356,176 @@ bool stealth_check_decoy_policy( const std::vector<uint32_t>& heights,
    return true;
 }
 
+bool stealth_verify_spend_auth( uint8_t version,
+   const std::vector<protocol::public_key_type>& owner_keys,
+   const std::vector<char>& spend_auth,
+   const std::string& msg32,
+   std::string& err )
+{
+   const EC_GROUP* group = EC_GROUP_new_by_curve_name( NID_secp256k1 );
+   if( !group ) { err = "curve init failed"; return false; }
+   BN_CTX* ctx = BN_CTX_new();
+   BIGNUM* order = BN_new();
+   EC_GROUP_get_order( group, order, nullptr );
+
+   size_t n = owner_keys.size();
+   if( n < 2 || n > 32 )
+   {
+      err = "owner key count out of bounds";
+      // cleanup
+      BN_free( order ); BN_CTX_free( ctx ); EC_GROUP_free( (EC_GROUP*)group );
+      return false;
+   }
+   if( msg32.size() != 32 )
+   {
+      err = "message must be 32 bytes";
+      BN_free( order ); BN_CTX_free( ctx ); EC_GROUP_free( (EC_GROUP*)group );
+      return false;
+   }
+   const size_t expected = 33 + 32 + 32 * n;
+   if( spend_auth.size() != expected )
+   {
+      err = "spend_auth size mismatch";
+      BN_free( order ); BN_CTX_free( ctx ); EC_GROUP_free( (EC_GROUP*)group );
+      return false;
+   }
+
+   // Parse key image I.
+   EC_POINT* I = EC_POINT_new( group );
+   if( EC_POINT_oct2point( group, I, (const unsigned char*)spend_auth.data(), 33, nullptr ) != 1 )
+   {
+      err = "key image is not a valid point";
+      EC_POINT_free( I ); BN_free( order ); BN_CTX_free( ctx ); EC_GROUP_free( (EC_GROUP*)group );
+      return false;
+   }
+   if( EC_POINT_is_at_infinity( group, I ) )
+   {
+      err = "key image must not be identity";
+      EC_POINT_free( I ); BN_free( order ); BN_CTX_free( ctx ); EC_GROUP_free( (EC_GROUP*)group );
+      return false;
+   }
+
+   // Parse c0.
+   BIGNUM* c = BN_bin2bn( (const unsigned char*)( spend_auth.data() + 33 ), 32, nullptr );
+   if( BN_is_zero( c ) || BN_cmp( c, order ) >= 0 )
+   {
+      err = "c0 is not a canonical nonzero scalar";
+      BN_free( c ); EC_POINT_free( I ); BN_free( order ); BN_CTX_free( ctx );
+      EC_GROUP_free( (EC_GROUP*)group );
+      return false;
+   }
+
+   // Parse responses.
+   std::vector<BIGNUM*> r( n );
+   for( size_t i = 0; i < n; ++i )
+   {
+      r[i] = BN_bin2bn( (const unsigned char*)( spend_auth.data() + 33 + 32 + 32 * i ), 32, nullptr );
+      if( BN_is_zero( r[i] ) == 0 && false ) {}
+      if( BN_cmp( r[i], order ) >= 0 )
+      {
+         err = "response is not a canonical scalar";
+         for( size_t j = 0; j <= i; ++j ) BN_free( r[j] );
+         BN_free( c ); EC_POINT_free( I ); BN_free( order ); BN_CTX_free( ctx );
+         EC_GROUP_free( (EC_GROUP*)group );
+         return false;
+      }
+   }
+
+   // Parse owner keys into points.
+   std::vector<EC_POINT*> K( n );
+   for( size_t i = 0; i < n; ++i )
+   {
+      K[i] = EC_POINT_new( group );
+      const unsigned char* kb = (const unsigned char*)owner_keys[i].key_data.data();
+      if( EC_POINT_oct2point( group, K[i], kb, 33, nullptr ) != 1 )
+      {
+         err = "owner key is not a valid point";
+         for( size_t j = 0; j <= i; ++j ) EC_POINT_free( K[j] );
+         for( size_t j = 0; j < n; ++j ) BN_free( r[j] );
+         BN_free( c ); EC_POINT_free( I ); BN_free( order ); BN_CTX_free( ctx );
+         EC_GROUP_free( (EC_GROUP*)group );
+         return false;
+      }
+      if( EC_POINT_is_at_infinity( group, K[i] ) )
+      {
+         err = "owner key must not be identity";
+         for( size_t j = 0; j <= i; ++j ) EC_POINT_free( K[j] );
+         for( size_t j = 0; j < n; ++j ) BN_free( r[j] );
+         BN_free( c ); EC_POINT_free( I ); BN_free( order ); BN_CTX_free( ctx );
+         EC_GROUP_free( (EC_GROUP*)group );
+         return false;
+      }
+   }
+
+   // Generators.
+   std::vector<unsigned char> gbytes = stealth_G_point();
+   std::vector<unsigned char> j1bytes = stealth_J1_point( version );
+   EC_POINT* Gpt = EC_POINT_new( group );
+   EC_POINT* J1pt = EC_POINT_new( group );
+   EC_POINT_oct2point( group, Gpt, gbytes.data(), gbytes.size(), nullptr );
+   EC_POINT_oct2point( group, J1pt, j1bytes.data(), j1bytes.size(), nullptr );
+
+   std::string domain = "BitShares-G1-SpendAuth-v1";
+   domain.push_back( (char)version );
+
+   BIGNUM* ccur = BN_dup( c );
+   bool ok = true;
+   for( size_t i = 0; i < n; ++i )
+   {
+      // L = r_i*G + c*K_i
+      EC_POINT* L = EC_POINT_new( group );
+      EC_POINT_mul( group, L, r[i], K[i], ccur, ctx );
+      // R = r_i*J1 + c*I
+      EC_POINT* R = EC_POINT_new( group );
+      EC_POINT* tmp = EC_POINT_new( group );
+      EC_POINT_mul( group, tmp, nullptr, J1pt, r[i], ctx );
+      EC_POINT_copy( R, tmp );
+      EC_POINT_mul( group, tmp, nullptr, I, ccur, ctx );
+      EC_POINT_add( group, R, R, tmp, ctx );
+
+      // compress
+      unsigned char lbuf[33], rbuf[33];
+      size_t llen = EC_POINT_point2oct( group, L, POINT_CONVERSION_COMPRESSED, lbuf, 33, nullptr );
+      size_t rlen = EC_POINT_point2oct( group, R, POINT_CONVERSION_COMPRESSED, rbuf, 33, nullptr );
+      if( llen != 33 || rlen != 33 ) { ok = false; EC_POINT_free(L); EC_POINT_free(R); EC_POINT_free(tmp); break; }
+
+      // hash
+      SHA256_CTX sh;
+      SHA256_Init( &sh );
+      SHA256_Update( &sh, domain.data(), domain.size() );
+      SHA256_Update( &sh, msg32.data(), 32 );
+      SHA256_Update( &sh, lbuf, 33 );
+      SHA256_Update( &sh, rbuf, 33 );
+      unsigned char h[32];
+      SHA256_Final( h, &sh );
+      BIGNUM* cnext = BN_bin2bn( h, 32, nullptr );
+      BN_mod( cnext, cnext, order, ctx );
+      if( BN_is_zero( cnext ) ) { BN_free( cnext ); ok = false; EC_POINT_free(L); EC_POINT_free(R); EC_POINT_free(tmp); break; }
+
+      if( i == n - 1 )
+      {
+         if( BN_cmp( cnext, c ) != 0 ) ok = false;
+      }
+      else
+      {
+         BN_copy( ccur, cnext );
+      }
+      BN_free( cnext );
+      EC_POINT_free( L );
+      EC_POINT_free( R );
+      EC_POINT_free( tmp );
+   }
+
+   // cleanup
+   BN_free( ccur );
+   for( size_t i = 0; i < n; ++i ) { BN_free( r[i] ); EC_POINT_free( K[i] ); }
+   EC_POINT_free( Gpt ); EC_POINT_free( J1pt ); EC_POINT_free( I );
+   BN_free( c ); BN_free( order ); BN_CTX_free( ctx );
+   EC_GROUP_free( (EC_GROUP*)group );
+
+   if( !ok ) { err = "spend auth verification failed"; return false; }
+   err.clear();
+   return true;
+}
+
 } } // graphene::chain

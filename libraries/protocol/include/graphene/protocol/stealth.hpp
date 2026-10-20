@@ -368,8 +368,18 @@ struct stealth_ring_input
    /// verifier, and dual-verify/turnstile window — never silent
    /// reinterpretation). Wire-default 1 keeps existing constructions valid.
    uint8_t                 ring_scheme = GRAPHENE_STEALTH_RING_SCHEME_V1;
+   /// Spend-key authorization (appended-last): the two-key leg, a ring
+   /// signature over the ring members' owner keys proving the spender holds
+   /// the spend scalar for the real member without naming it. Required
+   /// (non-empty, valid) for proof_version >= V3; empty for V1/V2.
+   /// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1 and 3 step 5
+   vector<char>            spend_auth;
+   /// Member owner keys (appended-last): one per ring member, in ring order.
+   /// Public per member (they ride the blinded output's owner authority);
+   /// the two-key leg is verified against this list. Empty for V1/V2.
+   /// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1 and 3 step 5
+   vector<public_key_type> member_owner_keys;
 };
-
 /**
  * @brief Wallet-layer recognition data carried on a blinded output (RP1).
  * @ingroup g1_stealth
@@ -683,8 +693,7 @@ struct stealth_pool_exchange_operation : public base_operation
 
 FC_REFLECT( graphene::protocol::stealth_ring_input,
             (ring)(key_image)(ring_sig)(pseudo_output)(alt_key_image)(alt_ring_sig)
-            (ring_scheme) )
-FC_REFLECT( graphene::protocol::stealth_recognition,
+            (ring_scheme)(spend_auth)(member_owner_keys) )FC_REFLECT( graphene::protocol::stealth_recognition,
             (one_time_key)(to)(encrypted_memo) )
 FC_REFLECT( graphene::protocol::stealth_blind_output,
             (commitment)(range_proof)(owner)(recognition) )

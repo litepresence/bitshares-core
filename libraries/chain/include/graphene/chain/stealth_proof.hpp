@@ -216,6 +216,21 @@ bool stealth_verify_ring( uint8_t version,
                            std::string& err );
 
 /**
+ * ViewKey two-key leg verifier (BSIP-2, construction addendum).
+ * Verifies a ring signature over the ring members' owner keys (public keys)
+ * proving the signer knows the discrete log of exactly one member without
+ * naming it. Domain-separated from the value leg by its own challenge
+ * transcript and its own key image.
+ * spend_auth layout: I(33) || c0(32) || r_0..r_{n-1}(32 each).
+ * Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1 and 3 step 6
+ */
+bool stealth_verify_spend_auth( uint8_t version,
+   const std::vector<protocol::public_key_type>& owner_keys,
+   const std::vector<char>& spend_auth,
+   const std::string& msg32,
+   std::string& err );
+
+/**
  * R15: verify Sigma representation proof binding (I1,I2) to C's opening.
  * Deterministic; no secrets; strict canonical parsing throughout.
  */

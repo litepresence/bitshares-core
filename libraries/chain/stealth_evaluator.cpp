@@ -799,6 +799,27 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
          FC_ASSERT( stealth_verify_ring( alt_version, alt_in, msg_alt, err ),
                     "Ring signature does not verify: ${e}", ("e", err) );
       }
+      // ViewKey two-key leg (V3): spend_auth is a ring signature over the
+      // ring members' owner keys proving the spender holds the spend scalar
+      // for the real member without naming it. Required and valid for V3;
+      // empty for V1/V2 (grandfathered). Spec: ... §3 step 7
+      if( o.proof_version >= protocol::GRAPHENE_STEALTH_PROOF_V3 )
+      {
+         FC_ASSERT( !in.member_owner_keys.empty() &&
+                    in.member_owner_keys.size() == in.ring.size(),
+                    "member_owner_keys must have one entry per ring member" );
+         FC_ASSERT( !in.spend_auth.empty(), "spend_auth required for V3" );
+         std::string sa_err;
+         FC_ASSERT( stealth_verify_spend_auth( o.proof_version, in.member_owner_keys,
+                                              in.spend_auth, msg, sa_err ),
+                    "Spend auth does not verify: ${e}", ("e", sa_err) );
+      }
+      else
+      {
+         FC_ASSERT( in.spend_auth.empty(), "spend_auth must be empty for V1/V2" );
+         FC_ASSERT( in.member_owner_keys.empty(),
+                    "member_owner_keys must be empty for V1/V2" );
+      }
    }
 
    // Conservation kernel (Mimblewimble-style excess over pseudo-outputs):

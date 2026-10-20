@@ -45,7 +45,8 @@ void stealth_transfer_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0 );
    FC_ASSERT( proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
-              proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+              proof_version == GRAPHENE_STEALTH_PROOF_V3,
               "unknown proof version" );
    FC_ASSERT( !inputs.empty() && inputs.size() <= 8,
               "input count out of bounds" );
@@ -73,6 +74,20 @@ void stealth_transfer_operation::validate()const
        // dual-verify/turnstile window, never silent reinterpretation.
        FC_ASSERT( in.ring_scheme == GRAPHENE_STEALTH_RING_SCHEME_V1,
                   "unknown ring scheme" );
+       // ViewKey two-key leg (V3): spend_auth and member_owner_keys ride only
+       // on V3 spends; V1/V2 (grandfathered) must leave them empty.
+       // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 3 step 7
+       if( proof_version >= GRAPHENE_STEALTH_PROOF_V3 )
+       {
+          FC_ASSERT( !in.spend_auth.empty(), "spend_auth required for V3" );
+          FC_ASSERT( in.member_owner_keys.size() == in.ring.size(),
+                     "member_owner_keys must have one entry per ring member" );
+       }
+       else
+       {
+          FC_ASSERT( in.spend_auth.empty(), "spend_auth must be empty for V1/V2" );
+          FC_ASSERT( in.member_owner_keys.empty(), "member_owner_keys must be empty for V1/V2" );
+       }
       // distinct ring members (duplicate decoys shrink the real set).
       // O(n^2) with n <= 32 is bounded (<=1024 compares); the evaluator
       // re-checks (consensus rule; validate() is relay-side early failure).

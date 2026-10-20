@@ -90,6 +90,32 @@ namespace graphene { namespace chain {
     * read, else the single backup's consumed read, else absent (dual-stale).
     * Unbound vaults have no price leg by construction.
     */
+   /**
+    * The oracle's last consumed price, with the live read's liveness
+    * conditions dropped (the value's age, the bonded live set, the guard's
+    * consumption hold) and its promotion proof kept.
+    *
+    * The live read says "this price may not carry NEW DEBT"; this read says
+    * "this is the price the chain last accepted under the guard". The
+    * settlement path uses it so a wind-down can seat and its claims can be
+    * paid when the oracle died; the debt path never calls it.
+    *
+    * Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 2
+    */
+   optional<protocol::oracle_value> h2_read_last_consumed_price(
+         const database& d, oracle_id_type oracle, uint16_t series );
+
+   /**
+    * The price the settlement path may use: the live read when there is one,
+    * otherwise the oracle's last consumed price (primary, then the
+    * owner-controlled backup). Bounded use only: the wind-down's seat and the
+    * wind-down claim's haircut leg.
+    *
+    * Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 3
+    */
+   optional<protocol::oracle_value> h2_read_settlement_price(
+         const database& d, const vault_object& vault, uint16_t series );
+
    optional<protocol::oracle_value> h2_read_pair_price(
          const database& d, const vault_object& vault, uint16_t series,
          time_point_sec now );

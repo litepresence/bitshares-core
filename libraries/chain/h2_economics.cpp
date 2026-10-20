@@ -729,24 +729,97 @@ optional<protocol::oracle_value> h2_read_consumed_price(
    const guard_state_object* guard = h2_find_guard( d, oracle );
    if( guard == nullptr || guard->consumption_hold )
       return optional<protocol::oracle_value>();
-   // Liveness-at-promotion: the newest record for this sample time must show
-   // quorum, the absolute-grid anchor, and the current committee delay.
+   if( !h2_consumed_price_promotion_proven( d, *o ) )
+      return optional<protocol::oracle_value>();
+   return ( *o->consumed_value )[ series ];
+}
+
+/// The promotion proof: the newest promotion-log record for the consumed
+/// value's sample time must show quorum, the absolute-grid anchor, and the
+/// current committee delay. This is what makes a consumed value a PRICE
+/// rather than a raw number. The live read and the settlement read share one
+/// definition of it, so they can never disagree about the value, only about
+/// whether it may be used.
+static bool h2_consumed_price_promotion_proven( const database& d,
+                                                const oracle_object& o )
+{
+   const guard_state_object* guard = h2_find_guard( d, o.id );
+   if( guard == nullptr )
+      return false;
    const uint32_t delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
    const uint32_t anchor = h2_osm_bucket_anchor(
-         uint32_t( o->consumed_value_time.sec_since_epoch() ), delay );
-   bool proven = false;
+         uint32_t( o.consumed_value_time.sec_since_epoch() ), delay );
    for( auto ritr = guard->promotion_log.rbegin();
          ritr != guard->promotion_log.rend(); ++ritr )
    {
-      if( ritr->promote_time != o->consumed_value_time )
+      if( ritr->promote_time != o.consumed_value_time )
          continue;
-      proven = ritr->producer_count >= o->options.minimum_producers
-               && ritr->anchor == anchor && ritr->delay_sec == delay;
-      break; // newest record for this time decides
+      return ritr->producer_count >= o.options.minimum_producers
+              && ritr->anchor == anchor && ritr->delay_sec == delay;
    }
-   if( !proven )
+   return false;
+}
+
+/// The oracle's LAST consumed price: the value the guard promoted, with the
+/// liveness conditions dropped.
+///
+/// The live read refuses a value that is older than value_lifetime_sec, that
+/// has no bonded live set right now, or that sits behind the guard's
+/// consumption hold. Those three conditions say "this price may not carry NEW
+/// DEBT" (a stale price must not mint or redeem); they do not say the value
+/// is not a price. The settlement path needs a price it can size a seizure
+/// with, and the wind-down's own claims must be payable even when the oracle
+/// died: a bound vault whose oracle is dead could otherwise never wind down,
+/// and the party with the most at risk (the vault's owner, whose bond cannot
+/// be released while the claims stand) has no way to fix that.
+///
+/// What is kept is the promotion proof: the value must have been promoted
+/// under the guard (quorum, anchor, delay), which is what makes it a price at
+/// all. A frozen oracle is not refused either: the freeze closes the debt
+/// tap, and the claims it froze must still be settleable.
+///
+/// Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 2
+optional<protocol::oracle_value> h2_read_last_consumed_price(
+      const database& d, oracle_id_type oracle, uint16_t series )
+{
+   const oracle_object* o = d.find( oracle );
+   if( o == nullptr )
+      return optional<protocol::oracle_value>();
+   if( !o->consumed_value.valid() || series >= o->consumed_value->size() )
+      return optional<protocol::oracle_value>();
+   if( o->consumed_value_time == time_point_sec() )
+      return optional<protocol::oracle_value>();
+   if( !h2_consumed_price_promotion_proven( d, *o ) )
       return optional<protocol::oracle_value>();
    return ( *o->consumed_value )[ series ];
+}
+
+/// The price the SETTLEMENT path may use: the live read when there is one,
+/// otherwise the oracle's last consumed price (primary, then the
+/// owner-controlled backup).
+///
+/// The debt path never calls this: minting and redeeming keep the live read
+/// and keep failing closed on a dead price. Only the wind-down's seat and the
+/// wind-down claim's haircut leg use it, and both are bounded by the book's
+/// own pool, so a stale price can mis-size a seat but can never pay out more
+/// than the book holds.
+///
+/// Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 3
+optional<protocol::oracle_value> h2_read_settlement_price(
+      const database& d, const vault_object& vault, uint16_t series )
+{
+   const auto live = h2_read_pair_price( d, vault, series, d.head_block_time() );
+   if( live.valid() )
+      return live;
+   if( !vault.bound_oracle.valid() )
+      return optional<protocol::oracle_value>();
+   auto last = h2_read_last_consumed_price( d, *vault.bound_oracle, series );
+   if( last.valid() )
+      return last;
+   const guard_state_object* guard = h2_find_guard( d, *vault.bound_oracle );
+   if( guard != nullptr && guard->fallback )
+      last = h2_read_last_consumed_price( d, guard->fallback->oracle_id, series );
+   return last;
 }
 
 optional<protocol::oracle_value> h2_read_pair_price(

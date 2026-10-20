@@ -1795,39 +1795,38 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
    generate_block();
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
-   // Deferred: the vault never left TOPUP and no book was seated for it.
-   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
-   {
-      const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices()
-                              .get<by_winddown_vault>();
-      BOOST_CHECK( wd_idx.find( vid ) == wd_idx.end() );
-   }
+   // The settlement path reads the oracle's LAST consumed price when the
+   // live read is dead, so the wind-down seats even though this oracle has no
+   // producer bond: the value was promoted under the guard, which is what
+   // makes it a price.
+   // Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 3
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    BOOST_REQUIRE( oid( db ).consumed_value.valid() );
    BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
 
-   // Debt blocked: the conversion-dependent exit never opened for this
-   // vault, so a senior claim has no book to draw on. The refusal must
-   // name the missing wind-down, not some other guard: the price leg is
-   // never reached, because the seat never ran.
+   // The DEBT path is still blocked: this oracle has no producer bond, so
+   // the pair read still fails closed and no new debt may be minted or
+   // redeemed against it. The settlement path is not the debt path.
+   BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+
+   // The settlement path is NOT blocked: the claim pays at the last consumed
+   // price, out of the book's own pool. A book that cannot be paid is not a
+   // settlement, and a dead oracle would otherwise strand the claims.
+   const share_type carol_before = db.get_balance( carol_id, asset_id_type() ).amount;
    winddown_claim_operation cop;
    cop.claimant     = carol_id;
-   cop.winddown     = winddown_vault_id_type( 0 );
+   cop.winddown     = wdid;
    cop.claim_amount = share_type( 1000000 );
    cop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
    signed_transaction ctx; ctx.operations.push_back( cop );
    db.current_fee_schedule().set_fee( ctx.operations.back() );
    set_expiration( db, ctx );
    ctx.sign( carol_private_key, db.get_chain_id() );
-   bool refused = false;
-   try { PUSH_TX( db, ctx ); }
-   catch( const fc::exception& e ) {
-      refused = true;
-      BOOST_CHECK_MESSAGE( e.to_string().find( "does not exist" ) != std::string::npos,
-            "claim against the never-seated wind-down must be refused for the missing "
-            "book, not another guard: " << e.to_string() );
-   }
-   BOOST_CHECK( refused );
+   PUSH_TX( db, ctx );
+   BOOST_CHECK( db.get_balance( carol_id, asset_id_type() ).amount > carol_before );
 } FC_LOG_AND_RETHROW() }
 
 /// X-03 H2-side merge-contract half: every sweep records h2_diversion_bps

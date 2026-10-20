@@ -2968,4 +2968,80 @@ BOOST_AUTO_TEST_CASE( seat_bound_caps_seating_and_leaves_the_surplus_with_its_ow
    BOOST_CHECK( seized == H2J_VAULT_RAW );
 } FC_LOG_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// Settlement from the last consumed price (direction 1)
+// ---------------------------------------------------------------------------
+
+/// A bound vault whose price has AGED OUT still settles: the wind-down seats
+/// at the oracle's last consumed price, and the claim pays out of the book's
+/// own pool. Without this, a dead oracle would strand the claims forever and
+/// the owner (whose bond cannot be released while the claims stand) would
+/// have no remedy.
+BOOST_AUTO_TEST_CASE( settlement_price_seats_a_dead_oracle_and_pays_the_claims )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2j_door d = h2j_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "HYSETL", "HYSETLF", H2J_VAULT_RAW, H2J_VAULT_USD_CENTS, "S" );
+
+   h2j_mint( *this, alice_id, alice_private_key, d, share_type( 140000 ), share_type( 1000 ) );
+   generate_block();
+
+   // Surgical book: the bonded read covers 1.34e10 face against 1e10 face
+   // outstanding (134%), short of the 150% trigger.
+   db.modify( d.vault( db ), []( vault_object& m ) {
+      m.outstanding = share_type( 10000000000LL );
+   } );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
+
+   // Land past the price's lifetime, so the live read is DEAD at the sweep
+   // that expires the top-up window. The seat then uses the oracle's last
+   // consumed price instead of deferring the wind-down.
+   const uint32_t print_lifetime = d.oracle( db ).options.value_lifetime_sec;
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < d.vault( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time
+                    + print_lifetime + 600 );
+   generate_block();
+   BOOST_CHECK( !h2_read_pair_price( db, d.vault( db ), 0, db.head_block_time() ).valid() );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );
+
+   const winddown_vault_id_type wdid {
+      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+   // The seat is the claim book's haircut leg at the last consumed price
+   // (100 base / 1 quote): claims 1e10 face -> 8.5e9 face -> 8.5e11 bond
+   // units, which the 1.34e12 bond and the reserve's 140000 cover.
+   BOOST_CHECK( wdid( db ).total_claims == share_type( 10000000000LL ) );
+   BOOST_CHECK( wdid( db ).segregated_bond == share_type( 850000000000LL ) );
+
+   // The claim PAYS, out of the book's own pool: the pro-rata leg is
+   // price-invariant, so the payout cannot exceed what the book holds.
+   const share_type before = db.get_balance( alice_id, asset_id_type() ).amount;
+   winddown_claim_operation cop;
+   cop.claimant     = alice_id;
+   cop.winddown     = wdid;
+   cop.claim_amount = share_type( 1000 );
+   cop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
+   signed_transaction ctx; ctx.operations.push_back( cop );
+   db.current_fee_schedule().set_fee( ctx.operations.back() );
+   set_expiration( db, ctx );
+   ctx.sign( alice_private_key, db.get_chain_id() );
+   PUSH_TX( db, ctx );
+   BOOST_CHECK( db.get_balance( alice_id, asset_id_type() ).amount > before );
+   BOOST_CHECK( wdid( db ).paid_total > share_type( 0 ) );
+   BOOST_CHECK( wdid( db ).paid_total <= wdid( db ).segregated_bond );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

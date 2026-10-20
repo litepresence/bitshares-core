@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include <fc/optional.hpp>
+
 using namespace graphene::app;
 using namespace graphene::chain;
 using namespace graphene::utilities;
@@ -124,6 +126,19 @@ struct blind_receipt
    /// Appended-last: old wallet files load with false (their watch-only
    /// receipts are still caught by the empty-authority check).
    bool                            tally_only = false;
+   /// PENDING marker: this receipt was recorded for an output that is not
+   /// (yet) on chain — the change output of an op40/op41 build the wallet
+   /// has not broadcast, or has broadcast but whose block has not arrived.
+   ///
+   /// The change output's opening is a conservation difference (the sum of
+   /// the spent inputs' openings minus the to-output's), so it is NOT
+   /// derivable from the chain: the wallet computed it when it built the
+   /// operation, and it is durable only in this receipt. The marker keeps the
+   /// balance query from retiring the receipt as "spent" while the output is
+   /// still in flight (a retired receipt is excluded from the spend
+   /// selection, which would strand the sender's change).
+   /// Appended-last: old wallet files load with false.
+   bool                            pending = false;
 };
 
 struct by_from;
@@ -177,6 +192,38 @@ struct stealth_address_record
    public_key_type view_pub;
    public_key_type spend_pub;
    bool            watch_only = false;
+};
+
+
+/// How a blind-transfer counterparty was classified.
+///
+/// The classification is dual-first (a dual-key address is never silently
+/// degraded to the single-key path) and it is the SAME on both sender paths
+/// (the op39 deposit and the op40 blind transfer), so a remote dual-key
+/// recipient cannot be degraded on one path and not on the other.
+///
+/// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+struct blind_counterparty
+{
+   public_key_type key;                   // the single-key address (view == spend)
+   fc::optional<public_key_type> view_pub, spend_pub;
+   bool dual = false;                     // a dual-key address (spend-derived opening)
+   bool from_address_book = false;        // the wallet's own labeled key
+   bool wallet_owned = false;             // the wallet holds the private key
+
+   /// The HOLDER identity.
+   ///
+   /// Every output of one operation must go to the SAME holder: the
+   /// operation publishes the sum of the outputs' openings, so a co-recipient
+   /// recovers the other holder's opening from that sum (and the opening is
+   /// the credential the ring spend authorizes by).
+   /// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   std::string holder()const
+   {
+      if( dual && view_pub.valid() && spend_pub.valid() )
+         return "dual:" + std::string( *view_pub ) + ":" + std::string( *spend_pub );
+      return "single:" + std::string( key );
+   }
 };
 
 struct wallet_data
@@ -476,7 +523,7 @@ FC_REFLECT( graphene::wallet::exported_keys, (password_checksum)(account_keys) )
 
 FC_REFLECT( graphene::wallet::blind_receipt,
             (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf)
-            (received_block)(address_key)(tally_only) )
+            (received_block)(address_key)(tally_only)(pending) )
 
 FC_REFLECT( graphene::wallet::approval_delta,
    (active_approvals_to_add)

@@ -122,6 +122,29 @@ public:
     */
    bool copy_wallet_file( string destination_filename );
 
+   /**
+    * @brief classify a blind-transfer counterparty (dual-first)
+    *
+    * Order: (1) a dual-key record named by its label, (2) the wallet's
+    * address book (a labeled key), (3) a dual-key record whose view pub is
+    * the resolved key.
+    *
+    * A bare key that is in none of those is NOT classifiable: it may be a
+    * remote dual-key recipient's view pub, and the single-key path would
+    * derive the output's opening from the view key and publish it in the
+    * memo (a view-openable output). The caller refuses such a counterparty
+    * unless it is the wallet's own key (`allow_wallet_owned`: the sender
+    * side of a blind transfer).
+    *
+    * A dual-key record without a spend key refuses here: the spend-derived
+    * opening cannot be computed, and the view-derived fallback would hand
+    * the opening to every view-key holder.
+    *
+    * Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+    */
+   blind_counterparty resolve_blind_counterparty( const std::string& label_or_key,
+                                                  bool allow_wallet_owned )const;
+
    /***
     * @brief returns true if the wallet is unlocked
     */

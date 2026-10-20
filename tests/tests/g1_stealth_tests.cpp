@@ -15238,7 +15238,10 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
    // TWO outputs: a single-output deposit to a dual-key address would publish
    // the output's opening (the op39 operation's blinding_factor field is the
    // sum of the outputs' openings), so the wallet refuses that shape.
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st2","100"}}, false );
+   // Both outputs go to the SAME holder: the operation publishes the sum of
+   // the outputs' openings, so outputs to different holders would leak each
+   // holder's opening to the other (the wallet refuses that shape).
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st","100"}}, false );
    BOOST_REQUIRE_EQUAL( confirm.trx.operations.size(), 1u );
    const auto& ttb = confirm.trx.operations[0].get<transfer_to_blind_operation>();
    BOOST_REQUIRE_EQUAL( ttb.outputs.size(), 2u );
@@ -15258,12 +15261,14 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
    // The receipts come back in chain order (the op's outputs are sorted by
    // commitment), so pick the one that belongs to alice-st.
    const graphene::wallet::blind_receipt* alice_receipt = nullptr;
-   for( const auto& r : fresh ) if( r.address_key == alice_view ) { alice_receipt = &r; break; }
+   for( const auto& r : fresh )
+      if( r.address_key == alice_view && r.amount.amount == core.amount( 20000000 ).amount )
+      { alice_receipt = &r; break; }
    BOOST_REQUIRE( alice_receipt != nullptr );
-   BOOST_CHECK( alice_receipt->amount.amount == core.amount( 20000000 ).amount );
    auto bals = W.get_blind_balances( "alice-st" );
    BOOST_REQUIRE_EQUAL( bals.size(), 1u );
-   BOOST_CHECK( bals[0].amount == core.amount( 20000000 ).amount );
+   // Both deposit outputs went to alice-st, so the balance is their sum.
+   BOOST_CHECK( bals[0].amount == core.amount( 30000000 ).amount );
 
    BOOST_TEST_MESSAGE("Idempotent re-scan adds nothing");
    BOOST_CHECK( W.scan_stealth_recognitions( scan_from, head ).empty() );
@@ -15280,10 +15285,10 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
    WO.import_stealth_view_key( "alice-wo", graphene::utilities::key_to_wif( keys.view_priv ),
                                public_key_type( keys.spend_pub ) );
    auto wo_fresh = WO.scan_stealth_recognitions( scan_from, head );
-   BOOST_REQUIRE_EQUAL( wo_fresh.size(), 1u );
-   BOOST_CHECK( wo_fresh[0].amount.amount == core.amount( 20000000 ).amount );
+   BOOST_REQUIRE_EQUAL( wo_fresh.size(), 2u );
    auto wo_bals = WO.get_blind_balances( "alice-wo" );
    BOOST_REQUIRE_EQUAL( wo_bals.size(), 1u );
+   BOOST_CHECK( wo_bals[0].amount == core.amount( 30000000 ).amount );
    // Watch-only cannot spend: must throw (fail-closed), never silently succeed.
    BOOST_CHECK_THROW( WO.transfer_from_blind( "alice-wo", "dan", "10", "1.3.0", false ),
                       fc::exception );

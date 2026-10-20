@@ -124,6 +124,34 @@ inline bool memo_is_openingless( const stealth_confirmation::memo_data& memo )
    return memo.blinding_factor == fc::sha256();
 }
 
+/// The domain-separated digest that binds a dual-key address's two public
+/// keys together.
+///
+/// BOTH holders of the pair vouch for it: the view key holder signs this
+/// digest and the spend key holder signs it too (see
+/// import_stealth_address_pubs). Requiring both is what makes the check
+/// meaningful:
+///
+///  - a SWAPPED pair (the two keys exchanged) changes the digest, so neither
+///    signature verifies — without this check the payments would be
+///    unopenable by the recipient and the funds stuck;
+///  - a pair whose SPEND pub the supplier holds (the substitution case) can
+///    only be vouched for by the holder of the view pub, so the supplier
+///    cannot open and ring-spend the payments made to it.
+///
+/// The residual: a supplier that holds BOTH keys of a substituted pair can
+/// still vouch for it, so the address must be verified with the recipient out
+/// of band (the consensus owner-key leg is the structural fix).
+///
+/// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+inline fc::sha256 stealth_pair_proof_digest( const graphene::protocol::public_key_type& view_pub,
+                                             const graphene::protocol::public_key_type& spend_pub )
+{
+   static const std::string tag = "G1-STEALTH-ADDR-V2|";
+   std::string pre = tag + std::string( view_pub ) + "|" + std::string( spend_pub );
+   return fc::sha256::hash( pre.data(), pre.size() );
+}
+
 /// The age gate: which interpretation of an output the receiver applies.
 ///
 /// LEGACY          the output was created BEFORE the activation (or its age

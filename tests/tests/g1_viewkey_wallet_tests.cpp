@@ -81,6 +81,17 @@ bool vk_is_zero_marker( const fc::sha256& v )
    return v == fc::sha256();
 }
 
+/// The multiset of the receipts' amounts (the scan returns them in chain
+/// order, which is the operation's output order sorted by commitment).
+std::vector<int64_t> vk_amounts( const vector<graphene::wallet::blind_receipt>& rs )
+{
+   std::vector<int64_t> out;
+   for( const auto& r : rs )
+      out.push_back( r.amount.amount.value );
+   std::sort( out.begin(), out.end() );
+   return out;
+}
+
 /// The dual-key record with this label (empty when the wallet has none).
 graphene::wallet::stealth_address_record vk_record( const vector<graphene::wallet::stealth_address_record>& recs,
                                                      const std::string& label )
@@ -175,7 +186,7 @@ BOOST_AUTO_TEST_CASE( vk_watch_only_cannot_spend_recognized_output )
    // TWO outputs: a single-output deposit to a dual-key address would publish
    // the output's opening (the operation's blinding_factor field is the sum
    // of the openings), so the wallet refuses that shape.
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st2","100"}}, false );
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st","100"}}, false );
    BOOST_REQUIRE_EQUAL( confirm.trx.operations.size(), 1u );
    PUSH_TX( db, confirm.trx );
    generate_block();
@@ -194,8 +205,8 @@ BOOST_AUTO_TEST_CASE( vk_watch_only_cannot_spend_recognized_output )
    auto head = db.head_block_num();
    const uint32_t scan_from = head >= 5 ? head - 5 : 1;
    auto fresh = WO.scan_stealth_recognitions( scan_from, head );
-   BOOST_REQUIRE_EQUAL( fresh.size(), 1u );
-   BOOST_CHECK( fresh[0].amount.amount == core.amount( 20000000 ).amount );
+   BOOST_REQUIRE_EQUAL( fresh.size(), 2u );
+   BOOST_CHECK( ( vk_amounts( fresh ) == std::vector<int64_t>{ 10000000, 20000000 } ) );
    // The watch-only recognition is marked TALLY-ONLY explicitly (not merely
    // "an authority key happens to be missing").
    BOOST_CHECK( fresh[0].tally_only );
@@ -254,7 +265,7 @@ BOOST_AUTO_TEST_CASE( vk_spend_key_wallet_can_build_and_push_spend )
    W.create_stealth_address( "bob-st2", bki, 1 );
    auto keys = graphene::wallet::derive_stealth_address_keys( bki, 0 );
 
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"bob-st","200"},{"bob-st2","100"}}, false );
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"bob-st","200"},{"bob-st","100"}}, false );
    PUSH_TX( db, confirm.trx );
    generate_block();
 
@@ -313,7 +324,7 @@ BOOST_AUTO_TEST_CASE( vk_new_output_memo_carries_no_usable_opening )
    W.create_stealth_address( "carol-st2", bki, 1 );
    auto keys = graphene::wallet::derive_stealth_address_keys( bki, 0 );
 
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"carol-st","200"},{"carol-st2","100"}}, false );
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"carol-st","200"},{"carol-st","100"}}, false );
    PUSH_TX( db, confirm.trx );
    generate_block();
 
@@ -331,7 +342,7 @@ BOOST_AUTO_TEST_CASE( vk_new_output_memo_carries_no_usable_opening )
    auto head = db.head_block_num();
    const uint32_t scan_from = head >= 5 ? head - 5 : 1;
    auto fresh = WO.scan_stealth_recognitions( scan_from, head );
-   BOOST_REQUIRE_EQUAL( fresh.size(), 1u );
+   BOOST_REQUIRE_EQUAL( fresh.size(), 2u );
    const auto& memo = fresh[0].data;
 
    // The memo carries NO opening: the zero marker.
@@ -465,7 +476,7 @@ BOOST_AUTO_TEST_CASE( vk_new_and_legacy_derivations_differ )
    W.create_stealth_address( "dave-st2", bki, 1 );
    auto keys = graphene::wallet::derive_stealth_address_keys( bki, 0 );
 
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"dave-st","200"},{"dave-st2","100"}}, false );
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"dave-st","200"},{"dave-st","100"}}, false );
    PUSH_TX( db, confirm.trx );
    generate_block();
 
@@ -571,8 +582,12 @@ BOOST_AUTO_TEST_CASE( vk_op39_to_own_view_label_is_spend_derived )
    // "frank-st.view" is the wallet's OWN label for the dual address's view
    // pub: it is in the address book, so the old order took the single-key
    // path. Two outputs, so the single-output refusal does not fire here.
+   // Both outputs go to the SAME holder (the same dual record, named two
+   // ways): the operation publishes the sum of the outputs' openings, so
+   // outputs to different holders would leak each holder's opening to the
+   // other (N-1).
    auto confirm = W.transfer_to_blind( "dan", "1.3.0",
-                                       {{"frank-st.view","200"},{"frank-st2","100"}}, false );
+                                       {{"frank-st.view","200"},{"frank-st","100"}}, false );
    BOOST_REQUIRE_EQUAL( confirm.outputs.size(), 2u );
    BOOST_CHECK( confirm.outputs[0].label == "frank-st.view" );
 
@@ -635,8 +650,12 @@ BOOST_AUTO_TEST_CASE( vk_op39_to_unclassifiable_recipient_is_refused )
    // The same recipient WITH its spend pub is classifiable: the remote dual
    // record makes the payment a dual one (spend-derived opening, no opening
    // in the memo).
+   auto pair_digest = graphene::wallet::stealth_pair_proof_digest(
+         public_key_type( remote.view_pub ), public_key_type( remote.spend_pub ) );
    W.import_stealth_address_pubs( "grace-remote", public_key_type( remote.view_pub ),
-                                   public_key_type( remote.spend_pub ) );
+                                   public_key_type( remote.spend_pub ),
+                                   remote.view_priv.sign_compact( pair_digest ),
+                                   remote.spend_priv.sign_compact( pair_digest ) );
    auto confirm = W.transfer_to_blind( "dan", "1.3.0",
                                        {{"grace-remote","200"},{"grace-remote","100"}}, false );
    BOOST_REQUIRE_EQUAL( confirm.outputs.size(), 2u );
@@ -757,14 +776,27 @@ BOOST_AUTO_TEST_CASE( vk_op40_change_memo_does_not_reveal_the_recipient_opening 
    BOOST_CHECK( vk_opens( recipient_opening, to_out.decrypted_memo.amount.amount.value,
                           to_out.decrypted_memo.commitment ) );
 
-   // The CHANGE memo must not carry the change opening: the difference
-   // (sum(inputs) - change_opening) would be the recipient's opening.
-   auto change_opening = change_out.decrypted_memo.blinding_factor;
+   // The CHANGE memo that goes ON CHAIN must not carry the change opening:
+   // the difference (sum(inputs) - change_opening) would be the recipient's
+   // opening, and the holder of the sender's view key can decrypt that memo.
+   //
+   // The sender's view key holder decrypts it (the ECDH secret is symmetric):
+   // view_priv against the one-time key the confirmation carries.
+   auto sender_view_priv = fc::ecc::private_key::regenerate(
+         fc::sha256::hash( sender_bk.c_str(), sender_bk.size() ) );
+   auto memo_secret = sender_view_priv.get_shared_secret( change_out.confirmation.one_time_key );
+   auto on_chain_memo = fc::raw::unpack<graphene::protocol::stealth_confirmation::memo_data>(
+         fc::aes_decrypt( memo_secret, change_out.confirmation.encrypted_memo ) );
+   auto change_opening = on_chain_memo.blinding_factor;
    BOOST_CHECK( vk_is_zero_marker( change_opening ) );
    // The strong form: with the change opening published, the holder of the
    // sender's view key recovers the recipient's opening as a difference.
    auto recovered = fc::ecc::blind_sum( { input_opening, change_opening }, 1 );
    BOOST_CHECK( recovered != recipient_opening );
+   // The wallet's own copy of the memo still carries the opening (the local
+   // knowledge: a caller that builds without broadcasting needs it to create
+   // the change receipt).
+   BOOST_CHECK( !vk_is_zero_marker( change_out.decrypted_memo.blinding_factor ) );
 } FC_CAPTURE_AND_RETHROW() }
 
 // ---------------------------------------------------------------------------
@@ -882,7 +914,7 @@ BOOST_AUTO_TEST_CASE( vk_malformed_recognition_does_not_abort_the_scan )
    // A good deposit (two outputs) and a malformed recognition (a memo whose
    // commitment is not the one the chain shows).
    auto confirm = W.transfer_to_blind( "dan", "1.3.0",
-                                       {{"mallory-st","200"},{"mallory-st2","100"}}, false );
+                                       {{"mallory-st","200"},{"mallory-st","100"}}, false );
    PUSH_TX( db, confirm.trx );
    generate_block();
 
@@ -951,7 +983,7 @@ BOOST_AUTO_TEST_CASE( vk_post_activation_deposit_is_spend_derived_and_chain_boun
    W.create_stealth_address( "nia-st2", bki, 1 );
    auto keys = graphene::wallet::derive_stealth_address_keys( bki, 0 );
 
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"nia-st","200"},{"nia-st2","100"}}, false );
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"nia-st","200"},{"nia-st","100"}}, false );
    BOOST_REQUIRE_EQUAL( confirm.outputs.size(), 2u );
    // The wallet does not implement the post-activation blind fee float yet
    // (the schedule prices the op39 at 0 and the float rule wants the anchor
@@ -990,9 +1022,304 @@ BOOST_AUTO_TEST_CASE( vk_post_activation_deposit_is_spend_derived_and_chain_boun
    // The chain bound the outputs to their creation block (the age gate's
    // input): a post-activation balance carries it, a pre-activation one does
    // not.
+   // The balance query aggregates per asset: both outputs went to nia-st.
    auto bals = W.get_blind_balances( "nia-st" );
    BOOST_REQUIRE_EQUAL( bals.size(), 1u );
-   BOOST_CHECK( bals[0].amount == core.amount( 20000000 ).amount );
+   BOOST_CHECK( bals[0].amount == core.amount( 30000000 ).amount );
+} FC_CAPTURE_AND_RETHROW() }
+
+
+// ---------------------------------------------------------------------------
+// Test 14 (N-1): a deposit whose outputs go to DIFFERENT holders is refused.
+//
+// The op39 operation publishes the sum of the outputs' openings, so each
+// co-recipient recovers the other holder's opening from that sum (it knows its
+// own) — and the opening is the credential the ring spend authorizes by. The
+// only shape whose published sum leaks nobody's opening is one whose outputs
+// all go to the SAME holder.
+//
+// RED on the base tree: the build succeeded (and the published sum carried
+// both co-recipients' openings).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_op39_to_two_different_dual_holders_is_refused )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-n1-password" );
+   W.unlock( "vk-n1-password" );
+   for( const auto& f : { "vk-n1-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-n1-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // Two dual-key addresses: two DIFFERENT holders (different brainkeys).
+   W.create_stealth_address( "alice-st", "vk n1 alice brainkey words here", 0 );
+   W.create_stealth_address( "bob-st", "vk n1 bob brainkey words here", 0 );
+
+   std::string err;
+   try { W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"bob-st","100"}}, false ); }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "SAME holder" ) != std::string::npos, err );
+
+   // The same holder twice is accepted (the holder knows both openings, so
+   // the published sum leaks nothing).
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st","100"}}, false );
+   BOOST_REQUIRE_EQUAL( confirm.outputs.size(), 2u );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 15 (N-2): the op40 path classifies the recipient the same way op39
+// does. A bare base58 key may be a remote dual-key recipient's view pub; the
+// single-key path would derive the output's opening from the view key and
+// publish it in the memo (a view-openable output).
+//
+// RED on the base tree: the build succeeded with the legacy shape.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_op40_to_unclassifiable_recipient_is_refused )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-n2-password" );
+   W.unlock( "vk-n2-password" );
+   for( const auto& f : { "vk-n2-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-n2-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // The sender's own legacy blind account, funded.
+   W.create_blind_account( "judy-blind", "vk n2 judy brainkey words here" );
+   auto deposit = W.transfer_to_blind( "dan", "1.3.0", {{"judy-blind","1000"}}, false );
+   PUSH_TX( db, deposit.trx );
+   generate_block();
+
+   // A REMOTE dual-key recipient: the sender holds neither key, only the view
+   // pub (the string a remote recipient shares).
+   auto remote = graphene::wallet::derive_stealth_address_keys( "vk n2 remote brainkey words here", 0 );
+   std::string view_pub_b58 = static_cast<std::string>( public_key_type( remote.view_pub ) );
+
+   std::string err;
+   try { W.blind_transfer( "judy-blind", view_pub_b58, "100", "1.3.0", false ); }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "classify" ) != std::string::npos, err );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 16 (N-3): the sender's CHANGE receipt must exist. The change output's
+// opening is a conservation difference (not the spend-derived one), so the
+// age gate must not replace it and the hand-off of the value the wallet
+// computed must reach the receipt. Without it the change is stranded: its
+// opening is in neither the memo nor the chain.
+//
+// RED on the base tree: no change receipt was created.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_op40_change_receipt_exists_for_a_dual_sender )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-n3-password" );
+   W.unlock( "vk-n3-password" );
+   for( const auto& f : { "vk-n3-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-n3-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // The sender's own dual address, funded by a deposit (two outputs to the
+   // SAME holder: the operation publishes the sum of the openings).
+   const std::string sender_bk = "vk n3 sender brainkey words here";
+   W.create_stealth_address( "sender-st", sender_bk, 0 );
+   W.create_stealth_address( "rcpt-st", "vk n3 rcpt brainkey words here", 0 );
+   auto deposit = W.transfer_to_blind( "dan", "1.3.0", {{"sender-st","500"},{"sender-st","500"}}, false );
+   PUSH_TX( db, deposit.trx );
+   generate_block();
+
+   auto head = db.head_block_num();
+   const uint32_t scan_from = head >= 5 ? head - 5 : 1;
+   auto receipts = W.scan_stealth_recognitions( scan_from, head );
+   BOOST_REQUIRE_EQUAL( receipts.size(), 2u );
+
+   // The sender pays a dual-key recipient; the change comes back to the
+   // sender's own dual address. The build is NOT broadcast (the test
+   // environment has no P2P network), so the change receipt must exist
+   // anyway — the change's opening is in neither the memo nor the chain, so
+   // a receipt that only appeared on broadcast would strand it.
+   auto pay = W.blind_transfer( "sender-st", "rcpt-st", "100", "1.3.0", false );
+   BOOST_REQUIRE_EQUAL( pay.outputs.size(), 2u );
+
+   // The change receipt must exist in the sender's wallet, and its opening
+   // must open its commitment (the change is not stranded).
+   auto history = W.blind_history( "sender-st" );
+   const graphene::wallet::blind_receipt* change_receipt = nullptr;
+   for( const auto& r : history )
+   {
+      if( r.amount.amount == core.amount( 50000000 ).amount ) continue;  // a deposit output
+      change_receipt = &r;
+      break;
+   }
+   BOOST_REQUIRE( change_receipt != nullptr );
+   BOOST_CHECK( !( change_receipt->data.blinding_factor == fc::sha256() ) );
+   BOOST_CHECK( vk_opens( change_receipt->data.blinding_factor,
+                          change_receipt->amount.amount.value,
+                          change_receipt->data.commitment ) );
+   // It is spendable: the sender can spend its own change.
+   BOOST_CHECK( graphene::wallet::blind_receipt_spendable( *change_receipt ) );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 17 (N-4): a build that is NOT broadcast must still leave the change
+// recoverable. The chain carries no opening for a spend-derived change (that
+// is the C-4 fix), so the returned confirmation must carry the wallet's own
+// opening, or the change is locked.
+//
+// RED on the base tree: the confirmation carried the zero marker.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_op40_non_broadcast_build_keeps_the_change_recoverable )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-n4-password" );
+   W.unlock( "vk-n4-password" );
+   for( const auto& f : { "vk-n4-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-n4-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   const std::string sender_bk = "vk n4 sender brainkey words here";
+   W.create_stealth_address( "sender-st", sender_bk, 0 );
+   W.create_stealth_address( "rcpt-st", "vk n4 rcpt brainkey words here", 0 );
+   auto deposit = W.transfer_to_blind( "dan", "1.3.0", {{"sender-st","500"},{"sender-st","500"}}, false );
+   PUSH_TX( db, deposit.trx );
+   generate_block();
+
+   auto head = db.head_block_num();
+   const uint32_t scan_from = head >= 5 ? head - 5 : 1;
+   W.scan_stealth_recognitions( scan_from, head );
+
+   // A build the caller broadcasts itself.
+   auto pay = W.blind_transfer( "sender-st", "rcpt-st", "100", "1.3.0", false );
+   BOOST_REQUIRE_EQUAL( pay.outputs.size(), 2u );
+   const auto& change_out = pay.outputs[0];
+
+   // The ON-CHAIN memo carries no opening (the C-4 fix), but the returned
+   // confirmation carries the wallet's own opening, so the caller can create
+   // the change receipt after it broadcasts.
+   BOOST_CHECK( !vk_is_zero_marker( change_out.decrypted_memo.blinding_factor ) );
+   BOOST_CHECK( vk_opens( change_out.decrypted_memo.blinding_factor,
+                          change_out.decrypted_memo.amount.amount.value,
+                          change_out.decrypted_memo.commitment ) );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 18 (N-5): importing a remote dual-key address requires a proof that
+// the two public keys belong together (the recipient's spend key signing the
+// domain-separated digest of the view pub). An unverified pair produces
+// payments the recipient cannot open (the funds are stuck) and lets the
+// supplier of the pair open them.
+//
+// RED on the base tree: the import accepted an unverified (swapped) pair.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_import_stealth_address_pubs_requires_a_pair_proof )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-n5-password" );
+   W.unlock( "vk-n5-password" );
+   for( const auto& f : { "vk-n5-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-n5-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   auto remote = graphene::wallet::derive_stealth_address_keys( "vk n5 remote brainkey words here", 0 );
+   auto view_pub = public_key_type( remote.view_pub );
+   auto spend_pub = public_key_type( remote.spend_pub );
+   auto digest = graphene::wallet::stealth_pair_proof_digest( view_pub, spend_pub );
+
+   // A SWAPPED pair: the two keys exchanged, with the honest proofs. The
+   // digest binds BOTH keys, so neither signature verifies over the
+   // swapped pair's digest — the import is refused. Without the check the
+   // payments would be unopenable by the recipient (stuck funds).
+   std::string err;
+   try
+   {
+      auto swapped_digest = graphene::wallet::stealth_pair_proof_digest( spend_pub, view_pub );
+      W.import_stealth_address_pubs( "swapped", spend_pub, view_pub,
+                                      remote.view_priv.sign_compact( swapped_digest ),
+                                      remote.spend_priv.sign_compact( swapped_digest ) );
+   }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "proof" ) != std::string::npos, err );
+
+   // A SUPPLIED spend pub: the supplier holds the spend key and signs for
+   // it, but it cannot sign for the view pub — so the import is refused and
+   // the supplier cannot open and ring-spend the payments made to it.
+   err.clear();
+   try
+   {
+      W.import_stealth_address_pubs( "supplied", view_pub, spend_pub,
+                                      remote.spend_priv.sign_compact( digest ),
+                                      remote.spend_priv.sign_compact( digest ) );
+   }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "proof" ) != std::string::npos, err );
+
+   // The correct pair with both proofs is accepted.
+   auto recs = W.import_stealth_address_pubs( "good", view_pub, spend_pub,
+                                               remote.view_priv.sign_compact( digest ),
+                                               remote.spend_priv.sign_compact( digest ) );
+   BOOST_CHECK_EQUAL( recs.size(), 1u );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_SUITE_END()

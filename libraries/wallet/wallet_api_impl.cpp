@@ -202,6 +202,72 @@ namespace graphene { namespace wallet { namespace detail {
          s.set_fee(op);
    }
 
+   blind_counterparty wallet_api_impl::resolve_blind_counterparty( const std::string& label_or_key,
+                                                                    bool allow_wallet_owned )const
+   {
+      blind_counterparty rcpt;
+
+      // (1) a dual-key record named by its label.
+      for( const auto& r : _wallet.stealth_addresses )
+      {
+         if( r.label != label_or_key )
+            continue;
+         // Refuse a dual-key address without a spend key: the spend-derived
+         // opening cannot be computed, and the view-derived fallback would
+         // leak the opening to every view-key holder.
+         // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+         FC_ASSERT( r.spend_pub != public_key_type(),
+                    "Dual-key address without a spend key: refusing to build the output "
+                    "(the spend-derived opening cannot be computed, and the view-derived "
+                    "fallback would leak the opening to every view-key holder)" );
+         rcpt.view_pub  = r.view_pub;
+         rcpt.spend_pub = r.spend_pub;
+         rcpt.key       = r.view_pub;   // the address identity (the view pub)
+         rcpt.dual = true;
+         return rcpt;
+      }
+
+      // (2) the wallet's address book (a labeled key).
+      auto label_itr = _wallet.labeled_keys.get<by_label>().find( label_or_key );
+      if( label_itr != _wallet.labeled_keys.get<by_label>().end() )
+      {
+         rcpt.key = label_itr->key;
+         rcpt.from_address_book = true;
+      }
+      else
+      {
+         // A bare key: the base58 form (a remote dual-key recipient shares
+         // its view pub that way).
+         try { rcpt.key = fc::variant( label_or_key, 1 ).as<public_key_type>( 1 ); }
+         catch( ... ) {}
+      }
+
+      // (3) a dual-key record whose VIEW pub is that key: the wallet's own
+      // "<label>.view" label lands here, and so does a remote dual-key
+      // recipient the sender already holds a record for.
+      for( const auto& r : _wallet.stealth_addresses )
+      {
+         if( r.view_pub != rcpt.key )
+            continue;
+         FC_ASSERT( r.spend_pub != public_key_type(),
+                    "Dual-key address without a spend key: refusing to build the output "
+                    "(the spend-derived opening cannot be computed, and the view-derived "
+                    "fallback would leak the opening to every view-key holder)" );
+         rcpt.view_pub  = r.view_pub;
+         rcpt.spend_pub = r.spend_pub;
+         rcpt.key       = r.view_pub;   // the address identity (the view pub)
+         rcpt.dual = true;
+         return rcpt;
+      }
+
+      // The wallet's own key (the sender side of a blind transfer): it is not
+      // in the address book, but the wallet holds the private key.
+      if( allow_wallet_owned && _keys.find( rcpt.key ) != _keys.end() )
+         rcpt.wallet_owned = true;
+
+      return rcpt;
+   }
+
    operation wallet_api_impl::get_prototype_operation( string operation_name )
    {
       auto it = _prototype_ops.find( operation_name );

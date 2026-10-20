@@ -24,6 +24,7 @@
 #pragma once
 
 #include <fc/optional.hpp>
+#include <fc/crypto/elliptic.hpp>
 #include <functional>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
@@ -937,19 +938,45 @@ class wallet_api
        * @param opt_from if not empty and the sender is a unknown public key,
        *                 then the unknown public key will be given the label \c opt_from
        * @param opt_memo a self-defined label for this transfer to be saved in local wallet file
-       * @param known_opening the opening of the output when the chain does not
-       *                 carry it (the change output of a spend-derived op40:
-       *                 its opening is the conservation difference, and the
-       *                 memo must not reveal the recipient's opening as a
-       *                 difference). The value is still checked against the
-       *                 memo's commitment.
        * @return a blind receipt
        */
       blind_receipt receive_blind_transfer( const string& confirmation_receipt,
                                             const string& opt_from,
-                                            const string& opt_memo,
-                                            fc::optional<fc::sha256> known_opening
-                                              = fc::optional<fc::sha256>() )const;
+                                            const string& opt_memo )const;
+
+      /**
+       * Record the receipt for an op40/op41 CHANGE output.
+       *
+       * The change output's opening is a conservation difference (the sum of
+       * the spent inputs' openings minus the to-output's), so the chain
+       * carries no opening for it and the receiver cannot re-derive it. The
+       * wallet computed it when it built the operation, so it hands it over
+       * here and the receipt (which holds the opening) is the durable
+       * landing: the sender's change is never stranded.
+       *
+       * Not remote-callable (no FC_API entry by design): this is the
+       * wallet's own hand-off of a value it computed.
+       */
+      void record_change_receipt( const blind_confirmation::output& change_output,
+                                   const string& from_label, const string& memo )const;
+
+      /**
+       * Record a receipt for an output whose opening the WALLET computed
+       * itself and the chain does not carry: the change output of an op40
+       * (its opening is the conservation difference — the sum of the spent
+       * inputs' openings minus the to-output's — and the memo must not
+       * reveal the recipient's opening as a difference, so the chain carries
+       * no opening for it).
+       *
+       * The value is checked against the memo's commitment, so a wrong one is
+       * rejected. It is NOT remote-callable (no FC_API entry by design): a
+       * remote party must not be able to choose the reading of an output
+       * (the age gate exists for exactly that reason).
+       */
+      blind_receipt receive_blind_transfer_with_opening( const string& confirmation_receipt,
+                                                         const string& opt_from,
+                                                         const string& opt_memo,
+                                                         const fc::sha256& known_opening )const;
 
       /**
        * RP5: create a deterministic dual-key stealth address from a brainkey
@@ -969,7 +996,8 @@ class wallet_api
             const public_key_type& spend_pub )const;
 
       /**
-       * Import a REMOTE dual-key stealth address by its two public keys.
+       * Import a REMOTE dual-key stealth address by its two public keys AND a
+       * proof that the pair belongs together.
        *
        * A remote dual-key recipient shares its view pub and its spend pub.
        * Without the spend pub the sender cannot derive the output's opening
@@ -978,16 +1006,38 @@ class wallet_api
        * wallet refuses to build for a recipient it cannot classify. This
        * record is what makes the remote dual path reachable.
        *
+       * The pair is proved by BOTH of its holders: the view key holder and
+       * the spend key holder each sign the domain-separated digest that binds
+       * the two public keys (`stealth_pair_proof_digest`). An unproved pair
+       * is refused:
+       *
+       *  - a SWAPPED pair (the two keys exchanged) changes the digest, so
+       *    neither signature verifies — without this check the payments would
+       *    be unopenable by the recipient and the funds stuck;
+       *  - a pair whose SPEND pub the supplier holds (the substitution case)
+       *    can only be vouched for by the holder of the view pub, so the
+       *    supplier cannot open and ring-spend the payments made to it.
+       *
+       * The proof binds the pair; it does NOT authenticate the address
+       * against the person you meant to pay — verify the address with the
+       * recipient over a channel you trust (the consensus owner-key leg is
+       * the structural fix).
+       *
        * No private key is stored: the record is watch-only (the sender never
        * holds the recipient's keys).
        *
        * @param label the local label of the record
        * @param view_pub the recipient's view public key
        * @param spend_pub the recipient's spend public key
+       * @param view_proof the view key holder signing
+       *                `stealth_pair_proof_digest( view_pub, spend_pub )`
+       * @param spend_proof the spend key holder signing the same digest
        */
       vector<stealth_address_record> import_stealth_address_pubs(
             const string& label, const public_key_type& view_pub,
-            const public_key_type& spend_pub )const;
+            const public_key_type& spend_pub,
+            const fc::ecc::compact_signature& view_proof,
+            const fc::ecc::compact_signature& spend_proof )const;
 
       /**
        * RP5: bulk scan over the node's recognition API; verifies each memo

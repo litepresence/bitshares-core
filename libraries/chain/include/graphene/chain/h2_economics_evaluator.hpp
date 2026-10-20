@@ -86,9 +86,14 @@ namespace graphene { namespace chain {
     *
     * LIVE is the debt-path rule: a value that outlived its lifetime is
     * refused, so a stale price can never carry new debt. AGE_EXEMPT is the
-    * settlement-path rule: the age condition is dropped and NOTHING else,
-    * so the bonded live set, the guard's hold, the frozen oracle and the
-    * promotion proof still apply.
+    * settlement-path rule: the three conditions a DEAD feed trips are dropped
+    * (the age beyond "never consumed", the bonded live set, and the guard's
+    * consumption hold), and everything else still applies (a frozen oracle,
+    * a never-consumed value, the promotion proof, the value's validity, the
+    * series range, the guard's existence). The bonded live set MUST be
+    * dropped: a producer's submission and the aggregate it produced expire
+    * under the same lifetime, so requiring one would make the settlement
+    * fallback unreachable in the case it exists for.
     */
    enum class h2_price_liveness { live, age_exempt };
 

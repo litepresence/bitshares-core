@@ -783,9 +783,13 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
     //
     // USD-terms leg (H2d, closes the H2c-deferred raw-vs-USD check): when the
     // source vault carries a canonical bound oracle, the payout converts
-    // through the live H2 price read (primary, else the single backup). A
-    // dual-stale read refuses the claim: conversion-dependent exits halt
-    // rather than pay on a dead price. Unbound vaults keep the H2c same-asset
+    // through the SETTLEMENT price (the live H2 read when there is one, else
+    // the oracle's last consumed price). A book whose oracle never promoted
+    // a price still refuses the claim: conversion-dependent exits halt rather
+    // than pay on a price that does not exist. The payout stays bounded by
+    // the book's own pool: the pro-rata leg cannot exceed the segregated
+    // slice, so a stale price can mis-size the haircut cap but can never pay
+    // out more than the book holds. Unbound vaults keep the H2c same-asset
     // math byte-identical.
     const vault_object* source = d.find( _winddown->source_vault );
     share_type payout;

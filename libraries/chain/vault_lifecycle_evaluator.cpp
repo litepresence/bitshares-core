@@ -406,7 +406,7 @@ void process_h2_vault_maintenance( database& d )
             // retried at the next sweep: the breach-time halt transition
             // already ran, so nothing is missed, and no partial state is
             // written.
-            const auto seat_price = h2_read_pair_price( d, *itr, 0, now );
+            const auto seat_price = h2_read_settlement_price( d, *itr, 0 );
             const bool seat_price_ok = !itr->bound_oracle.valid()
                                        || !h2_winddown_claims_present( d, *itr )
                                        || ( seat_price.valid()
@@ -611,11 +611,17 @@ void_result vault_resolve_evaluator::do_evaluate( const vault_resolve_operation&
    _seat_price = optional<protocol::oracle_value>();
    if( vault->bound_oracle.valid() && h2_winddown_claims_present( d, *vault ) )
    {
-      const auto price = h2_read_pair_price( d, *vault, 0, d.head_block_time() );
+      // The settlement path may size the seat with the oracle's LAST consumed
+      // price when the live read is dead: a bound vault whose oracle died
+      // could otherwise never wind down, and the party with the most at risk
+      // (the owner, whose bond cannot be released while the claims stand) has
+      // no remedy. The debt path keeps the live read and keeps refusing.
+      // Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 3
+      const auto price = h2_read_settlement_price( d, *vault, 0 );
       FC_ASSERT( price.valid() && price->base_amount > share_type( 0 )
                  && price->quote_amount > share_type( 0 ),
-                 "Conversion-dependent settlement halted: no live price "
-                 "for bound vault with claims" );
+                 "Conversion-dependent settlement halted: no price for bound "
+                 "vault with claims" );
       // The price that admitted the resolve is the price the seat uses, so
       // the checked economics and the seated economics cannot diverge.
       _seat_price = price;
@@ -777,17 +783,29 @@ void_result winddown_claim_evaluator::do_evaluate( const winddown_claim_operatio
     //
     // USD-terms leg (H2d, closes the H2c-deferred raw-vs-USD check): when the
     // source vault carries a canonical bound oracle, the payout converts
-    // through the live H2 price read (primary, else the single backup). A
-    // dual-stale read refuses the claim: conversion-dependent exits halt
-    // rather than pay on a dead price. Unbound vaults keep the H2c same-asset
+    // through the SETTLEMENT price (the live H2 read when there is one, else
+    // the oracle's last consumed price). A book whose oracle never promoted
+    // a price still refuses the claim: conversion-dependent exits halt rather
+    // than pay on a price that does not exist. The payout stays bounded by
+    // the book's own pool: the pro-rata leg cannot exceed the segregated
+    // slice, so a stale price can mis-size the haircut cap but can never pay
+    // out more than the book holds. Unbound vaults keep the H2c same-asset
     // math byte-identical.
     const vault_object* source = d.find( _winddown->source_vault );
     share_type payout;
     if( source != nullptr && source->bound_oracle.valid() )
     {
-       const auto price = h2_read_pair_price( d, *source, 0, d.head_block_time() );
+       // The settlement path may use the oracle's last consumed price: a book
+       // that cannot be paid is not a settlement, and a dead oracle would
+       // otherwise strand the claims forever. The payout stays bounded by the
+       // book's own pool (the pro-rata leg cannot exceed the segregated
+       // slice), so a stale price can mis-size the haircut cap but can never
+       // pay out more than the book holds.
+       // Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 3
+       const auto price = h2_read_settlement_price( d, *source, 0 );
        FC_ASSERT( price.valid(),
-                  "Bound price leg is dual-stale; conversion-dependent claims halt" );
+                  "Bound price leg is dead and no consumed price survives; "
+                  "conversion-dependent claims halt" );
        payout = h2_converted_payout_for_claim(
              op.claim_amount, _winddown->segregated_bond,
              _winddown->total_claims, _winddown->haircut_bps, *price );

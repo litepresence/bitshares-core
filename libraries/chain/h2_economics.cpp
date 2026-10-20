@@ -706,7 +706,8 @@ void h2_observe_pool_exchange( database& d, liquidity_pool_id_type pool_id,
 }
 
 optional<protocol::oracle_value> h2_read_consumed_price(
-      const database& d, oracle_id_type oracle, uint16_t series, time_point_sec now )
+      const database& d, oracle_id_type oracle, uint16_t series, time_point_sec now,
+      h2_price_liveness liveness )
 {
    const oracle_object* o = d.find( oracle );
    if( o == nullptr || o->options.frozen )
@@ -718,35 +719,143 @@ optional<protocol::oracle_value> h2_read_consumed_price(
     // an H2 price. H1-style oracles (quorum-live, never bonded) fail closed
     // here, so unbonded inputs can never move bonded medians or debt taps.
     // (R3-02: the gate is one bounded scan; see its cost note.)
-    if( !h2_oracle_has_bonded_live_set( d, *o, now ) )
+    //
+    // The AGE_EXEMPT mode drops this condition, and it must: a producer's
+    // submission and the aggregate it produced expire under the SAME
+    // value_lifetime_sec, so a feed that went dead has no bonded live set
+    // either, and requiring one would make the settlement fallback
+    // unreachable in the exact case it exists for. The cost is that an
+    // inflated-then-stale price is not caught by this gate, and the tripwire
+    // cannot see a stale feed either, so that exposure is disclosed and
+    // monitored (the realized drift per wind-down) rather than mitigated here.
+    if( liveness == h2_price_liveness::live
+        && !h2_oracle_has_bonded_live_set( d, *o, now ) )
        return optional<protocol::oracle_value>();
    // Read-time liveness counts from the sample's formation time (H1 rule: a
-   // delayed value cannot outlive its data).
-   if( o->consumed_value_time == time_point_sec()
-       || ( now - o->consumed_value_time ).to_seconds()
+   // delayed value cannot outlive its data). The AGE_EXEMPT mode drops
+   // exactly this condition, and nothing else: the bonded live set, the
+   // guard's hold, the frozen oracle and the promotion proof all still
+   // apply, so the settlement path cannot use a price whose producers are
+   // no longer bonded live (the tripwire cannot see a stale feed, so the
+   // price bonding does not price that risk).
+   // A value that was never consumed is not a price, in either mode.
+   if( o->consumed_value_time == time_point_sec() )
+      return optional<protocol::oracle_value>();
+   if( liveness == h2_price_liveness::live
+       && ( now - o->consumed_value_time ).to_seconds()
             >= int64_t( o->options.value_lifetime_sec ) )
       return optional<protocol::oracle_value>();
    const guard_state_object* guard = h2_find_guard( d, oracle );
-   if( guard == nullptr || guard->consumption_hold )
+   if( guard == nullptr )
       return optional<protocol::oracle_value>();
-   // Liveness-at-promotion: the newest record for this sample time must show
-   // quorum, the absolute-grid anchor, and the current committee delay.
+   // The hold is a rate latch on promotion, not a statement about the value,
+   // so the settlement path does not refuse on it.
+   if( liveness == h2_price_liveness::live && guard->consumption_hold )
+      return optional<protocol::oracle_value>();
+   if( !h2_consumed_price_promotion_proven( d, *o ) )
+      return optional<protocol::oracle_value>();
+   return ( *o->consumed_value )[ series ];
+}
+
+/// The promotion proof: the newest promotion-log record for the consumed
+/// value's sample time must show quorum, the absolute-grid anchor, and the
+/// current committee delay. This is what makes a consumed value a PRICE
+/// rather than a raw number. The live read and the settlement read share one
+/// definition of it, so they can never disagree about the value, only about
+/// whether it may be used.
+static bool h2_consumed_price_promotion_proven( const database& d,
+                                                const oracle_object& o )
+{
+   const guard_state_object* guard = h2_find_guard( d, o.id );
+   if( guard == nullptr )
+      return false;
    const uint32_t delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
    const uint32_t anchor = h2_osm_bucket_anchor(
-         uint32_t( o->consumed_value_time.sec_since_epoch() ), delay );
-   bool proven = false;
+         uint32_t( o.consumed_value_time.sec_since_epoch() ), delay );
    for( auto ritr = guard->promotion_log.rbegin();
          ritr != guard->promotion_log.rend(); ++ritr )
    {
-      if( ritr->promote_time != o->consumed_value_time )
+      if( ritr->promote_time != o.consumed_value_time )
          continue;
-      proven = ritr->producer_count >= o->options.minimum_producers
-               && ritr->anchor == anchor && ritr->delay_sec == delay;
-      break; // newest record for this time decides
+      return ritr->producer_count >= o.options.minimum_producers
+              && ritr->anchor == anchor && ritr->delay_sec == delay;
    }
-   if( !proven )
+   return false;
+}
+
+/// The oracle's LAST consumed price: the value the guard promoted, with the
+/// three conditions a DEAD feed trips dropped (the age beyond "never
+/// consumed", the bonded live set, and the guard's consumption hold). What
+/// still applies: a frozen oracle, a never-consumed value, the promotion
+/// proof, the value's validity and the series range.
+///
+/// The exposure this leaves: a price that was inflated and then went stale
+/// is not caught here, and the tripwire cannot see a stale feed either, so
+/// the price bonding does not price it. The blast radius is the vault's own
+/// money and the protocol's haircut remainder, and the realized drift per
+/// wind-down is the daily monitor for it.
+///
+/// The live read refuses a value that is older than value_lifetime_sec, that
+/// has no bonded live set right now, or that sits behind the guard's
+/// consumption hold. Those three conditions say "this price may not carry NEW
+/// DEBT" (a stale price must not mint or redeem); they do not say the value
+/// is not a price. The settlement path needs a price it can size a seizure
+/// with, and the wind-down's own claims must be payable even when the oracle
+/// died: a bound vault whose oracle is dead could otherwise never wind down,
+/// and the party with the most at risk (the vault's owner, whose bond cannot
+/// be released while the claims stand) has no way to fix that.
+///
+/// What is kept is the promotion proof: the value must have been promoted
+/// under the guard (quorum, anchor, delay), which is what makes it a price at
+/// all. A frozen oracle is not refused either: the freeze closes the debt
+/// tap, and the claims it froze must still be settleable.
+///
+/// Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 2
+optional<protocol::oracle_value> h2_read_last_consumed_price(
+      const database& d, oracle_id_type oracle, uint16_t series )
+{
+   return h2_read_consumed_price( d, oracle, series, d.head_block_time(),
+                                   h2_price_liveness::age_exempt );
+}
+
+/// The price the SETTLEMENT path may use: the live read when there is one,
+/// otherwise the oracle's last consumed price (primary, then the
+/// owner-controlled backup, never after a freeze of the primary, and always
+/// at the series the owner nominated for that oracle).
+///
+/// The debt path never calls this: minting and redeeming keep the live read
+/// and keep failing closed on a dead price. Only the wind-down's seat and the
+/// wind-down claim's haircut leg use it, and both are bounded by the book's
+/// own pool, so a stale price can mis-size a seat but can never pay out more
+/// than the book holds.
+///
+/// Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 3
+optional<protocol::oracle_value> h2_read_settlement_price(
+      const database& d, const vault_object& vault, uint16_t series )
+{
+   const auto live = h2_read_pair_price( d, vault, series, d.head_block_time() );
+   if( live.valid() )
+      return live;
+   if( !vault.bound_oracle.valid() )
       return optional<protocol::oracle_value>();
-   return ( *o->consumed_value )[ series ];
+   auto last = h2_read_last_consumed_price( d, *vault.bound_oracle, series );
+   if( last.valid() )
+      return last;
+   // ATR-R17-01, same rule as the live read: the owner-controlled backup
+   // covers staleness and liveness loss of the bound series, never an
+   // administrative freeze of the bound oracle itself. The live read
+   // refuses the hop after a freeze, so the settlement read must refuse it
+   // too, or a committee freeze would stop holding the pair here.
+   {
+      const oracle_object* po = d.find( *vault.bound_oracle );
+      if( po != nullptr && po->options.frozen )
+         return optional<protocol::oracle_value>();
+   }
+   const guard_state_object* guard = h2_find_guard( d, *vault.bound_oracle );
+   if( guard != nullptr && guard->fallback )
+      last = h2_read_last_consumed_price( d, guard->fallback->oracle_id,
+                                          guard->fallback->series );
+   return last;
 }
 
 optional<protocol::oracle_value> h2_read_pair_price(
@@ -754,7 +863,8 @@ optional<protocol::oracle_value> h2_read_pair_price(
 {
    if( !vault.bound_oracle.valid() )
       return optional<protocol::oracle_value>();
-   const auto primary = h2_read_consumed_price( d, *vault.bound_oracle, series, now );
+   const auto primary = h2_read_consumed_price( d, *vault.bound_oracle, series, now,
+                                             h2_price_liveness::live );
    if( primary.valid() )
       return *primary;
    // ATR-R17-01: the owner-controlled backup
@@ -778,7 +888,8 @@ optional<protocol::oracle_value> h2_read_pair_price(
    if( guard == nullptr || !guard->fallback.valid() )
       return optional<protocol::oracle_value>();
    return h2_read_consumed_price( d, guard->fallback->oracle_id,
-                                  guard->fallback->series, now );
+                                  guard->fallback->series, now,
+                                  h2_price_liveness::live );
 }
 
 bool h2_redemptions_halted( const database& d, asset_id_type pair )

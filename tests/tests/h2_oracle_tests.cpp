@@ -1063,10 +1063,17 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    BOOST_CHECK( db.get_balance( dave_id, asset_id_type() ).amount
                 == dave_before + share_type( 1000000 ) );
 
-   // Dual-stale halts: no live leg, no conversion-dependent claim.
+   // Dual-stale: the DEBT leg has no live price, but the SETTLEMENT leg
+   // does: the claim converts through the oracle's last consumed price, and
+   // the payout stays bounded by the book's own pool. The claim needs a
+   // senior entitlement of its own (R11-R1), so one is issued here: a
+   // refusal must be the price's, not the entitlement's.
    generate_blocks( db.head_block_time() + 90000 );
    generate_block();
    BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+   h2e_issue_pair_face( *this, alice_id, alice_private_key, alice_id,
+                        wdid( db ).pair, face );
+   const share_type alice_before = db.get_balance( alice_id, asset_id_type() ).amount;
    winddown_claim_operation sop;
    sop.claimant     = alice_id;
    sop.winddown     = wdid;
@@ -1076,7 +1083,8 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    db.current_fee_schedule().set_fee( stx.operations.back() );
    set_expiration( db, stx );
    stx.sign( alice_private_key, db.get_chain_id() );
-   BOOST_CHECK_THROW( PUSH_TX( db, stx ), fc::exception );
+   PUSH_TX( db, stx );
+   BOOST_CHECK( db.get_balance( alice_id, asset_id_type() ).amount > alice_before );
 } FC_LOG_AND_RETHROW() }
 
 /// ATR-R17-01 (CONFIRMED_IMPORTANT): an administrative freeze of
@@ -1795,7 +1803,12 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
    generate_block();
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
-   // Deferred: the vault never left TOPUP and no book was seated for it.
+   // Still deferred, and the reason is sharper than the design-3 reason: the
+   // settlement path drops the AGE condition and nothing else, so an oracle
+   // with no producer bond has no price to settle with (the bonded live set
+   // is part of what makes a consumed value an H2 price). This vault's
+   // wind-down stays unreachable.
+   // Spec: docs/superpowers/specs/2026-10-20-winddown-settlement-price.md section 2
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
    {
       const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices()
@@ -1806,10 +1819,13 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
    BOOST_REQUIRE( oid( db ).consumed_value.valid() );
    BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
 
-   // Debt blocked: the conversion-dependent exit never opened for this
-   // vault, so a senior claim has no book to draw on. The refusal must
-   // name the missing wind-down, not some other guard: the price leg is
-   // never reached, because the seat never ran.
+   // Debt blocked: this oracle has no producer bond, so the pair read still
+   // fails closed and no new debt may be minted or redeemed against it.
+   BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
+
+   // And the exit is still blocked, on the missing book: a claim against a
+   // wind-down that was never seated must be refused for that reason, not
+   // for some other guard.
    winddown_claim_operation cop;
    cop.claimant     = carol_id;
    cop.winddown     = winddown_vault_id_type( 0 );

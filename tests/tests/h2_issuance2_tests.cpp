@@ -2916,22 +2916,13 @@ BOOST_AUTO_TEST_CASE( seat_bound_caps_seating_and_leaves_the_surplus_with_its_ow
    generate_block();
    BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
 
-   // Dead price at the sweep that expires the top-up window: the wind-down
-   // is deferred to the next sweep (no book, no funds moved), not seated
-   // against a dead price.
+   // Dead price at the sweep that expires the top-up window: the SETTLEMENT
+   // path seats the bounded book from the oracle's last consumed price
+   // (design 3 section 3.2 relaxed by the settlement-price spec), so the
+   // wind-down is created instead of deferred.
    while( db.get_dynamic_global_properties().next_maintenance_time
           < d.vault( db ).top_up_deadline )
       generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
-   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
-   generate_block();
-   BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_TOPUP );
-   BOOST_CHECK( db.get_index_type<winddown_vault_index>().indices().begin()
-                == db.get_index_type<winddown_vault_index>().indices().end() );
-
-   // A live price at the next sweep seats the bounded book.
-   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
-   h2j_publish( *this, d.oracle, bob_id, bob_private_key, H2J_BASE, H2J_QUOTE );
-   generate_block();
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE( d.vault( db ).maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN );

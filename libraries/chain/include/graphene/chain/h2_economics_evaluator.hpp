@@ -81,9 +81,20 @@ namespace graphene { namespace chain {
     * mismatched promotion record, series out of range). Fail-closed in every
     * direction: absence is never an error, only a halt signal for callers.
     */
+   /**
+    * The liveness mode of a consumed-price read.
+    *
+    * LIVE is the debt-path rule: a value that outlived its lifetime is
+    * refused, so a stale price can never carry new debt. AGE_EXEMPT is the
+    * settlement-path rule: the age condition is dropped and NOTHING else,
+    * so the bonded live set, the guard's hold, the frozen oracle and the
+    * promotion proof still apply.
+    */
+   enum class h2_price_liveness { live, age_exempt };
+
    optional<protocol::oracle_value> h2_read_consumed_price(
          const database& d, oracle_id_type oracle, uint16_t series,
-         time_point_sec now );
+         time_point_sec now, h2_price_liveness liveness );
 
    /**
     * Pair price through the canonical binding: the bound oracle's consumed

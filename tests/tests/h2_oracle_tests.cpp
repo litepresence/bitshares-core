@@ -851,7 +851,7 @@ BOOST_AUTO_TEST_CASE( promotion_rate_limit_holds_h2_reads_past_512 )
    const guard_state_object* guard1 = h2e_find_guard( *this, oid );
    BOOST_CHECK_EQUAL( guard1->consumption_hold, true );
    BOOST_CHECK( oid( db ).current_value.valid() );
-   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time(), h2_price_liveness::live ).valid() );
 
    // The next interval window clears the hold: reads resume.
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
@@ -860,7 +860,7 @@ BOOST_AUTO_TEST_CASE( promotion_rate_limit_holds_h2_reads_past_512 )
    const guard_state_object* guard2 = h2e_find_guard( *this, oid );
    BOOST_CHECK_EQUAL( guard2->consumption_hold, false );
    BOOST_CHECK_EQUAL( guard2->promotion_count, 1u );
-   BOOST_CHECK( h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+   BOOST_CHECK( h2_read_consumed_price( db, oid, 0, db.head_block_time(), h2_price_liveness::live ).valid() );
 } FC_LOG_AND_RETHROW() }
 
 /// Fallback op auth + switch semantics: owner sets, strangers cannot;
@@ -1750,7 +1750,7 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
    // H1 liveness holds (consumed tracks raw, quorum met)...
    BOOST_REQUIRE( oid( db ).consumed_value.valid() );
    // ...but H2 reads fail closed without a bonded live set.
-   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time(), h2_price_liveness::live ).valid() );
 
    // Bound vault on a plain UIA: pin the canonical binding, then unfreeze for
    // the test (binding persists; the freeze was the pin).
@@ -2372,7 +2372,7 @@ BOOST_AUTO_TEST_CASE( weight_zero_bonded_producer_does_not_satisfy_gate )
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    // Control: bonded weight-1 live producer satisfies the H2 read.
    BOOST_REQUIRE( oid( db ).consumed_value.valid() );
-   BOOST_REQUIRE( h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+   BOOST_REQUIRE( h2_read_consumed_price( db, oid, 0, db.head_block_time(), h2_price_liveness::live ).valid() );
 
    // Adversarial state, forced white-box: the bonded live producer's weight
    // drops to 0 (same bond, same live submission, same producer entry).
@@ -2383,14 +2383,14 @@ BOOST_AUTO_TEST_CASE( weight_zero_bonded_producer_does_not_satisfy_gate )
    // re-read until the next publish)...
    BOOST_REQUIRE( oid( db ).consumed_value.valid() );
    // ...but the H2 gate refuses: weight 0 backs nothing.
-   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+   BOOST_CHECK( !h2_read_consumed_price( db, oid, 0, db.head_block_time(), h2_price_liveness::live ).valid() );
 
    // Restoring the weight restores the read (the refusal is the weight,
    // not the bond or the submission).
    db.modify( oid( db ), [&]( oracle_object& o ) {
       o.options.producers[bob_id].weight = 1;
    } );
-   BOOST_CHECK( h2_read_consumed_price( db, oid, 0, db.head_block_time() ).valid() );
+   BOOST_CHECK( h2_read_consumed_price( db, oid, 0, db.head_block_time(), h2_price_liveness::live ).valid() );
 } FC_LOG_AND_RETHROW() }
 
 /// X-06 H2-side joint-outcome pin (R4-05: honestly NOT a step-through

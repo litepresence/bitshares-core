@@ -25,6 +25,7 @@
 #include <graphene/protocol/confidential.hpp>
 
 #include <fc/crypto/base58.hpp>
+#include <fc/crypto/elliptic.hpp>
 #include <fc/io/raw.hpp>
 
 namespace graphene { namespace protocol {
@@ -47,7 +48,18 @@ void transfer_to_blind_operation::validate()const
    }
    FC_ASSERT( out.size(), "there must be at least one output" );
 
-   auto public_c = fc::ecc::blind(blinding_factor,net_public);
+   blind_factor_type sum_openings;
+   if( !per_output_openings.empty() )
+   {
+      FC_ASSERT( per_output_openings.size() == outputs.size(),
+                 "per_output_openings must have one entry per output" );
+      sum_openings = fc::ecc::blind_sum( per_output_openings, per_output_openings.size() );
+   }
+   else
+   {
+      sum_openings = blinding_factor;
+   }
+   auto public_c = fc::ecc::blind(sum_openings,net_public);
 
    FC_ASSERT( fc::ecc::verify_sum( {public_c}, out, 0 ), "", ("net_public",net_public) );
 
@@ -122,6 +134,12 @@ void blind_transfer_operation::validate()const
    }
    FC_ASSERT( in.size(), "there must be at least one input" );
    FC_ASSERT( fc::ecc::verify_sum( in, out, net_public ), "", ("net_public", net_public) );
+
+   if( !per_output_openings.empty() )
+   {
+      FC_ASSERT( per_output_openings.size() == outputs.size(),
+                 "per_output_openings must have one entry per output" );
+   }
 
    if( outputs.size() > 1 )
    {

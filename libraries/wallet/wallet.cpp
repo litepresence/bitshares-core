@@ -2242,7 +2242,22 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
       bop.outputs.push_back(out);
     }
    bop.amount          = total_amount;
-   bop.blinding_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() );
+   // Per-output openings (Decision 1): publish one opening per output (in output
+   // order) and retire the published sum. The conservation check keys off the
+   // field when it is non-empty, so the sum field is zero.
+   {
+      // Reorder openings to match the sorted outputs.
+      std::vector<std::pair<fc::ecc::commitment_type, fc::sha256>> paired;
+      paired.reserve( bop.outputs.size() );
+      for( size_t i = 0; i < bop.outputs.size(); ++i )
+         paired.push_back( { bop.outputs[i].commitment, blinding_factors[i] } );
+      std::sort( paired.begin(), paired.end(),
+                 []( const auto& a, const auto& b ){ return a.first < b.first; } );
+      bop.per_output_openings.clear();
+      for( const auto& p : paired )
+         bop.per_output_openings.push_back( p.second );
+   }
+   bop.blinding_factor = fc::sha256();
 
    /** commitments must be in sorted order */
    std::sort( bop.outputs.begin(), bop.outputs.end(),

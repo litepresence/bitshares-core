@@ -606,6 +606,20 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
               o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
               "Unknown proof version" );
+   // Per-output openings field gate (Decision 1): required for V3, empty for
+   // V1/V2 (grandfathered).
+   if( o.proof_version >= protocol::GRAPHENE_STEALTH_PROOF_V3 )
+   {
+      FC_ASSERT( !o.per_output_openings.empty(),
+                 "per_output_openings required for proof_version >= V3" );
+      FC_ASSERT( o.per_output_openings.size() == o.outputs.size(),
+                 "per_output_openings must have one entry per output" );
+   }
+   else
+   {
+      FC_ASSERT( o.per_output_openings.empty(),
+                 "per_output_openings must be empty for V1/V2" );
+   }
    // parity float rule (BSIP-2 §2): pool-empty / cap-hit /
    // review-missed floats the required fee to the cost anchor. Skipped
    // exactly when the fee-schedule check is skipped (no fee paid, no subsidy

@@ -181,6 +181,7 @@ constexpr uint32_t GRAPHENE_STEALTH_POOL_WARN_DEPTH = 22;
 /// V2 = Bulletproofs+ (G1 wire format, secp256k1 port of 2020-735).
 constexpr uint8_t GRAPHENE_STEALTH_PROOF_V1 = 1;
 constexpr uint8_t GRAPHENE_STEALTH_PROOF_V2 = 2;
+constexpr uint8_t GRAPHENE_STEALTH_PROOF_V3 = 3;
 
 /// Ring-scheme versions (migration vehicle, R7 C-10). The proof
 /// version above versions the RANGE proofs and nullifier domains; the ring
@@ -430,6 +431,10 @@ struct stealth_transfer_operation : public base_operation
    blind_factor_type              excess; ///< sum(in blinds) - sum(out blinds), mod n
    vector<stealth_ring_input>     inputs;
    vector<stealth_blind_output>   outputs;
+
+   /// Per-output openings (appended-last). Empty for V1/V2; required (one per
+   /// output) for proof_version >= V3.
+   vector<blind_factor_type>      per_output_openings;
 
    extensions_type                extensions; ///< appended-last; new fields go here
 
@@ -683,7 +688,7 @@ FC_REFLECT( graphene::protocol::stealth_recognition,
 FC_REFLECT( graphene::protocol::stealth_blind_output,
             (commitment)(range_proof)(owner)(recognition) )
 FC_REFLECT( graphene::protocol::stealth_transfer_operation,
-            (fee)(asset_id)(proof_version)(excess)(inputs)(outputs)(extensions) )
+            (fee)(asset_id)(proof_version)(excess)(inputs)(outputs)(per_output_openings)(extensions) )
 FC_REFLECT( graphene::protocol::freeze_blind_operation,
             (fee)(voter)(freeze)(reason)(extensions) )
 FC_REFLECT( graphene::protocol::turnstile_reproof_operation,

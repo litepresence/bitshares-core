@@ -833,10 +833,11 @@ BOOST_AUTO_TEST_CASE( e06_h2_worst_case_block_benchmark )
       if( w.source_vault == vr )
          wd = &w;
    BOOST_REQUIRE( wd != nullptr );
-   // Design 3: the seat is bounded by what the filed exit formula can pay
-   // (the claim book's haircut leg), so the book holds the bound and not the
-   // whole bond; the surplus stays with its owner.
-   BOOST_CHECK( wd->segregated_bond == H2C_VAULT_RAW * 8500 / 10000 );
+   // Design 3: the seat is bounded by what the filed exit formula can pay.
+   // This vault's claims are H2C_VAULT_RAW / 2, so the seat is the haircut
+   // leg of that: 0.85 * (RAW / 2). The base seized the WHOLE bond (RAW);
+   // the bounded seat leaves the surplus (0.575 * RAW) with its owner.
+   BOOST_CHECK( wd->segregated_bond == H2C_VAULT_RAW * 8500 / 20000 );
 } FC_LOG_AND_RETHROW() }
 
 /// Griefing convention (OQ-14 vehicle): stock htlc_create with a sha256 lock

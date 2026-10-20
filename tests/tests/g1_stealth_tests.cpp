@@ -15235,10 +15235,13 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
    BOOST_CHECK( !recs[0].watch_only );
 
    BOOST_TEST_MESSAGE("Nathan sends to the dual-key address");
-   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"}}, false );
+   // TWO outputs: a single-output deposit to a dual-key address would publish
+   // the output's opening (the op39 operation's blinding_factor field is the
+   // sum of the outputs' openings), so the wallet refuses that shape.
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st2","100"}}, false );
    BOOST_REQUIRE_EQUAL( confirm.trx.operations.size(), 1u );
    const auto& ttb = confirm.trx.operations[0].get<transfer_to_blind_operation>();
-   BOOST_REQUIRE_EQUAL( ttb.outputs.size(), 1u );
+   BOOST_REQUIRE_EQUAL( ttb.outputs.size(), 2u );
    const auto& out = ttb.outputs[0];
    BOOST_REQUIRE( out.stealth_memo.valid() && out.stealth_memo->to.valid() );
    // `to` is the AuthKey: neither the view pub nor the spend pub.
@@ -15251,9 +15254,13 @@ BOOST_AUTO_TEST_CASE( rp5_dual_key_scan_round_trip )
    auto head = db.head_block_num();
    const uint32_t scan_from = head >= 5 ? head - 5 : 1;
    auto fresh = W.scan_stealth_recognitions( scan_from, head );
-   BOOST_REQUIRE_EQUAL( fresh.size(), 1u );
-   BOOST_CHECK( fresh[0].amount.amount == core.amount( 20000000 ).amount );
-   BOOST_CHECK( fresh[0].address_key == alice_view );
+   BOOST_REQUIRE_EQUAL( fresh.size(), 2u );
+   // The receipts come back in chain order (the op's outputs are sorted by
+   // commitment), so pick the one that belongs to alice-st.
+   const graphene::wallet::blind_receipt* alice_receipt = nullptr;
+   for( const auto& r : fresh ) if( r.address_key == alice_view ) { alice_receipt = &r; break; }
+   BOOST_REQUIRE( alice_receipt != nullptr );
+   BOOST_CHECK( alice_receipt->amount.amount == core.amount( 20000000 ).amount );
    auto bals = W.get_blind_balances( "alice-st" );
    BOOST_REQUIRE_EQUAL( bals.size(), 1u );
    BOOST_CHECK( bals[0].amount == core.amount( 20000000 ).amount );

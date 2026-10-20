@@ -937,11 +937,19 @@ class wallet_api
        * @param opt_from if not empty and the sender is a unknown public key,
        *                 then the unknown public key will be given the label \c opt_from
        * @param opt_memo a self-defined label for this transfer to be saved in local wallet file
+       * @param known_opening the opening of the output when the chain does not
+       *                 carry it (the change output of a spend-derived op40:
+       *                 its opening is the conservation difference, and the
+       *                 memo must not reveal the recipient's opening as a
+       *                 difference). The value is still checked against the
+       *                 memo's commitment.
        * @return a blind receipt
        */
       blind_receipt receive_blind_transfer( const string& confirmation_receipt,
                                             const string& opt_from,
-                                            const string& opt_memo )const;
+                                            const string& opt_memo,
+                                            fc::optional<fc::sha256> known_opening
+                                              = fc::optional<fc::sha256>() )const;
 
       /**
        * RP5: create a deterministic dual-key stealth address from a brainkey
@@ -958,6 +966,27 @@ class wallet_api
        */
       vector<stealth_address_record> import_stealth_view_key(
             const string& label, const string& view_wif,
+            const public_key_type& spend_pub )const;
+
+      /**
+       * Import a REMOTE dual-key stealth address by its two public keys.
+       *
+       * A remote dual-key recipient shares its view pub and its spend pub.
+       * Without the spend pub the sender cannot derive the output's opening
+       * from the spend key, and the single-key fallback would publish a
+       * view-derived opening (openable by every view-key holder), so the
+       * wallet refuses to build for a recipient it cannot classify. This
+       * record is what makes the remote dual path reachable.
+       *
+       * No private key is stored: the record is watch-only (the sender never
+       * holds the recipient's keys).
+       *
+       * @param label the local label of the record
+       * @param view_pub the recipient's view public key
+       * @param spend_pub the recipient's spend public key
+       */
+      vector<stealth_address_record> import_stealth_address_pubs(
+            const string& label, const public_key_type& view_pub,
             const public_key_type& spend_pub )const;
 
       /**
@@ -2205,6 +2234,7 @@ FC_API( graphene::wallet::wallet_api,
         (receive_blind_transfer)
         (create_stealth_address)
         (import_stealth_view_key)
+        (import_stealth_address_pubs)
         (scan_stealth_recognitions)
         (get_stealth_addresses)
         (get_order_book)

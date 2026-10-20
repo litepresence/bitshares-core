@@ -172,11 +172,16 @@ stealth_sampled_ring stealth_sample_pool_ring( const database& db,
    //   k=14 -> 12                   (1/12 = 0.083)
    //   k=15 -> 14                   (1/14 = 0.071)
    //   k>=16 -> 16                  (1/16 = 0.0625, optimal)
-   // The owner decision on whether this residual is acceptable, or whether
-   // the floor should rise to 16, is recorded in the activation checklist
-   // (R18-PRV-03/R18-PRV-04). NOT claimed by this repair. (See the
-   // g1_stealth suite R17B instrument for the drawn-window-exact repair
-   // check.)
+   // The owner accepted this residual (the activation checklist row
+   // R18-PRV-03/R18-PRV-04 records the decision and the monitoring band).
+   // The floor stays at 12: it is the measured crossover, and raising it to
+   // 16 would push the 12..15 band INTO the blend regime, where the same
+   // instrument measures a posterior of 0.158 at 11 windows and worse below
+   // -- strictly more identifiable, not less. The accepted band is monitored
+   // in the daily attestation (the sampler's distinct-window distribution
+   // per spend), so a pool that lives in the 12..15 band is visible.
+   // (See the g1_stealth suite R17B instrument for the drawn-window-exact
+   // repair check.)
    std::vector<size_t> order( others.size() );
    for( size_t i = 0; i < order.size(); ++i ) order[i] = i;
    for( int attempt = 0; attempt < 32; ++attempt )

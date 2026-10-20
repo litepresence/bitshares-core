@@ -1700,10 +1700,14 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    for( auto rp : scope )
    {
       const auto& rec = *rp;
-      // RP5: watch-only tallies carry no spend authority — refuse to build a
-      // spend from them (fail-closed at build; the tx could never authorize).
-      FC_ASSERT( !( rec.control_authority == authority() ),
-                 "Cannot spend watch-only receipt (tally only, no spend key)",
+      // RP5/VK: a tally-only receipt (a watch-only recognition) carries no
+      // spend authority — refuse to build a spend from it (fail-closed at
+      // build; the tx could never authorize). The refusal is on the EXPLICIT
+      // tally-only marker; the empty-authority arm also covers receipts
+      // written by an older wallet, which has no marker field.
+      // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+      FC_ASSERT( blind_receipt_spendable( rec ),
+                 "Cannot spend tally-only receipt (watch-only recognition: no spend key)",
                  ("commitment",rec.commitment()) );
       if( !blind_receipt_mix_eligible( rec.received_block, head_block, min_mix ) )
       {
@@ -1738,23 +1742,60 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    // Single-key legs degenerate (same key for both).
    fc::ecc::public_key to_secret_base = to_key, to_auth_base = to_key;
    fc::ecc::public_key from_secret_base = from_key, from_auth_base = from_key;
-   for( const auto& r : my->_wallet.stealth_addresses )
+   // A dual-key address may be named by its label or by its view pub, and a
+   // dual-key address whose spend key is unavailable REFUSES the build (the
+   // spend-derived opening cannot be computed, and the view-derived
+   // fallback would hand the opening to every view-key holder).
+   auto resolve_dual = [&]( const string& label, const public_key_type& addr_key,
+                            fc::ecc::public_key& secret_base, fc::ecc::public_key& auth_base ) -> bool
    {
-      if( r.label == to_key_or_label ) { to_secret_base = r.view_pub; to_auth_base = r.spend_pub; }
-      if( r.label == from_key_or_label ) { from_secret_base = r.view_pub; from_auth_base = r.spend_pub; }
-   }
+      bool found = false;
+      for( const auto& r : my->_wallet.stealth_addresses )
+      {
+         if( r.label != label && r.view_pub != addr_key )
+            continue;
+         // Refuse a dual-key address without a spend key: the spend-derived
+         // opening cannot be computed, and the view-derived fallback would
+         // leak the opening to every view-key holder.
+         // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+         FC_ASSERT( r.spend_pub != public_key_type(),
+                    "Dual-key address without a spend key: refusing to build the output "
+                    "(the spend-derived opening cannot be computed, and the view-derived "
+                    "fallback would leak the opening to every view-key holder)" );
+         secret_base = r.view_pub;
+         auth_base   = r.spend_pub;
+         found = true;
+      }
+      return found;
+   };
+   const bool to_dual   = resolve_dual( to_key_or_label,   to_key,   to_secret_base,   to_auth_base );
+   const bool from_dual = resolve_dual( from_key_or_label, from_key, from_secret_base, from_auth_base );
 
    auto one_time_key = fc::ecc::private_key::generate();
    auto secret       = one_time_key.get_shared_secret( to_secret_base );
    auto child        = fc::sha256::hash( secret );
    auto nonce        = fc::sha256::hash( one_time_key.get_secret() );
-   auto blind_factor = fc::sha256::hash( child );
+
+   auto change = total_amount - amount - blind_tr.fee;
+
+   // The to-output's opening. It is SPEND-DERIVED for a dual-key recipient
+   // when the conservation allows it: op40's validate() requires the outputs'
+   // openings to sum to the inputs' openings, so the CHANGE output has to
+   // absorb the difference (the sum of the spent inputs' openings minus the
+   // to-output's). Without change there is no absorber, so the to-output's
+   // opening IS that sum and the memo has to carry it (legacy shape). The
+   // exit output (to_temp) keeps the legacy shape too: the op41 that spends
+   // it REVEALS its opening, so it is not a secret there. A legacy
+   // single-key recipient keeps the legacy view-derived opening (there
+   // view == spend, so it is the same value).
+   const bool to_spend_derived = to_dual && !to_temp && change.amount > 0;
+   auto blind_factor = to_spend_derived ? derive_opening( one_time_key, to_auth_base )
+                                         : fc::sha256::hash( child );
 
    auto from_secret  = one_time_key.get_shared_secret( from_secret_base );
    auto from_child   = fc::sha256::hash( from_secret );
    auto from_nonce   = fc::sha256::hash( nonce );
 
-   auto change = total_amount - amount - blind_tr.fee;
    fc::sha256 change_blind_factor;
    fc::sha256 to_blind_factor;
    if( change.amount > 0 )
@@ -1769,7 +1810,10 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    else // change == 0
    {
       blind_tr.outputs.resize(1);
-       blind_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() );
+      // No change output to absorb the difference: the to-output's opening is
+      // the sum of the spent inputs' openings (op40's conservation), so the
+      // memo has to carry it (legacy shape).
+      blind_factor = fc::ecc::blind_sum( blinding_factors, blinding_factors.size() );
        // WPC-06: intermediate blind sum deleted (redundant with the
        // no-change marker below; the scalar itself is never logged).
       blinding_factors.push_back( blind_factor );
@@ -1792,6 +1836,11 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
       to_out.range_proof = fc::ecc::range_proof_sign( 0, to_out.commitment, blind_factor, nonce,
                                                       0, RANGE_PROOF_MANTISSA, amount.amount.value );
 
+      // The change output goes back to the sender. Its opening is forced by
+      // op40's conservation (the outputs' openings must sum to the inputs'
+      // openings), so it stays the sum-based opening and the memo carries it.
+      // That is the sender's OWN output, addressed to the sender's own
+      // address, and the memo is encrypted to the sender's view key.
       blind_output change_out;
       change_out.owner       = authority( 1, public_key_type( from_pub_key.child( from_child ) ), 1 );
       change_out.commitment  = fc::ecc::blind( change_blind_factor, change.amount.value );
@@ -1825,7 +1874,9 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    conf_output.pub_key = to_key;
    conf_output.decrypted_memo.from = from_key;
    conf_output.decrypted_memo.amount = amount;
-   conf_output.decrypted_memo.blinding_factor = blind_factor;
+   // The memo ships NO opening for a spend-derived output: the zero marker
+   // tells the recipient to recompute it from the spend key.
+   conf_output.decrypted_memo.blinding_factor = to_spend_derived ? fc::sha256() : blind_factor;
    conf_output.decrypted_memo.commitment = to_out.commitment;
    conf_output.decrypted_memo.check   = secret._hash[0].value();
    conf_output.confirmation.one_time_key = one_time_key.get_public_key();
@@ -1919,16 +1970,44 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
                }
             }
             if( !found_dual )
+            {
                to_key = get_public_key( item.first ); // base58 fallback (throws if unknown)
+               // A dual-key address handed over as its view pub is STILL a
+               // dual-key address: resolve the record by view pub instead of
+               // degrading it to the single-key path (which would make the
+               // output view-openable).
+               for( const auto& r : my->_wallet.stealth_addresses )
+               {
+                  if( r.view_pub == to_key )
+                  {
+                     view_pub  = r.view_pub;
+                     spend_pub = r.spend_pub;
+                     found_dual = true;
+                     break;
+                  }
+               }
+            }
          }
       }
+
+      // Dual-key by default: a dual-key recipient gets a SPEND-derived
+      // opening (see below). A dual-key address whose spend key is
+      // unavailable REFUSES the build: the spend-derived opening cannot be
+      // computed, and the view-derived fallback would hand the opening to
+      // every view-key holder (the hole this closes).
+      // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+      const bool dual = view_pub.valid();
+      FC_ASSERT( !dual || ( spend_pub.valid() && *spend_pub != public_key_type() ),
+                 "Dual-key address without a spend key: refusing to build the output "
+                 "(the spend-derived opening cannot be computed, and the view-derived "
+                 "fallback would leak the opening to every view-key holder)" );
 
       // secret + AuthKey: dual-key encrypts under ViewKey, AuthKey from SpendKey_pub;
       // single-key is the degenerate case (same key material, RP2 helper path).
       // (Copy-init is the proven protocol→ecc conversion in this file; explicit
       // functional casts are ambiguous — do not "simplify" these two lines.)
-      public_key_type sb = view_pub.valid() ? *view_pub : to_key;
-      public_key_type ab = view_pub.valid() ? *spend_pub : to_key;
+      public_key_type sb = dual ? *view_pub : to_key;
+      public_key_type ab = dual ? *spend_pub : to_key;
       fc::ecc::public_key secret_base = sb;
       fc::ecc::public_key auth_base = ab;
       fc::sha256 child;
@@ -1936,7 +2015,11 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
       child = fc::sha256::hash( secret );
       fc::ecc::public_key auth_pub = auth_base.child( child );
       auto nonce        = fc::sha256::hash( one_time_key.get_secret() );
-      auto blind_factor = fc::sha256::hash( child );
+      // The opening: derived from the SPEND key for a dual-key recipient, so a
+      // view-key holder cannot reproduce it and therefore cannot open the
+      // output. A legacy single-key recipient keeps the view-derived opening
+      // (there view == spend, so it is the same value).
+      auto blind_factor = derive_opening( one_time_key, auth_base );
 
       blinding_factors.push_back( blind_factor );
 
@@ -1952,9 +2035,13 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
 
       blind_confirmation::output conf_output;
       conf_output.label = item.first;
-      conf_output.pub_key = view_pub.valid() ? *view_pub : to_key;
+      conf_output.pub_key = dual ? *view_pub : to_key;
       conf_output.decrypted_memo.amount = amount;
-      conf_output.decrypted_memo.blinding_factor = blind_factor;
+      // The memo ships NO opening for a spend-derived output: the zero
+      // marker tells the recipient to recompute it from the spend key. The
+      // memo keeps what the view key is for — the amount, the commitment and
+      // the check — so a watch-only holder still tallies.
+      conf_output.decrypted_memo.blinding_factor = dual ? fc::sha256() : blind_factor;
       conf_output.decrypted_memo.commitment = out.commitment;
       conf_output.decrypted_memo.check   = secret._hash[0].value();
       conf_output.confirmation.one_time_key = one_time_key.get_public_key();
@@ -2009,6 +2096,9 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    // RP5 dual-key state: when a record matches, auth derives from spend_priv
    // (hot) or is absent (watch-only tally).
    fc::optional<fc::ecc::private_key> dual_auth_opt;
+   // The opening of the matched output: a legacy memo carries it, an
+   // openingless (zero-marker) memo is recomputed from the SPEND key.
+   fc::optional<fc::sha256> dual_opening;
    bool dual_matched = false;
    if( to_priv_key_itr != my->_keys.end() )
    {
@@ -2039,11 +2129,12 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
          rec.to = *conf.to;
          rec.encrypted_memo = conf.encrypted_memo;
          auto m = try_recognition( rec, *view_priv, r.spend_pub, spend_priv );
-         if( m.valid() && verify_memo_commitment( m->memo ) )
+         if( m.valid() && verify_memo_commitment( m->memo, m->opening ) )
          {
             to_priv_key_opt = view_priv; // secret/child derive from view below
             if( m->has_auth )
                dual_auth_opt = m->auth_priv;
+            dual_opening = m->opening;
             dual_matched = true;
             address_key = r.view_pub;
             break;
@@ -2090,6 +2181,21 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    auto plain_memo = fc::aes_decrypt( secret, conf.encrypted_memo );
    auto memo = fc::raw::unpack<stealth_confirmation::memo_data>( plain_memo );
 
+   // The opening of this output. A legacy memo carries it; an OPENINGLESS
+   // (zero-marker) memo is recomputed from the SPEND key, never from the view
+   // key, so a view-key holder cannot open the output.
+   // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   fc::sha256 opening;
+   if( memo_is_openingless( memo ) )
+   {
+      FC_ASSERT( dual_matched && dual_opening.valid(),
+                 "Openingless memo without the spend key: this output cannot be opened "
+                 "(tally it through scan_stealth_recognitions instead)" );
+      opening = *dual_opening;
+   }
+   else
+      opening = memo.blinding_factor;
+
    result.to_key   = *conf.to;
    result.to_label = get_key_label( address_key ); // address label, not AuthKey's (RP4 display)
    result.address_key = address_key; // rename-proof linkage for balance/spend/history (RP4)
@@ -2110,8 +2216,8 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    result.amount = memo.amount;
    result.memo = opt_memo;
 
-   // confirm the amount matches the commitment (verify the blinding factor)
-   auto commitment_test = fc::ecc::blind( memo.blinding_factor, memo.amount.amount.value );
+   // confirm the amount matches the commitment (verify the opening)
+   auto commitment_test = fc::ecc::blind( opening, memo.amount.amount.value );
    FC_ASSERT( fc::ecc::verify_sum( {commitment_test}, {memo.commitment}, 0 ) );
 
    blind_balance bal;
@@ -2119,7 +2225,7 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    bal.to     = *conf.to;
    if( memo.from ) bal.from   = *memo.from;
    bal.one_time_key = conf.one_time_key;
-   bal.blinding_factor = memo.blinding_factor;
+   bal.blinding_factor = opening;
    bal.commitment = memo.commitment;
    bal.used = false;
 
@@ -2127,6 +2233,9 @@ blind_receipt wallet_api::receive_blind_transfer( const string& confirmation_rec
    auto owner = authority(1, public_key_type(child_pubkey), 1);
    result.control_authority = owner;
    result.data = memo;
+   // The receipt carries the OPENING, not the zero marker: the memo of an
+   // openingless output names no opening, the holder recomputed it.
+   result.data.blinding_factor = opening;
 
    auto child_key_itr = owner.key_auths.find( child_pubkey );
    if( child_key_itr != owner.key_auths.end() )
@@ -2244,7 +2353,16 @@ vector<blind_receipt> wallet_api::scan_stealth_recognitions(
       }
       if( !m.valid() )
          continue;
-      FC_ASSERT( verify_memo_commitment( m->memo ), "Memo failed commitment re-derivation" );
+      // The memo must name the commitment the chain shows for this output:
+      // that is what ties the decrypted memo to the output. For an openingless
+      // (zero-marker) memo it is the ONLY binding a watch-only holder has,
+      // since the opening itself is spend-derived and out of its reach.
+      // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+      FC_ASSERT( m->memo.commitment == e.commitment,
+                 "Memo commitment does not match the chain's commitment for this output",
+                 ("commitment",e.commitment) );
+      FC_ASSERT( verify_memo_commitment( m->memo, m->opening ),
+                 "Memo failed commitment re-derivation" );
       blind_receipt br;
       br.conf.one_time_key = rec.one_time_key;
       br.conf.to = rec.to;
@@ -2254,9 +2372,16 @@ vector<blind_receipt> wallet_api::scan_stealth_recognitions(
       br.address_key = matched_address;
       br.amount = m->memo.amount;
       br.data = m->memo;
+      // The receipt carries the OPENING, not the zero marker: the memo of an
+      // openingless output names no opening, the holder recomputed it.
+      br.data.blinding_factor = m->opening.valid() ? *m->opening : fc::sha256();
       br.control_authority = m->has_auth
             ? authority( 1, public_key_type( m->auth_priv.get_public_key() ), 1 )
             : authority();
+      // TALLY-ONLY: recognized with a view key only (no spend key). The
+      // output can be counted, never spent: every spend builder refuses it
+      // (blind_receipt_spendable).
+      br.tally_only = !m->has_auth;
       br.date = fc::time_point::now();
       try { br.received_block = get_dynamic_global_properties().head_block_number; }
       catch( const fc::exception& ) { br.received_block = 0; }

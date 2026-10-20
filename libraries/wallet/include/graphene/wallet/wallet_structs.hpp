@@ -116,6 +116,14 @@ struct blind_receipt
    /// (and survive label renames). Appended-last: old files load empty, and
    /// empty matches nothing (legacy receipts already match via to_key).
    public_key_type                 address_key;
+   /// TALLY-ONLY marker: this receipt was recognized with a VIEW key only
+   /// (no spend key), so it carries NO spend authority — the output can be
+   /// tallied but never spent. Every spend builder must refuse it (see
+   /// blind_receipt_spendable): the marker is explicit, not implied by the
+   /// absence of an authority key.
+   /// Appended-last: old wallet files load with false (their watch-only
+   /// receipts are still caught by the empty-authority check).
+   bool                            tally_only = false;
 };
 
 struct by_from;
@@ -409,6 +417,24 @@ inline size_t blind_batch_chunk_count( size_t n, uint32_t batch_size )
    return ( n + batch_size - 1 ) / batch_size;
 }
 
+/**
+ * A receipt may be SPENT only when it was recognized with a spend key.
+ *
+ * Two independent reasons, both checked here so that every spend builder
+ * refuses the same receipts:
+ *  - the explicit TALLY-ONLY marker (a watch-only recognition: the wallet
+ *    can count the output but holds no spend authority for it), and
+ *  - an empty control authority (a receipt with no owner key cannot be
+ *    authorized by any signature) — this also covers receipts written by an
+ *    older wallet, which has no tally_only field.
+ *
+ * Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+ */
+inline bool blind_receipt_spendable( const blind_receipt& r )
+{
+   return !r.tally_only && !( r.control_authority == authority() );
+}
+
 }} // namespace graphene::wallet
 
 FC_REFLECT( graphene::wallet::blind_transfer_defaults,
@@ -450,7 +476,7 @@ FC_REFLECT( graphene::wallet::exported_keys, (password_checksum)(account_keys) )
 
 FC_REFLECT( graphene::wallet::blind_receipt,
             (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf)
-            (received_block)(address_key) )
+            (received_block)(address_key)(tally_only) )
 
 FC_REFLECT( graphene::wallet::approval_delta,
    (active_approvals_to_add)

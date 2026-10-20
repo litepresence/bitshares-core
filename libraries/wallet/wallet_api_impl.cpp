@@ -220,6 +220,22 @@ namespace graphene { namespace wallet { namespace detail {
                     "Dual-key address without a spend key: refusing to build the output "
                     "(the spend-derived opening cannot be computed, and the view-derived "
                     "fallback would leak the opening to every view-key holder)" );
+         // A label that names BOTH a dual-key address and a LEGACY address is
+         // ambiguous: the two readings derive different openings, so a payment
+         // made to the name would be unopenable by one of the two holders and
+         // the funds would be stranded. Refuse the name instead of guessing
+         // which holder was meant; renaming either of them makes it payable.
+         // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+         {
+            auto book_itr = _wallet.labeled_keys.get<by_label>().find( label_or_key );
+            FC_ASSERT( book_itr == _wallet.labeled_keys.get<by_label>().end()
+                       || book_itr->key == r.view_pub,
+                       "The label names both a dual-key address and a legacy address: "
+                       "refusing to guess which holder a payment to it is meant for (the "
+                       "dual reading derives the opening from the record's spend pub, so "
+                       "the legacy holder could not open the output and the funds would be "
+                       "stranded). Rename one of the two." );
+         }
          rcpt.view_pub  = r.view_pub;
          rcpt.spend_pub = r.spend_pub;
          rcpt.key       = r.view_pub;   // the address identity (the view pub)

@@ -1322,4 +1322,316 @@ BOOST_AUTO_TEST_CASE( vk_import_stealth_address_pubs_requires_a_pair_proof )
    BOOST_CHECK_EQUAL( recs.size(), 1u );
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// Test 19 (M-1): the op41 EXIT path accepts the sender's OWN blind key in
+// its base58 form.
+//
+// The exit output is a temp output with an empty owner, consumed by the op41
+// in the same transaction: the "to" side of that op40 is the SENDER'S own
+// address, not a recipient. A key the wallet holds privately (an account key
+// imported with import_key and never labelled) is therefore the sender's own
+// spending path there, and the classifier must accept it.
+//
+// A genuine op40 RECIPIENT stays refused (the N-2 property: a bare key may
+// be a remote dual-key recipient's view pub, and the single-key path would
+// publish a view-derived opening).
+//
+// RED on the base tree: the build threw "Cannot classify the recipient".
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_op41_exit_accepts_the_senders_own_base58_blind_key )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-m1-password" );
+   W.unlock( "vk-m1-password" );
+   for( const auto& f : { "vk-m1-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-m1-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // The sender's own legacy blind account, funded by a deposit.
+   const std::string sender_bk = "vk m1 sender brainkey words here";
+   auto blind_pub = W.create_blind_account( "judy-blind", sender_bk );
+   auto deposit = W.transfer_to_blind( "dan", "1.3.0", {{"judy-blind","1000"}}, false );
+   PUSH_TX( db, deposit.trx );
+   generate_block();
+
+   auto head = db.head_block_num();
+   const uint32_t scan_from = head >= 5 ? head - 5 : 1;
+   auto receipts = W.scan_stealth_recognitions( scan_from, head );
+   BOOST_REQUIRE_EQUAL( receipts.size(), 1u );
+
+   // The exit, addressed by the sender's own key in its base58 form: the
+   // wallet holds that private key, so it is the sender's own spending path.
+   const std::string base58_key = static_cast<std::string>( blind_pub );
+   auto conf = W.transfer_from_blind( base58_key, "dan", "10", "1.3.0", false );
+   // The change output and the exit output.
+   BOOST_REQUIRE_EQUAL( conf.outputs.size(), 2u );
+   // The op40 and the op41 that spends the exit output.
+   BOOST_REQUIRE_EQUAL( conf.trx.operations.size(), 2u );
+
+   // The change comes back to the sender and is NOT stranded: the receipt
+   // exists with the wallet's own opening (the chain carries none).
+   const auto deposit_amount = core.amount( 100000000 ).amount;   // 1000 CORE
+   auto history = W.blind_history( "judy-blind" );
+   const graphene::wallet::blind_receipt* change_receipt = nullptr;
+   for( const auto& r : history )
+   {
+      if( r.amount.amount == deposit_amount ) continue;   // the deposit output
+      change_receipt = &r;
+      break;
+   }
+   BOOST_REQUIRE( change_receipt != nullptr );
+   BOOST_CHECK( !( change_receipt->data.blinding_factor == fc::sha256() ) );
+   BOOST_CHECK( vk_opens( change_receipt->data.blinding_factor,
+                          change_receipt->amount.amount.value,
+                          change_receipt->data.commitment ) );
+   BOOST_CHECK( graphene::wallet::blind_receipt_spendable( *change_receipt ) );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 20 (M-2): an EMPTY recipient list is refused, not crashed on.
+//
+// The deposit's same-holder check reads the first recipient, and the list
+// comes straight off the wire: an empty list is a client-postable input, and
+// the release build dereferenced the empty vector's null data pointer.
+//
+// RED on the base tree: the wallet process died with a segmentation fault.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_transfer_to_blind_refuses_an_empty_recipient_list )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-m2-password" );
+   W.unlock( "vk-m2-password" );
+   for( const auto& f : { "vk-m2-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-m2-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   std::string err;
+   try
+   {
+      W.transfer_to_blind( "dan", "1.3.0",
+                           std::vector<std::pair<std::string,std::string>>(), false );
+   }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "recipient" ) != std::string::npos, err );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 21 (M-3): a LEGACY sender's change memo ships NO opening.
+//
+// The change opening is the conservation difference (the sum of the spent
+// inputs' openings minus the to-output's), so publishing it hands the
+// RECIPIENT's opening to every holder of the sender's key: such a holder can
+// compute the inputs' openings from the chain and subtract the change opening
+// to recover the recipient's spend credential.
+//
+// This is the legacy-sender / legacy-recipient case (the recipient's opening
+// is the legacy shape, so the difference is exactly the recipient's opening).
+//
+// RED on the base tree: this test PASSES there (the on-chain change memo
+// already carried the zero marker for every sender) -- the round-1 test above
+// pins the same property for the legacy-sender / dual-recipient case. The
+// property holds; this test extends the pin to the case the finding names.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_legacy_sender_change_memo_ships_no_opening )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-m3-password" );
+   W.unlock( "vk-m3-password" );
+   for( const auto& f : { "vk-m3-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-m3-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // The sender's own legacy blind account (its inputs are the legacy shape).
+   const std::string sender_bk = "vk m3 sender brainkey words here";
+   W.create_blind_account( "judy-blind", sender_bk );
+   auto deposit = W.transfer_to_blind( "dan", "1.3.0", {{"judy-blind","1000"}}, false );
+   PUSH_TX( db, deposit.trx );
+   generate_block();
+
+   auto head = db.head_block_num();
+   const uint32_t scan_from = head >= 5 ? head - 5 : 1;
+   auto receipts = W.scan_stealth_recognitions( scan_from, head );
+   BOOST_REQUIRE_EQUAL( receipts.size(), 1u );
+   const auto input_opening = receipts[0].data.blinding_factor;
+
+   // A LEGACY recipient: a labeled key the wallet does not hold.
+   const std::string rcpt_bk = "vk m3 rcpt brainkey words here";
+   auto rcpt_priv = fc::ecc::private_key::regenerate(
+         fc::sha256::hash( rcpt_bk.c_str(), rcpt_bk.size() ) );
+   auto rcpt_pub = public_key_type( rcpt_priv.get_public_key() );
+   BOOST_CHECK( W.set_key_label( rcpt_pub, "ivan-legacy" ) );
+
+   auto pay = W.blind_transfer( "judy-blind", "ivan-legacy", "100", "1.3.0", false );
+   BOOST_REQUIRE_EQUAL( pay.outputs.size(), 2u );
+   const auto& change_out = pay.outputs[0];   // the change comes first
+   const auto& to_out    = pay.outputs[1];   // the recipient's output
+
+   // The holder of the sender's key decrypts the ON-CHAIN change memo (the
+   // ECDH secret is symmetric) and must find NO opening in it.
+   auto sender_view_priv = fc::ecc::private_key::regenerate(
+         fc::sha256::hash( sender_bk.c_str(), sender_bk.size() ) );
+   auto memo_secret = sender_view_priv.get_shared_secret( change_out.confirmation.one_time_key );
+   auto on_chain_memo = fc::raw::unpack<graphene::protocol::stealth_confirmation::memo_data>(
+         fc::aes_decrypt( memo_secret, change_out.confirmation.encrypted_memo ) );
+   BOOST_CHECK( vk_is_zero_marker( on_chain_memo.blinding_factor ) );
+
+   // The strong form: with the change opening published, the holder of the
+   // sender's key recovers the recipient's opening as the difference.
+   auto recipient_opening = vk_opening( rcpt_priv, to_out.confirmation.one_time_key );
+   BOOST_CHECK( vk_opens( recipient_opening, to_out.decrypted_memo.amount.amount.value,
+                          to_out.decrypted_memo.commitment ) );
+   auto recovered = fc::ecc::blind_sum( { input_opening, on_chain_memo.blinding_factor }, 1 );
+   BOOST_CHECK( recovered != recipient_opening );
+
+   // The wallet's own copy still carries the opening (the local knowledge: a
+   // caller that builds without broadcasting needs it to create the receipt).
+   BOOST_CHECK( !vk_is_zero_marker( change_out.decrypted_memo.blinding_factor ) );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 22 (M-4): a remote dual-key import must not claim a view pub the
+// wallet holds a PRIVATE KEY for.
+//
+// The address-book check cannot see that ordering (the user may label the
+// address afterwards, or never label it: an account key imported with
+// import_key is in the wallet's key store and in no address book), and the
+// dual branch would strip that address's opening and authority on the receive
+// path, so its owner could never spend it.
+//
+// RED on the base tree: the import was accepted.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_import_refuses_a_view_pub_the_wallet_holds_a_private_key_for )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-m4-password" );
+   W.unlock( "vk-m4-password" );
+   for( const auto& f : { "vk-m4-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-m4-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // A remote dual-key pair, of which the wallet holds the VIEW private key
+   // (as an account key, never labelled): the pair is the user's own legacy
+   // address wearing a dual record's clothes.
+   auto remote = graphene::wallet::derive_stealth_address_keys( "vk m4 remote brainkey words here", 0 );
+   auto view_pub  = public_key_type( remote.view_pub );
+   auto spend_pub = public_key_type( remote.spend_pub );
+   // The wallet holds the view PRIVATE key (import_key stores it whatever the
+   // account match says: the return value only reports "is this an account
+   // key"), and the key is in no address book.
+   W.import_key( "dan", graphene::utilities::key_to_wif( remote.view_priv ) );
+   auto digest = graphene::wallet::stealth_pair_proof_digest( view_pub, spend_pub );
+   std::string err;
+   try
+   {
+      W.import_stealth_address_pubs( "collide", view_pub, spend_pub,
+                                     remote.view_priv.sign_compact( digest ),
+                                     remote.spend_priv.sign_compact( digest ) );
+   }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "privately" ) != std::string::npos, err );
+   // Nothing was recorded.
+   BOOST_CHECK_EQUAL( W.get_stealth_addresses().size(), 0u );
+} FC_CAPTURE_AND_RETHROW() }
+
+// ---------------------------------------------------------------------------
+// Test 23 (M-8): a label that names BOTH a dual-key address and a legacy
+// address is refused.
+//
+// The two readings derive different openings, so a payment made to the name
+// would be unopenable by one of the two holders and the funds would be
+// stranded. The wallet refuses the name instead of guessing.
+//
+// RED on the base tree: the payment was built (routed to the dual record) and
+// the legacy holder could never open it.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE( vk_ambiguous_label_is_refused )
+{ try {
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "vk-m8-password" );
+   W.unlock( "vk-m8-password" );
+   for( const auto& f : { "vk-m8-test.json" } )
+      try { if( fc::exists( fc::path( f ) ) ) fc::remove_all( fc::path( f ) ); } catch( ... ) {}
+   W.set_wallet_filename( "vk-m8-test.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+
+   // A dual-key address, and a LEGACY address under the same name.
+   W.create_stealth_address( "kim-st", "vk m8 dual brainkey words here", 0 );
+   auto legacy_priv = fc::ecc::private_key::regenerate(
+         fc::sha256::hash( "vk m8 legacy brainkey words here", 31 ) );
+   BOOST_CHECK( W.set_key_label( public_key_type( legacy_priv.get_public_key() ), "kim-st" ) );
+
+   // Two outputs to the same holder (a single-output deposit to a dual-key
+   // address is refused for an unrelated reason: the operation would publish
+   // the output's own opening).
+   std::string err;
+   try
+   {
+      W.transfer_to_blind( "dan", "1.3.0", {{"kim-st","200"},{"kim-st","100"}}, false );
+   }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "names both" ) != std::string::npos, err );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

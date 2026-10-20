@@ -1674,20 +1674,44 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    // unclassifiable counterparty is refused): the op39 deposit and the op40
    // blind transfer must not disagree about what a recipient is, or a remote
    // dual-key recipient is degraded on whichever path the sender picks.
+   //
+   // The op41 EXIT path (to_temp) hands the SENDER'S OWN address to the "to"
+   // side: the exit output is a temp output with an empty owner, consumed by
+   // the op41 in the same transaction. So the "to" side there is the
+   // sender's own spending path, and it is classified with the sender's rule
+   // (a bare key the wallet holds is the sender's own key, e.g. an account
+   // key imported with import_key and never labelled).
+   //
+   // A genuine op40 RECIPIENT keeps the op39 rule: a dual-key record or an
+   // address-book entry, never a bare key the wallet merely holds.
    // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
-   const auto to_rcpt   = my->resolve_blind_counterparty( to_key_or_label, false );
+   const auto to_rcpt   = my->resolve_blind_counterparty( to_key_or_label, to_temp );
    const auto from_rcpt = my->resolve_blind_counterparty( from_key_or_label, true );
    // A counterparty the wallet cannot classify is REFUSED, not guessed: a bare
    // base58 key may be a remote dual-key recipient's VIEW pub, and the
    // single-key path would derive the output's opening from the view key and
    // publish it in the memo (a view-openable output).
    // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
-   FC_ASSERT( to_rcpt.dual || to_rcpt.from_address_book || to_rcpt.wallet_owned,
-              "Cannot classify the recipient: a bare key may be a dual-key view pub, "
-              "and the single-key path would publish a view-derived opening "
-              "(openable by every view-key holder). Import the recipient's dual "
-              "record (import_stealth_address_pubs: view pub + spend pub) or add "
-              "the legacy address to the wallet's address book." );
+   if( to_temp )
+   {
+      // The exit output is derived from the sender's OWN address: the op41
+      // spends it in the same transaction and its opening is a value only the
+      // sender can compute, so the two sides must be the same account.
+      FC_ASSERT( to_rcpt.key == from_rcpt.key,
+                 "The op41 exit output must be derived from the sender's own blind "
+                 "account: the exit output's opening is the value the sender computes "
+                 "and the op41 spends it in the same transaction." );
+      FC_ASSERT( to_rcpt.dual || to_rcpt.from_address_book || to_rcpt.wallet_owned,
+                 "Cannot classify the exit address: the wallet does not hold that key "
+                 "and it is not in its address book." );
+   }
+   else
+      FC_ASSERT( to_rcpt.dual || to_rcpt.from_address_book,
+                 "Cannot classify the recipient: a bare key may be a dual-key view pub, "
+                 "and the single-key path would publish a view-derived opening "
+                 "(openable by every view-key holder). Import the recipient's dual "
+                 "record (import_stealth_address_pubs: view pub + spend pub) or add "
+                 "the legacy address to the wallet's address book." );
    FC_ASSERT( from_rcpt.dual || from_rcpt.from_address_book || from_rcpt.wallet_owned,
               "Cannot classify the source address: the wallet does not hold that key "
               "and it is not in its address book (a dual-key source must be named by "
@@ -1919,21 +1943,22 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
       conf_output.decrypted_memo.check   = from_secret._hash[0].value();
       conf_output.confirmation.one_time_key = one_time_key.get_public_key();
       conf_output.confirmation.to = public_key_type( from_pub_key.child( from_child ) ); // AuthKey for change too
-      // The ON-CHAIN memo ships NO opening when the change opening is a
-      // SECRET of the sender's spend key:
-      //  - the to-output's opening is spend-derived (C-4: the change opening
-      //    is the conservation difference, so publishing it in a memo
-      //    encrypted to the sender's VIEW key hands the RECIPIENT's opening
-      //    to every holder of the sender's view key), or
-      //  - the sender is a dual-key address (the change output's owner key
-      //    is spend-derived, so its opening is a spend credential: a view-key
-      //    holder that reads it could ring-spend the sender's own change).
-      // A legacy sender paying a legacy recipient keeps the legacy shape:
-      // there view == spend, so the change opening is the sender's own money
-      // and the legacy memo is grandfathered.
+      // The ON-CHAIN memo NEVER carries the change opening, for ANY sender.
+      //
+      // The change opening is the conservation difference (the sum of the
+      // spent inputs' openings minus the to-output's), so publishing it hands
+      // the RECIPIENT's opening to every holder of the sender's key: such a
+      // holder can compute the inputs' openings from the chain and subtract
+      // the change opening to recover the recipient's spend credential, which
+      // is what a ring spend authorizes by. For a dual sender the change
+      // output's own owner key is spend-derived, so its opening is a spend
+      // credential for the sender's own change as well.
+      //
+      // The LOCAL copy keeps the wallet's own opening: the chain carries
+      // none, so a caller that builds without broadcasting needs it to create
+      // the change receipt (the change must never be stranded).
       stealth_confirmation::memo_data on_chain_memo = conf_output.decrypted_memo;
-      if( to_spend_derived || from_rcpt.dual )
-         on_chain_memo.blinding_factor = fc::sha256();
+      on_chain_memo.blinding_factor = fc::sha256();
       conf_output.confirmation.encrypted_memo =
             fc::aes_encrypt( from_secret, fc::raw::pack( on_chain_memo ) );
       // The LOCAL copy keeps the wallet's own opening: the chain carries no
@@ -2038,6 +2063,13 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
    FC_ASSERT( !is_locked() );
    idump((to_amounts));
 
+   // An empty recipient list is REFUSED, not crashed on: the same-holder check
+   // below reads the first recipient, and a client can post an empty list to
+   // this RPC.
+   FC_ASSERT( !to_amounts.empty(),
+              "Refusing a stealth deposit with no recipients: name at least one "
+              "recipient (a label or key) and the amount to send it." );
+
    blind_confirmation confirm;
    account_object from_account = my->get_account(from_account_id_or_name);
 
@@ -2134,10 +2166,12 @@ blind_confirmation wallet_api::transfer_to_blind( const string& from_account_id_
                  "outputs' openings, and each recipient knows its own opening, so it "
                  "would recover the other holder's opening as the difference. Pay each "
                  "holder in its own deposit." );
-      const std::string holder = recipients.front().holder();
-      for( const auto& r : recipients )
+      // Every output of one deposit must go to the SAME holder: the first
+      // recipient is the reference and the rest must match it (the list is
+      // non-empty here, so the reference exists).
+      for( size_t i = 1; i < recipients.size(); ++i )
       {
-         FC_ASSERT( r.holder() == holder,
+         FC_ASSERT( recipients[i].holder() == recipients[0].holder(),
                     "Refusing a stealth deposit whose outputs go to different holders: "
                     "the operation publishes the sum of the outputs' openings, and each "
                     "co-recipient recovers the other holder's opening from that sum "
@@ -2555,6 +2589,18 @@ public_key_type wallet_api::create_stealth_address( const string& label,
               == std::find_if( my->_wallet.stealth_addresses.begin(), my->_wallet.stealth_addresses.end(),
                                [&]( const stealth_address_record& r ){ return r.label == label; } ),
               "Stealth address label already exists" );
+   // A label that already names a LEGACY address in this wallet would be
+   // ambiguous: the classifier prefers the dual record for the name, so a
+   // payment to it would be routed to this record and the legacy holder could
+   // not open the output. Refuse the collision where it is created.
+   // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   {
+      auto book_itr = my->_wallet.labeled_keys.get<by_label>().find( label );
+      FC_ASSERT( book_itr == my->_wallet.labeled_keys.get<by_label>().end(),
+                 "This label already names a legacy address in the wallet's address "
+                 "book: a payment to the name would be routed to this dual-key record "
+                 "and the legacy holder could not open it. Use a different label." );
+   }
    auto keys = derive_stealth_address_keys( brain_key, index );
    stealth_address_record rec;
    rec.label = label;
@@ -2655,6 +2701,35 @@ vector<stealth_address_record> wallet_api::import_stealth_address_pubs(
               "This key is already in the wallet's address book as a legacy address: "
               "importing it as a dual-key view pub would strip that address's opening "
               "and authority on the receive path (its owner could never spend it)" );
+
+   // The same collision, checked on the PRIVATE KEY rather than on the address
+   // book: a key the wallet holds privately is the wallet's own (a legacy
+   // blind account, an account key), whether or not it carries a label yet.
+   // The address-book check above cannot see that ordering (the user may
+   // label the address afterwards), and the dual branch would strip that
+   // address's opening and authority on the receive path, so its owner could
+   // never spend it.
+   // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   FC_ASSERT( my->_keys.find( view_pub ) == my->_keys.end(),
+              "This key is one the wallet holds privately: importing it as a dual-key "
+              "view pub would strip that address's opening and authority on the "
+              "receive path (its owner could never spend it). For a remote address "
+              "whose view key you hold, use import_stealth_view_key." );
+
+   // A label that already names a LEGACY address in this wallet would be
+   // ambiguous: the classifier prefers the dual record for the name, so a
+   // payment to it would be routed to the dual record and the legacy holder
+   // could not open the output. Refuse the import rather than create the
+   // ambiguity.
+   // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   {
+      auto book_itr = my->_wallet.labeled_keys.get<by_label>().find( label );
+      FC_ASSERT( book_itr == my->_wallet.labeled_keys.get<by_label>().end()
+                 || book_itr->key == view_pub,
+                 "This label already names a legacy address in the wallet's address "
+                 "book: a payment to the name would be routed to the dual-key record "
+                 "and the legacy holder could not open it. Use a different label." );
+   }
 
    FC_ASSERT( my->_wallet.stealth_addresses.end()
               == std::find_if( my->_wallet.stealth_addresses.begin(), my->_wallet.stealth_addresses.end(),

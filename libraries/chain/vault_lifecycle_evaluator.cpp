@@ -397,6 +397,7 @@ void process_h2_vault_maintenance( database& d )
             }
             if( stale && no_recent_promo )
             {
+               printf("SLASH-ON-STALE triggered\n");
                const offset_pool_object* _pool = h2_find_offset_pool( d, itr->vault_pair );
                if( _pool == nullptr )
                {

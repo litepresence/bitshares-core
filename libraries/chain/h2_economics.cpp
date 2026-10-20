@@ -836,12 +836,12 @@ optional<protocol::oracle_value> h2_read_settlement_price(
 {
    const auto live = h2_read_pair_price( d, vault, series, d.head_block_time() );
    if( live.valid() )
-      return live;
+      return optional<protocol::oracle_value>( live );
    if( !vault.bound_oracle.valid() )
       return optional<protocol::oracle_value>();
    auto last = h2_read_last_consumed_price( d, *vault.bound_oracle, series );
    if( last.valid() )
-      return last;
+      return optional<protocol::oracle_value>( last );
    // ATR-R17-01, same rule as the live read: the owner-controlled backup
    // covers staleness and liveness loss of the bound series, never an
    // administrative freeze of the bound oracle itself. The live read

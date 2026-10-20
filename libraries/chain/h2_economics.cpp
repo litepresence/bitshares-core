@@ -381,9 +381,15 @@ namespace {
        if( bound )
        {
           const oracle_object* _po = d.find( *vault->bound_oracle );
+          // The stale rung arms only when the consumed value is stale AND the
+          // oracle has no live current value (no fresh submission). If the
+          // oracle is still publishing (live current value), the stale rung
+          // does not arm, because the producer is still live.
           if( _po != nullptr && _po->consumed_value_time != time_point_sec()
               && ( now - _po->consumed_value_time ).to_seconds()
-                  >= (int64_t) _po->options.value_lifetime_sec )
+                  >= (int64_t) _po->options.value_lifetime_sec
+              && ( !_po->current_value.valid()
+                   || !_po->is_value_live( now ) ) )
              stale_rung = true;
        }
        // Feed leg: bound oracle's live raw aggregate (transparency continues
@@ -462,7 +468,16 @@ namespace {
        {
           // Stale rung: redemptions halted at the pair level only. No door,
           // no debt, no wind-down. The wind-down requires a deviation rung.
-          streak_after = 0;
+          // The streak still accumulates so that reopen can fire once the
+          // consumed value becomes fresh again (consecutive clean windows).
+          const uint8_t streak = uint8_t( streak_after + 1 );
+          if( streak >= GRAPHENE_H2E_TRIPWIRE_REOPEN_WINDOWS
+              && ( stage_after != 0 || was_halted ) && !stale_rung )
+             reopen = true;
+          else if( streak >= GRAPHENE_H2E_TRIPWIRE_REOPEN_WINDOWS )
+             streak_after = 0;
+          else
+             streak_after = streak;
        }
        else
        {
@@ -486,8 +501,14 @@ namespace {
           t.clean_streak = streak_after;
           if( stale_rung )
              t.redemptions_halted = true;
+          // A stale rung that has cleared (consumed value fresh again) drops
+          // redemptions_halted immediately, without waiting for the reopen
+          // ladder (which is for breach halts, not staleness). Breach halts
+          // (halt_stage != 0) keep their reopen-gated clearing.
+          else if( t.halt_stage == 0 && t.redemptions_halted )
+             t.redemptions_halted = false;
        } );
-       if( reopen )
+       if( reopen && !stale_rung )
           h2_reopen_tripwire( d, tw, *vault );
        else if( readable && breach )
        {
@@ -687,8 +708,11 @@ void h2_observe_publication( database& d, oracle_id_type oracle, time_point_sec 
       const __int128 diff = ( lhs > rhs ) ? ( lhs - rhs ) : ( rhs - lhs );
       int64_t block_delta = ( ptime - guard->last_promo_time ).to_seconds() / 3;
       if( block_delta <= 0 ) block_delta = 0;
-      const bool vel_ok = ( block_delta > 0 )
-            && ( diff * 20 <= (__int128) block_delta
+      // Velocity: change faster than 5% per block. Same-block promotions (block_delta
+      // == 0) are allowed when the absolute band passes, because the per-block
+      // rate is undefined and the absolute band already bounds the jump.
+      const bool vel_ok = ( block_delta == 0 )
+            || ( diff * 20 <= (__int128) block_delta
                                  * (__int128) oldv.base_amount.value
                                  * (__int128) newv.quote_amount.value );
       if( !abs_ok || !vel_ok )

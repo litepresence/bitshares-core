@@ -74,9 +74,12 @@ void h2_issue_bands_spend( vector<share_type>& bands, share_type amount )
               "Band spend exceeds the partitioned total; conservation broken" );
 }
 
-// Defends against: confiscation beyond the filed exit formula at zero-claims resolutions
-// (C1 design 2: a provably drained vault seats nothing - empty book, no reserve sweep,
-// no bond seizure), and against stranded bond stacks at sustained zero-claim resolves.
+// Defends against: confiscation beyond the filed exit formula (C1 design 3:
+// the seat is bounded by what the formula can pay, so a wind-down takes no
+// more than the claimants are owed and the surplus stays with its owner),
+// against a book seated against a dead price (a claim book with no pool), and
+// against stranded bond stacks at sustained zero-claim resolves.
+// Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md section 1
 const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault,
                                                  const optional<protocol::oracle_value>& seat_price )
 {
@@ -206,9 +209,14 @@ const winddown_vault_object& h2_create_winddown( database& d, const vault_object
       }
       else
       {
-         d.modify( *r, []( reserve_object& res ) {
+         // Nothing moved: the seat bound is zero (a provably drained book, or
+         // a bound the pool cannot reach). The scalars still clear, so the
+         // mint-door gate sees a clean record, and the snapshot is stamped
+         // with the block that cleared it.
+         d.modify( *r, [&d]( reserve_object& res ) {
             res.uncovered_shortfall = share_type( 0 );
             res.last_ratio_bps = 0;
+            res.snapshot_block = d.head_block_num();
          } );
       }
    }
@@ -290,7 +298,10 @@ static bool h2_winddown_claims_present( const database& d, const vault_object& v
        || ( h2_issue_queued_restore_face( *r ) > share_type( 0 ) );
 }
 
-// Maintenance holds while outstanding is zero; a dual-stale price leg refuses resolution when claims are present (fail-closed).
+// Maintenance holds while outstanding is zero. A bound vault's coverage is
+// read through the bonded price, and a dead price reads as no coverage (the
+// fail-closed breach); the wind-down's SEAT is a separate gate, in the
+// maintenance sweep and in the resolve path (design 3, section 3.2).
 bool h2_vault_meets_maintenance( database& d, const vault_object& vault )
 {
    if( vault.outstanding <= share_type( 0 ) )

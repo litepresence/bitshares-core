@@ -95,6 +95,16 @@ share_type h2_convert_face_to_bond( share_type face, const oracle_value& price )
    const uint256_t converted = uint256_t( uint64_t( face.value ) )
                              * uint256_t( uint64_t( price.base_amount.value ) )
                              / uint256_t( uint64_t( price.quote_amount.value ) );
+   // Saturate instead of truncating: the 64-bit narrowing below WRAPS on an
+   // absurd bonded price, and a wrapped ratio is not a smaller seat, it is a
+   // different one -- zero (a claim book with no pool, so every claim is
+   // refused and the pair can never be re-registered) or a value that no
+   // longer matches the filed exit formula. The wind-down seat and the
+   // claim payout both read this ratio, so the guard belongs here, with the
+   // same shape as its siblings (h2_issue_face_to_bts,
+   // libraries/chain/issuance.cpp).
+   if( converted > uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
+      return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
    return share_type( int64_t( uint64_t( converted ) ) );
 }
 

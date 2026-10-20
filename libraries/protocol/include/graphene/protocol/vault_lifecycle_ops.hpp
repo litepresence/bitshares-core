@@ -133,8 +133,10 @@ namespace graphene { namespace protocol {
      * cartel-abstention, so it is never exoneration). Both execute into the
      * same exit-only wind-down: the vault's bonds segregate into a
      * wind-down vault that only ever pays from that slice — never another
-     * vault's bonds, never the issuance reserve — and the vault never
-     * returns to operation except through fresh re-registration. The seat
+     * vault's bonds, and never another pair's reserve (the reserve swept in
+     * is this pair's own pooled backing, the book's first-loss collateral)
+     * — and the vault never returns to operation except through fresh
+     * re-registration. The seat
      * is bounded by what the filed exit formula can pay, so the wind-down
      * can never take more than the claimants are owed; the surplus stays
      * with its owner. A bound vault with claims present needs a live

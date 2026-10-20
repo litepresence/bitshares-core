@@ -35,15 +35,18 @@ namespace graphene { namespace chain {
 
 /**
  * @brief Per-gateway fault containment: one failed vault's segregated bonds
- * paying its holders pro-rata, never another vault, never the issuance reserve.
+ * paying its holders pro-rata, never another vault, never another pair's
+ * reserve. This pair's own reserve backing IS swept into the book (the
+ * reserve is the pair's pooled first-loss collateral), bounded by the seat.
  * @ingroup object
  * @ingroup protocol
  *
  * Created by the 150% maintenance hook (top-up expiry) or by vault_resolve
- * executing a sustained challenge. segregated_bond is the seized slice ONLY
- * (debited from the failed vault's vesting balances at creation, so the
- * supply audit counts segregated_bond - paid_total as escrowed, H2b
- * precedent). total_claims is the outstanding at freeze (the claim
+ * executing a sustained challenge. segregated_bond is the seat bound by what
+ * the filed exit formula can pay (the reserve leg first, then the bonds, both
+ * capped; a bond the bound never reaches keeps its vesting balance with its
+ * owner), debited at creation, so the supply audit counts segregated_bond -
+ * paid_total as escrowed (H2b precedent). total_claims is the outstanding at freeze (the claim
  * denominator). Redemptions continue into this object while the source vault
  * stays failed closed.
  */

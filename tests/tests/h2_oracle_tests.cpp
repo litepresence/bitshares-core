@@ -995,7 +995,22 @@ BOOST_AUTO_TEST_CASE( fallback_switch_serves_backup_then_halts_on_dual_stale )
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
-   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+   // book through the bonded price, so the sweep that expires the top-up
+   // window needs a live price; with a dead price it defers the wind-down
+   // to the next sweep instead of seating a half-empty book. Land just
+   // before that sweep, republish there (the price is live for one print
+   // lifetime), then cross it. The bound oracle is the seat's price leg
+   // (the owner-controlled backup only covers a lost primary read and is
+   // exercised at claim time below), so it carries the print.
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md section 3.2
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < vid( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2e_publish( *this, primary, bob_id, bob_private_key, 100, 1 );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
    const winddown_vault_id_type wdid {
@@ -1634,7 +1649,23 @@ BOOST_AUTO_TEST_CASE( tripwire_redemptions_hold_freezes_claims_until_cleared )
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
-   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+   // book through the bonded price, so the sweep that expires the top-up
+   // window needs a live price; with a dead price it defers the wind-down
+   // to the next sweep instead of seating a half-empty book. Land just
+   // before that sweep, republish there (the price is live for one print
+   // lifetime), then cross it. The bound oracle is the only price leg
+   // (no fallback is set on it), and the pair's tripwire never escalates
+   // (one pool, so the deviation ladder stays unreadable), so the oracle
+   // is neither frozen nor stale at the seat.
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md section 3.2
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < vid( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
    const winddown_vault_id_type wdid {
@@ -1733,32 +1764,70 @@ BOOST_AUTO_TEST_CASE( unbonded_oracle_reads_fail_closed_and_block_debt )
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
 
-   // Breach -> top-up -> wind-down, then a fresh live publish (still unbonded).
+   // Breach -> top-up -> the expiry sweep DEFERS the wind-down, then a fresh
+   // live publish (still unbonded).
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md section 3.2
+   // Design 3 (section 3.2): the seat converts the frozen claim book
+   // through the bonded price, so a bound vault with claims present needs a
+   // live price to seat AT ALL. This vault's bound oracle is deliberately
+   // UNBONDED (no producer bond anywhere), so the H2 read can never be
+   // live, no matter how fresh the print: the wind-down for this vault is
+   // unreachable, not deferred for one stale print. The case is re-scoped
+   // to that fact; the wind-down-and-claim leg stays covered where the
+   // oracle can be live (fallback_switch_serves_backup_then_halts_on_dual_stale
+   // for the price-gated claim refusal,
+   // tripwire_redemptions_hold_freezes_claims_until_cleared for the latch
+   // refusal).
    generate_block();
    h2e_set_outstanding( *this, vid, H2E_VAULT_RAW );
    generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 3600 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
-   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   // Land just before the expiry sweep and print there, so the sweep sees
+   // the freshest price this oracle can ever offer: the seat is still
+   // refused, because the blocker is the missing producer bond, not
+   // staleness.
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < vid( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    generate_block();
-   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
-   const winddown_vault_id_type wdid {
-      db.get_index_type<winddown_vault_index>().indices().begin()->id };
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_block();
+   // Deferred: the vault never left TOPUP and no book was seated for it.
+   BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_TOPUP );
+   {
+      const auto& wd_idx = db.get_index_type<winddown_vault_index>().indices()
+                              .get<by_winddown_vault>();
+      BOOST_CHECK( wd_idx.find( vid ) == wd_idx.end() );
+   }
    h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
    BOOST_REQUIRE( oid( db ).consumed_value.valid() );
    BOOST_CHECK( !h2_read_pair_price( db, vid( db ), 0, db.head_block_time() ).valid() );
 
-   // Debt blocked: conversion-dependent claims halt on dual-stale/unbonded.
+   // Debt blocked: the conversion-dependent exit never opened for this
+   // vault, so a senior claim has no book to draw on. The refusal must
+   // name the missing wind-down, not some other guard: the price leg is
+   // never reached, because the seat never ran.
    winddown_claim_operation cop;
    cop.claimant     = carol_id;
-   cop.winddown     = wdid;
+   cop.winddown     = winddown_vault_id_type( 0 );
    cop.claim_amount = share_type( 1000000 );
    cop.tranche      = GRAPHENE_H2_WINDDOWN_SENIOR;
    signed_transaction ctx; ctx.operations.push_back( cop );
    db.current_fee_schedule().set_fee( ctx.operations.back() );
    set_expiration( db, ctx );
    ctx.sign( carol_private_key, db.get_chain_id() );
-   BOOST_CHECK_THROW( PUSH_TX( db, ctx ), fc::exception );
+   bool refused = false;
+   try { PUSH_TX( db, ctx ); }
+   catch( const fc::exception& e ) {
+      refused = true;
+      BOOST_CHECK_MESSAGE( e.to_string().find( "does not exist" ) != std::string::npos,
+            "claim against the never-seated wind-down must be refused for the missing "
+            "book, not another guard: " << e.to_string() );
+   }
+   BOOST_CHECK( refused );
 } FC_LOG_AND_RETHROW() }
 
 /// X-03 H2-side merge-contract half: every sweep records h2_diversion_bps
@@ -1919,7 +1988,25 @@ BOOST_AUTO_TEST_CASE( coincident_vault_and_tripwire_breach_halts_atomically )
    BOOST_CHECK( h2_redemptions_halted( db, pairc ) );
 
    // Wind-down follows the coverage breach: past the 36h top-up deadline.
-   generate_blocks( vid( db ).top_up_deadline + 2 * 86400 );
+   // Design 3 (section 3.2): the wind-down seat converts the frozen claim
+   // book through the bonded price, so the sweep that expires the top-up
+   // window needs a live price; with a dead price it defers the wind-down
+   // to the next sweep instead of seating a half-empty book. Land just
+   // before that sweep, print there, then cross it. The tripwire's DEBT
+   // rung froze the bound oracle (a frozen oracle reads absent, and the
+   // owner-controlled backup never covers a freeze), so the tap is opened
+   // white-box here -- the same isolation the redemptions-hold leg below
+   // uses -- while the redemptions latch stays closed.
+   // Spec: docs/superpowers/specs/2026-10-17-winddown-fair-settlement-design.md section 3.2
+   while( db.get_dynamic_global_properties().next_maintenance_time
+          < vid( db ).top_up_deadline )
+      generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time - 60 );
+   generate_block();
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   h2e_publish( *this, oid, bob_id, bob_private_key, 100, 1 );
+   generate_block();
+   generate_blocks( db.get_dynamic_global_properties().next_maintenance_time + 60 );
    generate_block();
    BOOST_REQUIRE_EQUAL( vid( db ).maintenance_state, GRAPHENE_H2_VAULT_WINDDOWN );
    const winddown_vault_id_type wdid {

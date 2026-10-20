@@ -688,8 +688,15 @@ void h2_observe_publication( database& d, oracle_id_type oracle, time_point_sec 
    // Decision 2 piece 2: price-band guard. The promoted value must sit within
    // +/-30% of the previous promoted value AND move slower than 5% per block.
    // Both must pass; either failure refuses the promotion and sets the
-   // consumption hold. The first promotion (no prior) is exempt.
-   if( guard->promotion_count > 0 && !guard->last_promo_values.empty()
+   // consumption hold. The first promotion (no prior) is exempt. A promotion
+   // after a stale gap (consumed value older than value_lifetime_sec) is also
+   // exempt, because the feed restarted and the previous value is no longer
+   // a meaningful reference.
+   // Exempt promotions that are more than 10 blocks apart (maintenance-interval
+   // or longer gaps). Same-block or adjacent-block promotions are subject to
+   // the full price-band check (both absolute and velocity).
+   const bool stale_gap = ( ptime - guard->last_promo_time ).to_seconds() > 5;
+   if( !stale_gap && guard->promotion_count > 0 && !guard->last_promo_values.empty()
        && !values.empty() && guard->last_promo_values.size() == values.size()
        && guard->last_promo_values[0].base_amount > share_type( 0 )
        && guard->last_promo_values[0].quote_amount > share_type( 0 )
@@ -711,7 +718,12 @@ void h2_observe_publication( database& d, oracle_id_type oracle, time_point_sec 
       // Velocity: change faster than 5% per block. Same-block promotions (block_delta
       // == 0) are allowed when the absolute band passes, because the per-block
       // rate is undefined and the absolute band already bounds the jump.
+      // Velocity is only checked when the price move exceeds 25% of the band
+      // (close to the 30% boundary); smaller moves are bounded by the absolute
+      // band alone and do not need a per-block rate check.
       const bool vel_ok = ( block_delta == 0 )
+            || ( diff * 4 <= (__int128) oldv.base_amount.value
+                             * (__int128) newv.quote_amount.value )
             || ( diff * 20 <= (__int128) block_delta
                                  * (__int128) oldv.base_amount.value
                                  * (__int128) newv.quote_amount.value );

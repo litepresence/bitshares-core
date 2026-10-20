@@ -24,6 +24,7 @@
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
 #include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/chain/issuance_object.hpp>
 #include <graphene/chain/winddown_object.hpp>
@@ -365,6 +366,91 @@ void process_h2_vault_maintenance( database& d )
    {
       if( itr->maintenance_state == GRAPHENE_H2_VAULT_WINDDOWN )
          continue; // terminal: seized bonds never roll back, no second wind-down
+
+      // Decision 2 piece 1: slash-on-stale. A bound vault whose oracle's
+      // consumed value is stale beyond the age-exempt window and whose guard
+      // has not promoted within the last N blocks forfeits its bond (minus
+      // the minimum bond floor) to the offset pool. Legacy vaults (no bound
+      // oracle) are untouched.
+      if( itr->bound_oracle.valid() )
+      {
+         const oracle_object* _o = d.find( *itr->bound_oracle );
+         if( _o != nullptr && _o->consumed_value_time != time_point_sec() )
+         {
+            const bool stale = ( now - _o->consumed_value_time ).to_seconds()
+                  >= (int64_t) d.get_global_properties().parameters.get_oracle_guard_delay_sec() * 2;
+            bool no_recent_promo = true;
+            if( stale )
+            {
+               const guard_state_object* _g = nullptr;
+               {
+                  const auto& _gidx = d.get_index_type<guard_state_index>().indices().get<by_guard_oracle>();
+                  const auto _gitr = _gidx.find( *itr->bound_oracle );
+                  if( _gitr != _gidx.end() ) _g = &*_gitr;
+               }
+               if( _g != nullptr && !_g->promotion_log.empty() )
+               {
+                  const int64_t age = ( now - _g->promotion_log.back().promote_time ).to_seconds();
+                  if( age < 2880 * 3 )
+                     no_recent_promo = false;
+               }
+            }
+            if( stale && no_recent_promo )
+            {
+               const offset_pool_object* _pool = h2_find_offset_pool( d, itr->vault_pair );
+               if( _pool == nullptr )
+               {
+                  const auto& _created = d.create<offset_pool_object>(
+                        [&]( offset_pool_object& p ) {
+                     p.pair = itr->vault_pair;
+                     p.balance = share_type( 0 );
+                  } );
+                  _pool = &_created;
+               }
+               const auto& _bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
+               const auto _range = _bond_idx.equal_range( vault_id_type( itr->id ) );
+               for( auto _bitr = _range.first; _bitr != _range.second; ++_bitr )
+               {
+                  if( _bitr->seized )
+                     continue;
+                  if( _bitr->bond_usd_cents <= GRAPHENE_H2_VAULT_MIN_BOND_USD_CENTS )
+                     continue;
+                  share_type slashable( 0 );
+                  if( _bitr->bond_usd_cents > 0 )
+                  {
+                     int64_t floor_bts = (int64_t)( ( __int128 ) _bitr->bond_amount.value
+                           * GRAPHENE_H2_VAULT_MIN_BOND_USD_CENTS
+                           / _bitr->bond_usd_cents );
+                     if( floor_bts < _bitr->bond_amount.value )
+                        slashable = share_type( _bitr->bond_amount.value - floor_bts );
+                  }
+                  if( slashable <= share_type( 0 ) )
+                     continue;
+                  const vesting_balance_object* _vesting = d.find( _bitr->vesting_balance );
+                  if( _vesting != nullptr && _vesting->balance.amount > share_type( 0 ) )
+                  {
+                     int64_t avail = _vesting->balance.amount.value;
+                     int64_t take = std::min( avail, slashable.value );
+                     if( take > 0 )
+                     {
+                        share_type debit( take );
+                        d.modify( *_vesting, [&debit]( vesting_balance_object& v ) {
+                           v.balance.amount -= debit;
+                        } );
+                        d.modify( *_pool, [&debit]( offset_pool_object& p ) {
+                           p.balance += debit;
+                        } );
+                     }
+                  }
+                  d.modify( *_bitr, [&]( vault_bond_object& b ) {
+                     b.bond_amount -= slashable;
+                     b.bond_usd_cents = GRAPHENE_H2_VAULT_MIN_BOND_USD_CENTS;
+                  } );
+               }
+            }
+         }
+      }
+
       const bool meets = h2_vault_meets_maintenance( d, *itr );
       if( itr->maintenance_state == GRAPHENE_H2_VAULT_TOPUP )
       {

@@ -376,6 +376,16 @@ namespace {
        const bool vault_gone = ( vitr == vault_idx.end() );
        const vault_object* vault = vault_gone ? nullptr : &*vitr;
        const bool bound = ( vault != nullptr && vault->bound_oracle.valid() );
+       // Decision 2 piece 3: stale rung.
+       bool stale_rung = false;
+       if( bound )
+       {
+          const oracle_object* _po = d.find( *vault->bound_oracle );
+          if( _po != nullptr && _po->consumed_value_time != time_point_sec()
+              && ( now - _po->consumed_value_time ).to_seconds()
+                  >= (int64_t) _po->options.value_lifetime_sec )
+             stale_rung = true;
+       }
        // Feed leg: bound oracle's live raw aggregate (transparency continues
        // under freeze), else the single backup's, else pause (no data).
        // X-01 bonded-only: a live value without a bonded live set is not a
@@ -430,6 +440,7 @@ namespace {
        // Decide the post-sweep state before touching anything.
        uint8_t stage_after = tw.halt_stage;
        uint8_t streak_after = tw.clean_streak;
+       const bool was_halted = tw.redemptions_halted;
        bool reopen = false;
        if( vault_gone )
        {
@@ -441,26 +452,23 @@ namespace {
        }
        else if( breach )
        {
-          // X-05 atomic automatic door+debt halt: the first breach in a sweep
-          // applies door AND debt together (stage jumps past DEBT), so no
-          // block ever observes door-closed/debt-open. Redemptions stay the
-          // only lagging rung (manual pair_freeze was already atomic).
-          // R4-02: DOOR is dead as a STANDING stage — the jump below stores
-          // DEBT (2) directly, never 1 — so committee oracle_unfreeze gates
-          // on halt_stage == NONE (any non-NONE stage blocks; the strict
-          // form refuses a stored DOOR too, should a future rung ever store
-          // one). h2_apply_tripwire_stage still keys door effects off
-          // >= DOOR, so the standing DEBT stage carries the door hold with it.
           if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT )
              stage_after = GRAPHENE_H2E_TRIPWIRE_STAGE_DEBT;
           else if( stage_after < GRAPHENE_H2E_TRIPWIRE_STAGE_REDEMPTIONS )
              stage_after += 1;
           streak_after = 0;
        }
+       else if( stale_rung )
+       {
+          // Stale rung: redemptions halted at the pair level only. No door,
+          // no debt, no wind-down. The wind-down requires a deviation rung.
+          streak_after = 0;
+       }
        else
        {
           const uint8_t streak = uint8_t( streak_after + 1 );
-          if( streak >= GRAPHENE_H2E_TRIPWIRE_REOPEN_WINDOWS && stage_after != 0 )
+          if( streak >= GRAPHENE_H2E_TRIPWIRE_REOPEN_WINDOWS
+              && ( stage_after != 0 || was_halted ) )
              reopen = true;
           else if( streak >= GRAPHENE_H2E_TRIPWIRE_REOPEN_WINDOWS )
              streak_after = 0; // healthy pairs cap the streak, never halt
@@ -470,17 +478,25 @@ namespace {
        // Apply: rotate the ring, then the outcome. References stay valid
        // across modifies (same index nodes), so the vault/tripwire refs below
        // keep pointing at the right objects.
-       d.modify( tw, [&now, stage_after, streak_after]( tripwire_state_object& t ) {
+       d.modify( tw, [&now, stage_after, streak_after, stale_rung]( tripwire_state_object& t ) {
           t.win_old = t.win_new;
           t.win_new = h2_tripwire_window();
           t.win_new.start = now;
           t.halt_stage = stage_after;
           t.clean_streak = streak_after;
+          if( stale_rung )
+             t.redemptions_halted = true;
        } );
        if( reopen )
           h2_reopen_tripwire( d, tw, *vault );
        else if( readable && breach )
+       {
           h2_apply_tripwire_stage( d, tw, *vault );
+          if( stale_rung )
+             d.modify( tw, []( tripwire_state_object& t ) { t.redemptions_halted = true; } );
+       }
+       else if( stale_rung )
+          d.modify( tw, []( tripwire_state_object& t ) { t.redemptions_halted = true; } );
     }
 
    /// Sweeps one oracle's forfeit accruals into its pool and pays bonded live
@@ -647,6 +663,43 @@ void h2_observe_publication( database& d, oracle_id_type oracle, time_point_sec 
    const uint16_t count = o->current_value_producer_count;
    const auto values = *o->consumed_value;
    const time_point_sec ptime = o->consumed_value_time;
+
+   // Decision 2 piece 2: price-band guard. The promoted value must sit within
+   // +/-30% of the previous promoted value AND move slower than 5% per block.
+   // Both must pass; either failure refuses the promotion and sets the
+   // consumption hold. The first promotion (no prior) is exempt.
+   if( guard->promotion_count > 0 && !guard->last_promo_values.empty()
+       && !values.empty() && guard->last_promo_values.size() == values.size()
+       && guard->last_promo_values[0].base_amount > share_type( 0 )
+       && guard->last_promo_values[0].quote_amount > share_type( 0 )
+       && values[0].base_amount > share_type( 0 )
+       && values[0].quote_amount > share_type( 0 ) )
+   {
+      const auto& oldv = guard->last_promo_values[0];
+      const auto& newv = values[0];
+      // Absolute band: 0.7 <= (new.base/new.quote)/(old.base/old.quote) <= 1.3
+      const __int128 lhs = (__int128) newv.base_amount.value
+                          * (__int128) oldv.quote_amount.value;
+      const __int128 rhs = (__int128) oldv.base_amount.value
+                          * (__int128) newv.quote_amount.value;
+      const bool abs_ok = ( lhs * 10 >= rhs * 7 ) && ( lhs * 10 <= rhs * 13 );
+      // Velocity: |new-old|/old <= 5% per block. 5% = 1/20.
+      const __int128 diff = ( lhs > rhs ) ? ( lhs - rhs ) : ( rhs - lhs );
+      int64_t block_delta = ( ptime - guard->last_promo_time ).to_seconds() / 3;
+      if( block_delta <= 0 ) block_delta = 0;
+      const bool vel_ok = ( block_delta > 0 )
+            && ( diff * 20 <= (__int128) block_delta
+                                 * (__int128) oldv.base_amount.value
+                                 * (__int128) newv.quote_amount.value );
+      if( !abs_ok || !vel_ok )
+      {
+         d.modify( *guard, []( guard_state_object& g ) {
+            g.consumption_hold = true;
+         } );
+         return;
+      }
+   }
+
    d.modify( *guard, [&]( guard_state_object& g ) {
       h2_promotion_record record;
       record.promote_time = ptime;

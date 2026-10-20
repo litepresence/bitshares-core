@@ -166,6 +166,28 @@ namespace {
        return false;
     }
 
+   /// Whether the oracle has at least one producer with a non-slashed bond,
+   /// regardless of liveness. The settlement path (age_exempt) drops the
+   /// live-submission part of the bonded live set (a dead feed has no live
+   /// submission) but keeps this gate, so an oracle that was never bonded
+   /// (no bond rows at all) has no settlement price. Unbonded oracles can
+   /// never move bonded medians, debt taps, or wind-down seats.
+   bool h2_oracle_has_any_bond( const database& d, const oracle_object& oracle )
+   {
+      const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                .indices().get<by_oracle_producer>();
+      for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oracle_id_type( oracle.id ) ) );
+            bitr != bond_idx.end() && bitr->oracle == oracle.id; ++bitr )
+      {
+         if( bitr->slashed )
+            continue;
+         if( bitr->bond_amount <= share_type( 0 ) )
+            continue;
+         return true;
+      }
+      return false;
+   }
+
    /// Interval-anchored window for @p now (H1 guard_epoch precedent).
    time_point_sec h2_rate_window( const database& d, time_point_sec now )
    {
@@ -756,6 +778,9 @@ optional<protocol::oracle_value> h2_read_consumed_price(
     // monitored (the realized drift per wind-down) rather than mitigated here.
     if( liveness == h2_price_liveness::live
         && !h2_oracle_has_bonded_live_set( d, *o, now ) )
+       return optional<protocol::oracle_value>();
+   if( liveness == h2_price_liveness::age_exempt
+        && !h2_oracle_has_any_bond( d, *o ) )
        return optional<protocol::oracle_value>();
    // Read-time liveness counts from the sample's formation time (H1 rule: a
    // delayed value cannot outlive its data). The AGE_EXEMPT mode drops

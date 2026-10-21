@@ -207,6 +207,22 @@ namespace graphene { namespace protocol {
       share_type      calculate_fee( const fee_params_t& k )const;
    };
 
+    struct vault_foreign_mint_operation : public base_operation
+    {
+       struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
+
+       asset            fee;
+       vault_id_type    vault;
+       foreign_tx_id    deposit_id;
+       share_type       amount;
+       account_id_type  recipient;
+       extensions_type  extensions;
+
+       account_id_type fee_payer()const { return recipient; }
+       void            validate()const;
+       share_type      calculate_fee( const fee_params_t& k )const;
+    };
+
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::vault_rotate_operation::fee_params_t, (fee) )
@@ -214,6 +230,7 @@ FC_REFLECT( graphene::protocol::vault_bond_release_operation::fee_params_t, (fee
 FC_REFLECT( graphene::protocol::vault_resolve_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::pair_freeze_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::winddown_claim_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::vault_foreign_mint_operation::fee_params_t, (fee) )
 
 FC_REFLECT( graphene::protocol::vault_rotate_operation,
              (fee)(rotator)(vault)(new_authority)(memo)(co_signers)(extensions) )
@@ -225,14 +242,18 @@ FC_REFLECT( graphene::protocol::pair_freeze_operation,
             (fee)(freezer)(vault)(oracle)(extensions) )
 FC_REFLECT( graphene::protocol::winddown_claim_operation,
             (fee)(claimant)(winddown)(claim_amount)(tranche)(extensions) )
+FC_REFLECT( graphene::protocol::vault_foreign_mint_operation,
+            (fee)(vault)(deposit_id)(amount)(recipient)(extensions) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_rotate_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_bond_release_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation::fee_params_t )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_rotate_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_bond_release_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation )

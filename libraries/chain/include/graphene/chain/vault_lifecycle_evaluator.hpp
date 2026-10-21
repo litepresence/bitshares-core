@@ -34,6 +34,7 @@ namespace graphene { namespace chain {
    class vault_bond_object;
    class vault_challenge_object;
    class winddown_vault_object;
+   class reserve_object;
 
    class vault_rotate_evaluator : public evaluator<vault_rotate_evaluator>
    {
@@ -126,6 +127,19 @@ namespace graphene { namespace chain {
      */
    const winddown_vault_object& h2_create_winddown( database& d, const vault_object& vault,
                                                  const optional<protocol::oracle_value>& seat_price );
+
+   class vault_foreign_mint_evaluator : public evaluator<vault_foreign_mint_evaluator>
+   {
+      public:
+         using operation_type = vault_foreign_mint_operation;
+
+         void_result    do_evaluate( const vault_foreign_mint_operation& op );
+         object_id_type do_apply( const vault_foreign_mint_operation& op );
+
+         const vault_object*    _vault = nullptr;
+         const reserve_object*  _reserve = nullptr;
+         bool                   _creates_reserve = false;
+   };
 
    /**
     * Coverage predicate (declared integer math, no floats): healthy while

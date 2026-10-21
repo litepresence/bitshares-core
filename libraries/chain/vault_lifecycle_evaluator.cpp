@@ -1054,3 +1054,125 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::winddown_claim_object, (graphen
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::winddown_vault_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::winddown_claim_object )
+
+namespace graphene { namespace chain {
+
+// Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md §6
+// Defends against: minting without a promoted foreign lock proof, amount/
+// deposit-id/kind mismatch, coverage breach, non-foreign vault.
+void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_operation& op )
+{ try {
+   database& d = db();
+   const time_point_sec now = d.head_block_time();
+
+   h2_require_gateway_leg( now );
+
+   _vault = d.find( op.vault );
+   FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
+   FC_ASSERT( h2_vault_is_foreign_backed( *_vault ),
+              "Vault is not foreign-backed; foreign mint refused" );
+   FC_ASSERT( nullptr != d.find( op.recipient ),
+              "Recipient account ${a} does not exist", ("a", op.recipient) );
+
+   FC_ASSERT( _vault->bound_oracle.valid(),
+              "Vault has no bound foreign chain transaction oracle" );
+   const oracle_id_type oid = *_vault->bound_oracle;
+   const auto got = h2_read_foreign_tx( d, oid, now, h2_price_liveness::live );
+   FC_ASSERT( got.valid(), "No promoted foreign transaction record for this oracle" );
+   FC_ASSERT( got->tx_id == op.deposit_id,
+              "Foreign deposit id does not match the promoted record" );
+   FC_ASSERT( got->amount == op.amount,
+              "Foreign mint amount does not match the promoted record" );
+   FC_ASSERT( got->kind == foreign_tx_kind::lock,
+              "Promoted record is not a lock" );
+
+   // Coverage: bonded custody against the new outstanding (secure ratio).
+   share_type live_bonds( 0 );
+   const auto& bond_idx = d.get_index_type<vault_bond_index>()
+                             .indices().get<by_bond_vault>();
+   const auto range = bond_idx.equal_range( op.vault );
+   for( auto itr = range.first; itr != range.second; ++itr )
+   {
+      if( itr->seized )
+         continue;
+      const vesting_balance_object* vb = d.find( itr->vesting_balance );
+      if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+          || vb->balance.amount < itr->bond_amount )
+         continue;
+      live_bonds = h2_issue_sat_add( live_bonds, itr->bond_amount );
+   }
+   FC_ASSERT( _vault->mint_within_secure_ratio( live_bonds,
+                _vault->outstanding + op.amount ),
+              "Post-mint vault coverage breaks the secure ratio" );
+
+   const asset_object* pair_asset = d.find( _vault->vault_pair );
+   FC_ASSERT( nullptr != pair_asset, "Vault pair asset does not exist" );
+   FC_ASSERT( pair_asset->can_create_new_supply(), "Pair asset can create no new supply" );
+   {
+      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+      FC_ASSERT( ( pair_dyn.current_supply + op.amount ) <= pair_asset->options.max_supply,
+                 "Foreign mint exceeds the pair asset's maximum supply" );
+   }
+
+   _reserve = h2_find_reserve( d, _vault->vault_pair );
+   _creates_reserve = ( _reserve == nullptr );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+object_id_type vault_foreign_mint_evaluator::do_apply( const vault_foreign_mint_operation& op )
+{ try {
+   database& d = db();
+   const uint32_t head_block = d.head_block_num();
+
+   const reserve_object* reserve = nullptr;
+   if( _creates_reserve )
+   {
+      const auto& created = d.create<reserve_object>(
+            [&]( reserve_object& r ) {
+         r.pair          = _vault->vault_pair;
+         r.fxr_asset     = _vault->vault_pair;
+         r.bts_balance   = share_type( 0 );
+         r.stable_supply = op.amount;
+         r.fxr_supply    = share_type( 0 );
+         r.door_used_bts = share_type( 0 );
+         r.door_block    = head_block;
+         h2_issue_ensure_bands( r.band_bts );
+         h2_issue_ensure_bands( r.band_stable );
+         r.band_bts[3] = share_type( 0 );
+         r.band_stable[3] = op.amount;
+         r.band_anchor = protocol::oracle_value();
+         r.band_block = head_block;
+         r.uncovered_shortfall = share_type( 0 );
+      } );
+      reserve = &created;
+   }
+   else
+   {
+      d.modify( *_reserve, [&]( reserve_object& r ) {
+         r.stable_supply += op.amount;
+         h2_issue_ensure_bands( r.band_bts );
+         h2_issue_ensure_bands( r.band_stable );
+         r.band_stable[3] += op.amount;
+      } );
+      reserve = h2_find_reserve( d, _vault->vault_pair );
+   }
+   if( reserve != nullptr )
+      h2_issue_verify_bands( *reserve );
+
+   d.adjust_balance( op.recipient, asset( op.amount, _vault->vault_pair ) );
+
+   const asset_object& pair_asset = _vault->vault_pair( d );
+   const auto& pair_dyn = pair_asset.dynamic_asset_data_id( d );
+   d.modify( pair_dyn, [&op]( asset_dynamic_data_object& data ) {
+      data.current_supply += op.amount;
+   } );
+
+   d.modify( *_vault, [&op]( vault_object& v ) {
+      v.outstanding += op.amount;
+   } );
+
+   return reserve != nullptr ? object_id_type( reserve->id ) : object_id_type();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+} } // graphene::chain

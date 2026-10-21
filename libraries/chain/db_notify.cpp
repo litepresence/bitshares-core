@@ -492,6 +492,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // requester
    }
+   void operator()( const vault_foreign_mint_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // recipient
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );

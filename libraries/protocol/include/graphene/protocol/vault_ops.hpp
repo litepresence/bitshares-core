@@ -48,6 +48,12 @@ namespace graphene { namespace protocol {
    constexpr uint32_t GRAPHENE_H2_VAULT_MAX_CHALLENGE_WINDOW_SEC = 1209600;
    /// Vault memo bound proposal (inventory section 1.1): 1000 chars.
    constexpr size_t GRAPHENE_H2_VAULT_MAX_MEMO_LENGTH = 1000;
+   /// Max outstanding foreign redeems a vault may carry (H3). The pending
+   /// redeem vector is bounded by this, so it cannot grow without limit.
+   constexpr size_t GRAPHENE_H3_MAX_PENDING_REDEEMS = 16;
+   /// Foreign redeem SLA (H3): 72h, matching the Track A social-slash bond's
+   /// redemption window.
+   constexpr uint32_t GRAPHENE_H3_FOREIGN_REDEEM_SLA_SEC = 259200;
 
    /**
     * @brief Binds a threshold-authority vault set to a pair and commits its terms.
@@ -80,6 +86,12 @@ namespace graphene { namespace protocol {
       /// H3 foreign backing asset (appended-last): 0/empty = BitShares (H2 vault).
       uint8_t         backing_chain = 0;
       std::string     backing_asset;
+      /// H3 committed exchange rate (appended-last): one foreign unit is worth
+      /// backing_rate_num / backing_rate_den bond-asset raw units. Committed
+      /// at registration and immutable for the life of the vault. A
+      /// foreign-backed vault must carry a non-zero denominator.
+      uint64_t        backing_rate_num = 0;
+      uint64_t        backing_rate_den = 1;
       extensions_type extensions;       ///< Wire space only at H2 genesis (appended-last rule)
       account_id_type fee_payer()const { return registrar; }
       void            validate()const;
@@ -166,7 +178,8 @@ FC_REFLECT( graphene::protocol::oracle_bond_release_operation::fee_params_t, (fe
 
 FC_REFLECT( graphene::protocol::vault_register_operation,
             (fee)(registrar)(pair)(vault_authority)(min_bond)(min_bond_usd_cents)
-            (bond_asset)(secure_ratio_bps)(challenge_window_sec)(memo)(backing_chain)(backing_asset)(extensions) )FC_REFLECT( graphene::protocol::vault_bond_lock_operation,
+            (bond_asset)(secure_ratio_bps)(challenge_window_sec)(memo)(backing_chain)(backing_asset)
+            (backing_rate_num)(backing_rate_den)(extensions) )FC_REFLECT( graphene::protocol::vault_bond_lock_operation,
             (fee)(owner)(vault)(vesting_balance)(bond_amount)(bond_usd_cents)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_bond_lock_operation,
             (fee)(producer)(oracle)(vesting_balance)(bond_amount)(bond_usd_cents)

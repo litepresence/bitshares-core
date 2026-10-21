@@ -523,42 +523,86 @@ void process_h2_vault_maintenance( database& d )
       }
    }
 
-   // H3 foreign redeem SLA: missed deadline -> freeze + bond reimbursement.
+   // H3 foreign redeem SLA: a missed deadline freezes the vault and
+   // reimburses the redeemer from the bond. A missed deadline is a LIVENESS
+   // failure, not a lie: the bond covers it, it does not punish it. Only a
+   // sustained attestor-lie challenge slashes.
+   //
+   // Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 2
    const auto& vault_idx2 = d.get_index_type<vault_index>().indices();
    for( auto itr = vault_idx2.begin(); itr != vault_idx2.end(); ++itr )
    {
-      if( !itr->foreign_redeem_pending )
+      if( itr->foreign_redeems.empty() )
          continue;
-      if( itr->foreign_redeem_unlocked )
-         continue; // proof published within SLA
-      if( now < itr->foreign_redeem_sla_deadline )
-         continue; // still within SLA
-      // Freeze vault.
-      const account_id_type redeemer = itr->foreign_redeem_redeemer;
-      const share_type amount = itr->foreign_redeem_amount;
+      // Collect the expired, still-unlocked redeems first: the modify below
+      // cannot read the vector it is mutating.
+      std::vector<foreign_redeem_record> expired;
+      for( const auto& rec : itr->foreign_redeems )
+      {
+         if( rec.unlocked )
+            continue; // proof published within SLA
+         if( now < rec.sla_deadline )
+            continue; // still within SLA
+         expired.push_back( rec );
+      }
+      if( expired.empty() )
+         continue;
       const asset_id_type bond_asset = itr->bond_asset;
       const vault_id_type vid = vault_id_type( itr->id );
-      d.modify( *itr, []( vault_object& v ) {
+      // Freeze the vault and clear the expired records.
+      d.modify( *itr, [&expired]( vault_object& v ) {
          v.frozen = true;
-         v.foreign_redeem_pending = false;
-      } );
-      // Reimburse from bond: credit redeemer in bond asset.
-      if( redeemer != account_id_type() && amount > 0 )
-         d.adjust_balance( redeemer, asset( amount, bond_asset ) );
-      // Reduce a bond if available.
-      const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
-      const auto range = bond_idx.equal_range( vid );
-      for( auto bitr = range.first; bitr != range.second; ++bitr )
-      {
-         if( bitr->seized )
-            continue;
-         if( bitr->bond_amount >= amount )
+         for( const auto& rec : expired )
          {
-            d.modify( *bitr, [&amount]( vault_bond_object& b ) {
-               b.bond_amount -= amount;
+            for( auto it = v.foreign_redeems.begin(); it != v.foreign_redeems.end(); ++it )
+            {
+               if( it->deposit_id == rec.deposit_id )
+               {
+                  v.foreign_redeems.erase( it );
+                  break;
+               }
+            }
+         }
+      } );
+      // Reimburse each expired redeemer in bond terms, at the vault's
+      // committed rate, and reduce the bond by the same amount.
+      for( const auto& rec : expired )
+      {
+         if( rec.redeemer == account_id_type() || rec.amount <= 0 )
+            continue;
+         const share_type bond_terms = h2_vault_convert_to_bond_terms( *itr, rec.amount );
+         if( bond_terms <= share_type( 0 ) )
+            continue; // no committed rate or a zero conversion: nothing to pay
+         // The reimbursement is paid OUT OF the bond: the vesting balance is
+         // debited and the redeemer credited the same amount, so the bond
+         // asset's supply is unchanged. Crediting without the debit would
+         // mint bond-asset units out of nothing.
+         //
+         // Invariant: bond asset total supply is unchanged by a reimbursement;
+         // the vault's bonded coverage falls by the paid amount.
+         const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
+         const auto range = bond_idx.equal_range( vid );
+         bool paid = false;
+         for( auto bitr = range.first; bitr != range.second; ++bitr )
+         {
+            if( bitr->seized )
+               continue;
+            if( bitr->bond_amount < bond_terms )
+               continue;
+            const vesting_balance_object* vb = d.find( bitr->vesting_balance );
+            if( vb == nullptr || vb->balance.amount < bond_terms )
+               continue;
+            d.modify( *vb, [&bond_terms]( vesting_balance_object& v ) {
+               v.balance.amount -= bond_terms;
             } );
+            d.modify( *bitr, [&bond_terms]( vault_bond_object& b ) {
+               b.bond_amount -= bond_terms;
+            } );
+            paid = true;
             break;
          }
+         if( paid )
+            d.adjust_balance( rec.redeemer, asset( bond_terms, bond_asset ) );
       }
    }
 }
@@ -605,6 +649,28 @@ void_result vault_rotate_evaluator::do_evaluate( const vault_rotate_operation& o
    // Never rotate under fire: an open challenge must resolve first.
    FC_ASSERT( _vault->open_challenges == 0,
               "Vault carries open challenges; rotation refused until they resolve" );
+   // H3 attestor set governance: a foreign-backed vault's incoming authority
+   // must carry the attestor bond. Every new signer must hold a live producer
+   // bond on the vault's bound foreign chain transaction oracle, because a
+   // signer with no attestor bond cannot be slashed for a lie and the
+   // guarantee is void.
+   //
+   // Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 13
+   if( h2_vault_is_foreign_backed( *_vault ) )
+   {
+      FC_ASSERT( _vault->bound_oracle.valid(),
+                 "Foreign-backed vault has no bound foreign chain transaction oracle" );
+      const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                .indices().get<by_oracle_producer>();
+      for( const auto& auth : op.new_authority.account_auths )
+      {
+         const auto bitr = bond_idx.find( boost::make_tuple( *_vault->bound_oracle,
+                                                             auth.first ) );
+         FC_ASSERT( bitr != bond_idx.end() && !bitr->slashed,
+                    "New attestor ${a} holds no live producer bond on the bound oracle",
+                    ("a", auth.first) );
+      }
+   }
    // The incoming set proves capital first: at least one unseized bond must
    // already secure the vault (the rotate test locks the new set pre-rotate).
    bool bonded = false;
@@ -1096,6 +1162,112 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::winddown_claim_objec
 
 namespace graphene { namespace chain {
 
+// Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 2
+// Defends against: an attestor-lie challenge naming a non-foreign vault, a
+// non-producer accused, a challenge that skips the H2 bond and authority
+// gates, or a challenge on a terminal vault.
+void_result vault_foreign_challenge_evaluator::do_evaluate( const vault_foreign_challenge_operation& op )
+{ try {
+   database& d = db();
+
+   // Shared primitives (H2e): judgment machinery built once, usable by both
+   // tracks. Ordering asserted inside.
+   h2_require_primitives( d.head_block_time() );
+
+   _challenger = d.find( op.challenger );
+   FC_ASSERT( nullptr != _challenger,
+              "Challenger account ${a} does not exist", ("a", op.challenger) );
+   _vault = d.find( op.vault );
+   FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
+   // Only a foreign-backed vault has attestors to accuse.
+   FC_ASSERT( h2_vault_is_foreign_backed( *_vault ),
+              "Vault ${v} is not foreign-backed; no attestor to challenge",
+              ("v", op.vault) );
+   // The accused must be a producer (attestor) of the vault's bound foreign
+   // chain transaction oracle. A challenge against a stranger is refused: the
+   // slash leg names a producer bond, and there is no such bond for a
+   // stranger.
+   FC_ASSERT( _vault->bound_oracle.valid(),
+              "Vault ${v} has no bound foreign chain transaction oracle",
+              ("v", op.vault) );
+   const oracle_object* bound = d.find( *_vault->bound_oracle );
+   FC_ASSERT( nullptr != bound, "Bound oracle does not exist" );
+   FC_ASSERT( bound->options.producers.find( op.accused_attestor )
+                != bound->options.producers.end(),
+              "Accused ${a} is not a producer of the vault's bound oracle",
+              ("a", op.accused_attestor) );
+   // The accused must hold a producer bond on that oracle: a producer with no
+   // bond has nothing to slash, so the challenge would be a free grief.
+   {
+      const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                .indices().get<by_oracle_producer>();
+      const auto bitr = bond_idx.find( boost::make_tuple( *_vault->bound_oracle,
+                                                          op.accused_attestor ) );
+      FC_ASSERT( bitr != bond_idx.end() && !bitr->slashed,
+                 "Accused ${a} holds no live producer bond to slash",
+                 ("a", op.accused_attestor) );
+   }
+   // Self-dealing ban: a challenger linked into the vault authority cannot
+   // challenge it, and a challenger linked into the accused attestor cannot
+   // challenge that attestor. Both walks are the same bounded walk the H2
+   // challenge creation uses.
+   FC_ASSERT( !h2_authority_graphs_overlap( d, op.challenger, _vault->vault_authority ),
+              "Challenger shares authority with the challenged vault" );
+   FC_ASSERT( !h2_authority_graphs_overlap( d, op.challenger, op.accused_attestor ),
+              "Challenger shares authority with the accused attestor" );
+   // Capacity before rate: a full pair reports full, not slow.
+   FC_ASSERT( _vault->open_challenges < GRAPHENE_H2_MAX_CONCURRENT_PER_PAIR,
+              "Pair already carries ${m} concurrent challenges",
+              ("m", GRAPHENE_H2_MAX_CONCURRENT_PER_PAIR) );
+   FC_ASSERT( d.head_block_time() >= _vault->last_challenge_time + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC,
+              "Pair challenges are cooling down until ${u}",
+              ("u", _vault->last_challenge_time + GRAPHENE_H2_DISPUTE_COOLDOWN_SEC) );
+   // Same raw-vs-USD escrow basis as the H2 challenge site: the raw escrow
+   // must cover the declared USD face at the bonded-read basis.
+   FC_ASSERT( op.challenge_bond_usd_cents >= GRAPHENE_H2_CHALLENGE_BOND_FLOOR_USD_CENTS,
+              "Challenge bond below the $837.50 USD-terms floor" );
+   FC_ASSERT( op.challenge_bond_usd_cents <= uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ),
+              "Challenge bond USD-terms record exceeds the anti-overflow bound" );
+   FC_ASSERT( fc::uint128_t( uint64_t( op.challenge_bond.value ) )
+                 >= fc::uint128_t( op.challenge_bond_usd_cents )
+                    * fc::uint128_t( GRAPHENE_H2_USD_BASIS_RAW_PER_CENT ),
+              "raw escrow below declared USD face at bonded read" );
+   // Transparent funding only: the escrow debits the challenger's visible core
+   // balance in apply.
+   FC_ASSERT( d.get_balance( op.challenger, asset_id_type() ).amount >= op.challenge_bond,
+              "Challenge bond must be posted from transparent funds" );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+object_id_type vault_foreign_challenge_evaluator::do_apply( const vault_foreign_challenge_operation& op )
+{ try {
+   database& d = db();
+   const auto now = d.head_block_time();
+   d.adjust_balance( op.challenger, asset( -op.challenge_bond, asset_id_type() ) );
+   d.modify( *_vault, [&now]( vault_object& v ) {
+      v.open_challenges += 1;
+      v.last_challenge_time = now;
+   } );
+   // The challenge row is the H2 vault_challenge_object (the vote machinery
+   // resolves it unchanged); the H3 fields name the accused attestor and the
+   // disputed deposit so a sustained challenge can slash the right bond.
+   const auto& new_challenge = d.create<vault_challenge_object>(
+         [&op, &now]( vault_challenge_object& c ) {
+      c.vault                     = op.vault;
+      c.challenger                = op.challenger;
+      c.challenge_bond            = op.challenge_bond;
+      c.challenge_bond_usd_cents  = op.challenge_bond_usd_cents;
+      c.evidence_memo             = op.evidence_memo;
+      c.opened                    = now;
+      c.deadline                  = now + GRAPHENE_H2_VOTE_WINDOW_SEC;
+      c.state                     = GRAPHENE_H2_CHALLENGE_OPEN;
+      c.attested_account          = op.accused_attestor;
+      c.attested_deposit          = op.deposit_id;
+   } );
+   return object_id_type( new_challenge.id );
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
 // Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md §6
 // Defends against: minting without a promoted foreign lock proof, amount/
 // deposit-id/kind mismatch, coverage breach, non-foreign vault.
@@ -1112,6 +1284,28 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
               "Vault is not foreign-backed; foreign mint refused" );
    FC_ASSERT( nullptr != d.find( op.recipient ),
               "Recipient account ${a} does not exist", ("a", op.recipient) );
+   // Vault authority authorization (the rotate pattern): the minter plus the
+   // named co-signers must carry the vault's full threshold weight. The
+   // minter and every co-signer must be members of the vault authority.
+   {
+      const auto& auths = _vault->vault_authority.account_auths;
+      const auto mitr = auths.find( op.minter );
+      FC_ASSERT( mitr != auths.end(),
+                 "Minter ${a} is not a member of the vault authority",
+                 ("a", op.minter) );
+      uint32_t weight = mitr->second;
+      for( const account_id_type& co : op.co_signers )
+      {
+         const auto citr = auths.find( co );
+         FC_ASSERT( citr != auths.end(),
+                    "Co-signer ${a} is not a member of the vault authority",
+                    ("a", co) );
+         weight += citr->second;
+      }
+      FC_ASSERT( weight >= _vault->vault_authority.weight_threshold,
+                 "Foreign mint carries ${w} of ${t} required vault-threshold weight",
+                 ("w", weight)("t", _vault->vault_authority.weight_threshold) );
+   }
 
    FC_ASSERT( _vault->bound_oracle.valid(),
               "Vault has no bound foreign chain transaction oracle" );
@@ -1218,6 +1412,73 @@ object_id_type vault_foreign_mint_evaluator::do_apply( const vault_foreign_mint_
 
 namespace graphene { namespace chain {
 
+// Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 7
+// Defends against: an unlock proof from a non-attestor, an unlock for a
+// deposit the vault never opened, an unlock whose promoted record disagrees on
+// id/amount/kind, and a double unlock for the same deposit.
+void_result vault_foreign_unlock_evaluator::do_evaluate( const vault_foreign_unlock_operation& op )
+{ try {
+   database& d = db();
+   const time_point_sec now = d.head_block_time();
+
+   h2_require_gateway_leg( now );
+
+   _vault = d.find( op.vault );
+   FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
+   FC_ASSERT( h2_vault_is_foreign_backed( *_vault ),
+              "Vault is not foreign-backed; foreign unlock refused" );
+   FC_ASSERT( nullptr != d.find( op.publisher ),
+              "Publisher account ${a} does not exist", ("a", op.publisher) );
+   FC_ASSERT( _vault->bound_oracle.valid(),
+              "Vault has no bound foreign chain transaction oracle" );
+   const oracle_object* bound = d.find( *_vault->bound_oracle );
+   FC_ASSERT( nullptr != bound, "Bound oracle does not exist" );
+   // The publisher must be an attestor: a producer of the bound foreign chain
+   // transaction oracle. A stranger cannot publish an unlock proof.
+   FC_ASSERT( bound->options.producers.find( op.publisher )
+                != bound->options.producers.end(),
+              "Publisher ${a} is not an attestor of the vault's bound oracle",
+              ("a", op.publisher) );
+   // The promoted foreign record must carry the matching unlock: same deposit
+   // id, same amount, and the unlock event kind.
+   const auto got = h2_read_foreign_tx( d, *_vault->bound_oracle, now,
+                                         h2_price_liveness::live );
+   FC_ASSERT( got.valid(), "No promoted foreign transaction record for this oracle" );
+   FC_ASSERT( got->tx_id == op.deposit_id,
+              "Foreign unlock deposit id does not match the promoted record" );
+   FC_ASSERT( got->amount == op.amount,
+              "Foreign unlock amount does not match the promoted record" );
+   FC_ASSERT( got->kind == foreign_tx_kind::unlock,
+              "Promoted record is not an unlock" );
+   // The vault must carry an open redeem for this deposit, and it must not
+   // already be unlocked.
+   bool found = false;
+   for( size_t i = 0; i < _vault->foreign_redeems.size(); ++i )
+   {
+      const auto& rec = _vault->foreign_redeems[i];
+      if( !( rec.deposit_id == op.deposit_id ) )
+         continue;
+      FC_ASSERT( !rec.unlocked, "Deposit ${d} is already unlocked", ("d", op.deposit_id.hash[0]) );
+      _redeem_index = i;
+      found = true;
+      break;
+   }
+   FC_ASSERT( found, "Vault carries no open foreign redeem for this deposit" );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+object_id_type vault_foreign_unlock_evaluator::do_apply( const vault_foreign_unlock_operation& op )
+{ try {
+   database& d = db();
+   // Mark the redeem unlocked. The burn already happened at redeem time; the
+   // unlock only clears the SLA clock by proving the foreign side settled.
+   d.modify( *_vault, [this]( vault_object& v ) {
+      v.foreign_redeems[_redeem_index].unlocked = true;
+   } );
+   return object_id_type( op.vault );
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
 // Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md §7
 // Defends against: redeem on non-foreign vault, amount > outstanding, zero amount.
 void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_redeem_operation& op )
@@ -1234,6 +1495,16 @@ void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_red
    FC_ASSERT( op.amount > 0, "Foreign redeem amount must be positive" );
    FC_ASSERT( op.amount <= _vault->outstanding,
               "Foreign redeem amount exceeds vault outstanding" );
+   // A foreign-backed vault must carry a committed rate: the burn is
+   // reimbursed in bond terms, and without a rate the reimbursement is
+   // undefined.
+   FC_ASSERT( _vault->backing_rate_den != 0,
+              "Foreign-backed vault carries no committed exchange rate" );
+   // The pending-redeem vector is bounded: a vault past the cap refuses new
+   // redeems until one clears.
+   FC_ASSERT( _vault->foreign_redeems.size() < GRAPHENE_H3_MAX_PENDING_REDEEMS,
+              "Vault already carries ${n} outstanding foreign redeems",
+              ("n", _vault->foreign_redeems.size()) );
 
    FC_ASSERT( nullptr != d.find( op.redeemer ),
               "Redeemer account ${a} does not exist", ("a", op.redeemer) );
@@ -1267,16 +1538,21 @@ object_id_type vault_foreign_redeem_evaluator::do_apply( const vault_foreign_red
       } );
    }
 
-   // Decrement vault outstanding.
+   // Decrement vault outstanding and open the SLA record.
+   //
+   // The pending-redeem vector is bounded by GRAPHENE_H3_MAX_PENDING_REDEEMS
+   // (the evaluator refuses past the cap), so a vault can never carry an
+   // unbounded number of open redeems.
    d.modify( *_vault, [&op, &now]( vault_object& v ) {
       v.outstanding -= op.amount;
-      // SLA tracking.
-      v.foreign_redeem_pending = true;
-      v.foreign_redeem_sla_deadline = now + GRAPHENE_H2_FOREIGN_REDEEM_SLA_SEC;
-      v.foreign_redeem_redeemer = op.redeemer;
-      v.foreign_redeem_amount = op.amount;
-      v.foreign_redeem_recipient = op.foreign_recipient;
-      v.foreign_redeem_unlocked = false;
+      foreign_redeem_record rec;
+      rec.redeemer     = op.redeemer;
+      rec.amount       = op.amount;
+      rec.recipient    = op.foreign_recipient;
+      rec.deposit_id   = op.deposit_id;
+      rec.sla_deadline = now + GRAPHENE_H3_FOREIGN_REDEEM_SLA_SEC;
+      rec.unlocked     = false;
+      v.foreign_redeems.push_back( rec );
    } );
 
    // Record redeem (burn) in reserve stable ledger.

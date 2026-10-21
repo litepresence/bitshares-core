@@ -246,6 +246,8 @@ object_id_type vault_register_evaluator::do_apply( const vault_register_operatio
       v.challenge_window_sec = op.challenge_window_sec;
       v.backing_chain        = op.backing_chain;
       v.backing_asset        = op.backing_asset;
+      v.backing_rate_num     = op.backing_rate_num;
+      v.backing_rate_den     = op.backing_rate_den;
       v.outstanding          = share_type( 0 );
       v.frozen               = false;
       v.forfeit_pool_balance = carried_forfeit;

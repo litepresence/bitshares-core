@@ -83,7 +83,9 @@ struct hardfork_visitor {
                                               protocol::vault_bond_release_operation,
                                               protocol::vault_rotate_operation,
                                               protocol::vault_foreign_mint_operation,
-                                              protocol::vault_foreign_redeem_operation >;
+                                              protocol::vault_foreign_redeem_operation,
+                                              protocol::vault_foreign_challenge_operation,
+                                              protocol::vault_foreign_unlock_operation >;
    using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
                                             protocol::oracle_bond_release_operation,
                                             protocol::vault_resolve_operation,

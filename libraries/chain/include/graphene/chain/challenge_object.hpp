@@ -25,6 +25,7 @@
 
 #include <graphene/chain/types.hpp>
 #include <graphene/protocol/challenge_ops.hpp>
+#include <graphene/protocol/oracle.hpp>
 #include <graphene/db/generic_index.hpp>
 
 #include <boost/multi_index/composite_key.hpp>
@@ -60,6 +61,13 @@ class vault_challenge_object : public abstract_object<vault_challenge_object, pr
        // fail-closed split: expiry is inconclusive, never exoneration, so it
        // exits through the identical wind-down path, never back to operation).
        bool            executed = false; ///< Set by vault_resolve (terminal guilty/inconclusive -> wind-down)
+       // ---- H3 foreign attestor challenge (appended-last, never inserted) ----
+       // The accused attestor of an attestor-lie challenge (the foreign chain
+       // transaction oracle producer whose attestation is alleged false). The
+       // null account means the challenge is an H2 custody challenge with no
+       // named accused: the field never changes H2 behavior.
+       account_id_type attested_account;      ///< Accused attestor; null for H2 challenges
+       protocol::foreign_tx_id attested_deposit; ///< The disputed foreign deposit id
 };
 
 struct by_challenge_vault;   ///< challenges by target vault (concurrency source of truth lives on the vault)

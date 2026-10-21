@@ -25,6 +25,7 @@
 
 #include <graphene/chain/types.hpp>
 #include <graphene/protocol/vault_ops.hpp>
+#include <graphene/protocol/oracle.hpp>
 #include <graphene/db/generic_index.hpp>
 
 #include <fc/uint128.hpp>
@@ -44,6 +45,26 @@ using graphene::protocol::authority;
  * (bonds over outstanding) blocks mint below secure_ratio; the maintenance
  * state machine that acts on it arrives with vault lifecycle ops (H2c).
  */
+/// One outstanding foreign redeem: the user who burned, the amount burned, the
+/// foreign-chain address to unlock to, the SLA deadline, and whether the
+/// unlock proof has arrived. The vault carries a bounded vector of these.
+struct foreign_redeem_record
+{
+   account_id_type      redeemer;          ///< Who burned; the miss reimburses them
+   share_type           amount = 0;        ///< Burned amount (foreign units)
+   std::string          recipient;         ///< Foreign-chain address to unlock to
+   protocol::foreign_tx_id deposit_id;    ///< The redeem's deposit id
+   time_point_sec       sla_deadline;      ///< Missed-deadline freeze point (72h)
+   bool                 unlocked = false;  ///< Unlock proof published
+};
+
+} } // graphene::chain
+
+FC_REFLECT( graphene::chain::foreign_redeem_record,
+            (redeemer)(amount)(recipient)(deposit_id)(sla_deadline)(unlocked) )
+
+namespace graphene { namespace chain {
+
 class vault_object : public abstract_object<vault_object, protocol_ids, vault_object_type>
 {
    public:
@@ -74,13 +95,20 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
         uint8_t       backing_chain = 0; ///< 0 = BitShares (H2 vault),
              ///< 1 = bitcoin, 2 = ethereum, 3 = solana
         std::string   backing_asset; ///< Foreign asset id string; empty = BitShares asset
+        // ---- H3 committed exchange rate (appended-last, never inserted) ----
+        // The rate the vault commits at registration and never changes: one
+        // foreign-asset unit is worth backing_rate_num / backing_rate_den
+        // bond-asset raw units. It converts a foreign outstanding into bond
+        // terms for the coverage check and a foreign burn into a bond
+        // reimbursement. A zero denominator means the vault has no rate
+        // (an H2 vault, whose outstanding is already in bond terms).
+        uint64_t      backing_rate_num = 0;
+        uint64_t      backing_rate_den = 1;
         // ---- H3 foreign redeem SLA tracking (appended-last, never inserted) ----
-        bool          foreign_redeem_pending = false; ///< A redeem awaiting unlock proof
-        time_point_sec foreign_redeem_sla_deadline;   ///< SLA deadline (72h)
-        account_id_type foreign_redeem_redeemer;      ///< User to reimburse on miss
-        share_type    foreign_redeem_amount = 0;       ///< Amount burned
-        std::string   foreign_redeem_recipient;       ///< Foreign-chain address
-        bool          foreign_redeem_unlocked = false; ///< Unlock proof published
+        // One record per outstanding foreign redeem. Bounded: a vault can
+        // carry at most GRAPHENE_H3_MAX_PENDING_REDEEMS outstanding redeems,
+        // so the vector cannot grow without limit.
+        std::vector<foreign_redeem_record> foreign_redeems;
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const
@@ -98,6 +126,26 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
          return lhs >= rhs;
       }
 };
+
+/// @brief Convert a foreign-asset amount into bond-asset raw units at the
+/// vault's committed rate. Integer math only, rounded DOWN against the
+/// vault (never rounds in the vault's favor on a reimbursement). A zero
+/// denominator means the vault has no committed rate, so the conversion is
+/// undefined and the caller must refuse.
+///
+/// Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 7
+inline share_type h2_vault_convert_to_bond_terms( const vault_object& v,
+                                                  share_type foreign_amount )
+{
+   if( v.backing_rate_den == 0 )
+      return share_type( 0 );
+   const fc::uint128_t scaled = fc::uint128_t( foreign_amount.value )
+                              * fc::uint128_t( v.backing_rate_num );
+   const fc::uint128_t out = scaled / fc::uint128_t( v.backing_rate_den );
+   if( out > fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ) )
+      return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
+   return share_type( int64_t( out ) );
+}
 
 /// @brief Whether a vault is backed by a foreign chain asset (H3).
 /// A vault is foreign-backed when its backing_chain is non-zero (0 = BitShares,

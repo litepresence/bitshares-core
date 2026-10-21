@@ -451,6 +451,22 @@ void h2_apply_challenge_resolution( database& d, const vault_challenge_object& c
       // ISS-08 halt coherence: run the REVERT-vs-ABSORB transition before the
       // door closes (bonded price still live: this path freezes no oracle).
       h2_issue_on_pair_halt( d, vault.vault_pair );
+      // H3 attestor lie: a sustained foreign challenge slashes the accused
+      // attestor's producer bond on the vault's bound foreign chain
+      // transaction oracle. The slash is flag-only (seizure is a follow-on
+      // phase, as on the price-oracle dispute path), and the vault freeze
+      // below is what stops the mints that the lie enabled.
+      //
+      // Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 2
+      if( c.attested_account != account_id_type() && vault.bound_oracle.valid() )
+      {
+         const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                   .indices().get<by_oracle_producer>();
+         const auto bitr = bond_idx.find( boost::make_tuple( *vault.bound_oracle,
+                                                             c.attested_account ) );
+         if( bitr != bond_idx.end() )
+            d.modify( *bitr, []( producer_bond_object& b ) { b.slashed = true; } );
+      }
       d.modify( vault, []( vault_object& v ) {
          v.open_challenges -= 1;
          v.frozen = true; // fail-closed: sustained theft/failure halts mints
@@ -835,6 +851,8 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_challenge_object, (graphe
                     (state)
                     (finder)
                     (executed)
+                    (attested_account)
+                    (attested_deposit)
                   )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_dispute_object, (graphene::db::object),

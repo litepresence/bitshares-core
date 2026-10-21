@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
 
 #include <fc/io/raw.hpp>
 
@@ -84,6 +85,44 @@ share_type winddown_claim_operation::calculate_fee( const fee_params_t& schedule
    return share_type( schedule.fee );
 }
 
+void vault_foreign_unlock_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( amount > 0, "Foreign unlock amount must be positive" );
+   FC_ASSERT( amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Foreign unlock amount exceeds maximum share supply" );
+   FC_ASSERT( !foreign_tx_hash.empty(), "Foreign unlock must name the foreign transaction hash" );
+   FC_ASSERT( foreign_tx_hash.size() <= GRAPHENE_H2_EVIDENCE_MAX_LENGTH,
+              "Foreign unlock hash should not exceed ${m} characters",
+              ("m", GRAPHENE_H2_EVIDENCE_MAX_LENGTH) );
+}
+
+share_type vault_foreign_unlock_operation::calculate_fee( const fee_params_t& schedule )const
+{
+   return share_type( schedule.fee );
+}
+
+void vault_foreign_challenge_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( challenge_bond > 0, "Challenge bond must be positive" );
+   FC_ASSERT( challenge_bond <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Challenge bond exceeds maximum share supply" );
+   FC_ASSERT( challenge_bond_usd_cents > 0,
+              "Challenge bond usd_cents records the USD-terms basis and must be positive" );
+   FC_ASSERT( !evidence_memo.empty(), "Challenge evidence memo must be present" );
+   FC_ASSERT( evidence_memo.size() <= GRAPHENE_H2_EVIDENCE_MAX_LENGTH,
+              "Challenge evidence memo should not exceed ${m} characters",
+              ("m", GRAPHENE_H2_EVIDENCE_MAX_LENGTH) );
+}
+
+share_type vault_foreign_challenge_operation::calculate_fee( const fee_params_t& schedule )const
+{
+   share_type core_fee_required = schedule.fee;
+   core_fee_required += calculate_data_fee( fc::raw::pack_size(*this), schedule.price_per_kbyte );
+   return core_fee_required;
+}
+
 void vault_foreign_mint_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
@@ -125,4 +164,8 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_ope
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_challenge_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_challenge_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_unlock_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_unlock_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_redeem_operation )

@@ -496,6 +496,14 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // recipient
    }
+   void operator()( const vault_foreign_challenge_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const vault_foreign_unlock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // publisher
+   }
    void operator()( const vault_foreign_redeem_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // redeemer

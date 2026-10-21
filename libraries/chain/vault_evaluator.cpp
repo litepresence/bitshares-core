@@ -244,6 +244,8 @@ object_id_type vault_register_evaluator::do_apply( const vault_register_operatio
       v.bond_asset           = op.bond_asset;
       v.secure_ratio_bps     = op.secure_ratio_bps;
       v.challenge_window_sec = op.challenge_window_sec;
+      v.backing_chain        = op.backing_chain;
+      v.backing_asset        = op.backing_asset;
       v.outstanding          = share_type( 0 );
       v.frozen               = false;
       v.forfeit_pool_balance = carried_forfeit;

@@ -24,6 +24,7 @@
 #pragma once
 #include <graphene/chain/evaluator.hpp>
 
+#include <graphene/chain/vault_object.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 #include <graphene/protocol/oracle.hpp>
 

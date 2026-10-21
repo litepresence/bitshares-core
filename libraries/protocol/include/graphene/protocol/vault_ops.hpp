@@ -77,8 +77,10 @@ namespace graphene { namespace protocol {
       uint32_t        secure_ratio_bps = 0;   ///< Must exceed 10000; genesis proposal 20000
       uint32_t        challenge_window_sec = 0;   ///< unbond-delay FLOOR only (PS-10)
       optional<string> memo;            ///< Lock-proof attestation carrier; never authorizes mint
+      /// H3 foreign backing asset (appended-last): 0/empty = BitShares (H2 vault).
+      uint8_t         backing_chain = 0;
+      std::string     backing_asset;
       extensions_type extensions;       ///< Wire space only at H2 genesis (appended-last rule)
-
       account_id_type fee_payer()const { return registrar; }
       void            validate()const;
       share_type      calculate_fee( const fee_params_t& k )const;
@@ -164,8 +166,7 @@ FC_REFLECT( graphene::protocol::oracle_bond_release_operation::fee_params_t, (fe
 
 FC_REFLECT( graphene::protocol::vault_register_operation,
             (fee)(registrar)(pair)(vault_authority)(min_bond)(min_bond_usd_cents)
-            (bond_asset)(secure_ratio_bps)(challenge_window_sec)(memo)(extensions) )
-FC_REFLECT( graphene::protocol::vault_bond_lock_operation,
+            (bond_asset)(secure_ratio_bps)(challenge_window_sec)(memo)(backing_chain)(backing_asset)(extensions) )FC_REFLECT( graphene::protocol::vault_bond_lock_operation,
             (fee)(owner)(vault)(vesting_balance)(bond_amount)(bond_usd_cents)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_bond_lock_operation,
             (fee)(producer)(oracle)(vesting_balance)(bond_amount)(bond_usd_cents)

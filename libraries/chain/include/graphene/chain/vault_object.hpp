@@ -70,6 +70,10 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
             ///< means the vault has no price leg (H2c behavior preserved)
        bool          tripwire_door_hold = false; ///< While set, the H2c sweep
             ///< must not clear frozen: the tripwire owns the door, not coverage
+        // ---- H3 foreign backing asset (appended-last, never inserted) ----
+        uint8_t       backing_chain = 0; ///< 0 = BitShares (H2 vault),
+             ///< 1 = bitcoin, 2 = ethereum, 3 = solana
+        std::string   backing_asset; ///< Foreign asset id string; empty = BitShares asset
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const
@@ -87,6 +91,15 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
          return lhs >= rhs;
       }
 };
+
+/// @brief Whether a vault is backed by a foreign chain asset (H3).
+/// A vault is foreign-backed when its backing_chain is non-zero (0 = BitShares,
+/// the degenerate H2 vault). Consensus law: select-don't-compute; this is a
+/// pure field read.
+inline bool h2_vault_is_foreign_backed( const vault_object& v )
+{
+   return v.backing_chain != 0;
+}
 
 struct by_vault_pair; ///< unique while live: one vault set per pair (H2a minimum)
 

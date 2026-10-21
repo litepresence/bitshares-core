@@ -164,7 +164,8 @@ namespace graphene { namespace protocol {
              /* 101 */ offset_deposit_operation,
              /* 102 */ offset_claim_operation,
              /* 103 */ issuance_exit_request_operation,
-             /* 104 */ vault_foreign_mint_operation
+             /* 104 */ vault_foreign_mint_operation,
+             /* 105 */ vault_foreign_redeem_operation
             >;
 
    /**

@@ -141,6 +141,18 @@ namespace graphene { namespace chain {
          bool                   _creates_reserve = false;
    };
 
+   class vault_foreign_redeem_evaluator : public evaluator<vault_foreign_redeem_evaluator>
+   {
+      public:
+         using operation_type = vault_foreign_redeem_operation;
+
+         void_result    do_evaluate( const vault_foreign_redeem_operation& op );
+         object_id_type do_apply( const vault_foreign_redeem_operation& op );
+
+         const vault_object*    _vault = nullptr;
+         const reserve_object*  _reserve = nullptr;
+   };
+
    /**
     * Coverage predicate (declared integer math, no floats): healthy while
     * bonds * 10000 >= outstanding * 15000. Zero outstanding is vacuously

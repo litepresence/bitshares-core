@@ -49,6 +49,12 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_object, (graphene::db::ob
                     (tripwire_door_hold)
                     (backing_chain)
                     (backing_asset)
+                    (foreign_redeem_pending)
+                    (foreign_redeem_sla_deadline)
+                    (foreign_redeem_redeemer)
+                    (foreign_redeem_amount)
+                    (foreign_redeem_recipient)
+                    (foreign_redeem_unlocked)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::vault_object )

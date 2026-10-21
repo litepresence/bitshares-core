@@ -74,6 +74,13 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
         uint8_t       backing_chain = 0; ///< 0 = BitShares (H2 vault),
              ///< 1 = bitcoin, 2 = ethereum, 3 = solana
         std::string   backing_asset; ///< Foreign asset id string; empty = BitShares asset
+        // ---- H3 foreign redeem SLA tracking (appended-last, never inserted) ----
+        bool          foreign_redeem_pending = false; ///< A redeem awaiting unlock proof
+        time_point_sec foreign_redeem_sla_deadline;   ///< SLA deadline (72h)
+        account_id_type foreign_redeem_redeemer;      ///< User to reimburse on miss
+        share_type    foreign_redeem_amount = 0;       ///< Amount burned
+        std::string   foreign_redeem_recipient;       ///< Foreign-chain address
+        bool          foreign_redeem_unlocked = false; ///< Unlock proof published
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const

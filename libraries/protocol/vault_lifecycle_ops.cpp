@@ -97,6 +97,19 @@ share_type vault_foreign_mint_operation::calculate_fee( const fee_params_t& sche
    return share_type( schedule.fee );
 }
 
+void vault_foreign_redeem_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( amount > 0, "Foreign redeem amount must be positive" );
+   FC_ASSERT( amount <= GRAPHENE_MAX_SHARE_SUPPLY,
+              "Foreign redeem amount exceeds maximum share supply" );
+}
+
+share_type vault_foreign_redeem_operation::calculate_fee( const fee_params_t& schedule )const
+{
+   return share_type( schedule.fee );
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_rotate_operation::fee_params_t )
@@ -105,9 +118,11 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_ope
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation::fee_params_t )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_redeem_operation::fee_params_t )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_rotate_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_bond_release_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_redeem_operation )

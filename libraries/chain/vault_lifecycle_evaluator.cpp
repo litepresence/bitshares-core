@@ -522,6 +522,45 @@ void process_h2_vault_maintenance( database& d )
          } );
       }
    }
+
+   // H3 foreign redeem SLA: missed deadline -> freeze + bond reimbursement.
+   const auto& vault_idx2 = d.get_index_type<vault_index>().indices();
+   for( auto itr = vault_idx2.begin(); itr != vault_idx2.end(); ++itr )
+   {
+      if( !itr->foreign_redeem_pending )
+         continue;
+      if( itr->foreign_redeem_unlocked )
+         continue; // proof published within SLA
+      if( now < itr->foreign_redeem_sla_deadline )
+         continue; // still within SLA
+      // Freeze vault.
+      const account_id_type redeemer = itr->foreign_redeem_redeemer;
+      const share_type amount = itr->foreign_redeem_amount;
+      const asset_id_type bond_asset = itr->bond_asset;
+      const vault_id_type vid = vault_id_type( itr->id );
+      d.modify( *itr, []( vault_object& v ) {
+         v.frozen = true;
+         v.foreign_redeem_pending = false;
+      } );
+      // Reimburse from bond: credit redeemer in bond asset.
+      if( redeemer != account_id_type() && amount > 0 )
+         d.adjust_balance( redeemer, asset( amount, bond_asset ) );
+      // Reduce a bond if available.
+      const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
+      const auto range = bond_idx.equal_range( vid );
+      for( auto bitr = range.first; bitr != range.second; ++bitr )
+      {
+         if( bitr->seized )
+            continue;
+         if( bitr->bond_amount >= amount )
+         {
+            d.modify( *bitr, [&amount]( vault_bond_object& b ) {
+               b.bond_amount -= amount;
+            } );
+            break;
+         }
+      }
+   }
 }
 
 void_result vault_rotate_evaluator::do_evaluate( const vault_rotate_operation& op )
@@ -1173,6 +1212,90 @@ object_id_type vault_foreign_mint_evaluator::do_apply( const vault_foreign_mint_
    } );
 
    return reserve != nullptr ? object_id_type( reserve->id ) : object_id_type();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+} } // graphene::chain
+
+namespace graphene { namespace chain {
+
+// Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md §7
+// Defends against: redeem on non-foreign vault, amount > outstanding, zero amount.
+void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_redeem_operation& op )
+{ try {
+   database& d = db();
+   const time_point_sec now = d.head_block_time();
+
+   h2_require_gateway_leg( now );
+
+   _vault = d.find( op.vault );
+   FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
+   FC_ASSERT( h2_vault_is_foreign_backed( *_vault ),
+              "Vault is not foreign-backed; foreign redeem refused" );
+   FC_ASSERT( op.amount > 0, "Foreign redeem amount must be positive" );
+   FC_ASSERT( op.amount <= _vault->outstanding,
+              "Foreign redeem amount exceeds vault outstanding" );
+
+   FC_ASSERT( nullptr != d.find( op.redeemer ),
+              "Redeemer account ${a} does not exist", ("a", op.redeemer) );
+
+   // Burn requires sufficient balance.
+   const asset bal = d.get_balance( op.redeemer, _vault->vault_pair );
+   FC_ASSERT( bal.amount >= op.amount,
+              "Redeemer has insufficient vault-backed UIA balance" );
+
+   _reserve = h2_find_reserve( d, _vault->vault_pair );
+
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) }
+
+object_id_type vault_foreign_redeem_evaluator::do_apply( const vault_foreign_redeem_operation& op )
+{ try {
+   database& d = db();
+   const time_point_sec now = d.head_block_time();
+
+   // Burn vault-backed UIA from redeemer.
+   d.adjust_balance( op.redeemer, asset( -op.amount, _vault->vault_pair ) );
+
+   // Decrement pair asset supply.
+   const asset_object* pair_asset = d.find( _vault->vault_pair );
+   if( pair_asset != nullptr )
+   {
+      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+      d.modify( pair_dyn, [&op]( asset_dynamic_data_object& data ) {
+         if( data.current_supply >= op.amount )
+            data.current_supply -= op.amount;
+      } );
+   }
+
+   // Decrement vault outstanding.
+   d.modify( *_vault, [&op, &now]( vault_object& v ) {
+      v.outstanding -= op.amount;
+      // SLA tracking.
+      v.foreign_redeem_pending = true;
+      v.foreign_redeem_sla_deadline = now + GRAPHENE_H2_FOREIGN_REDEEM_SLA_SEC;
+      v.foreign_redeem_redeemer = op.redeemer;
+      v.foreign_redeem_amount = op.amount;
+      v.foreign_redeem_recipient = op.foreign_recipient;
+      v.foreign_redeem_unlocked = false;
+   } );
+
+   // Record redeem (burn) in reserve stable ledger.
+   if( _reserve != nullptr )
+   {
+      d.modify( *_reserve, [&op]( reserve_object& r ) {
+         if( r.stable_supply >= op.amount )
+            r.stable_supply -= op.amount;
+         h2_issue_ensure_bands( r.band_bts );
+         h2_issue_ensure_bands( r.band_stable );
+         if( r.band_stable[3] >= op.amount )
+            r.band_stable[3] -= op.amount;
+      } );
+      const reserve_object* rr = h2_find_reserve( d, _vault->vault_pair );
+      if( rr != nullptr )
+         h2_issue_verify_bands( *rr );
+   }
+
+   return _reserve != nullptr ? object_id_type( _reserve->id ) : object_id_type();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
 } } // graphene::chain

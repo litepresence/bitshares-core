@@ -486,6 +486,9 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::vault_foreign_mint_operation&) const {
       h2_require_gateway_leg(block_time);
    }
+   void operator()(const graphene::chain::vault_foreign_redeem_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
 
    // loop and self visit in proposals
    void operator()(const graphene::chain::proposal_create_operation &v) const {

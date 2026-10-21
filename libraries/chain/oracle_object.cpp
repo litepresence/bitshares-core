@@ -484,6 +484,8 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (subscribers)
                     (consumed_value)
                     (consumed_value_time)
+                    (consumed_foreign_value)
+                    (consumed_foreign_value_time)
                     (pending_queue)
                     (rate_limited)
                     (guard_hits)

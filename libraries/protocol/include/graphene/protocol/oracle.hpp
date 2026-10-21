@@ -25,6 +25,7 @@
 
 #include <graphene/protocol/base.hpp>
 #include <graphene/protocol/asset.hpp>
+#include <array>
 
 namespace graphene { namespace protocol {
 
@@ -134,7 +135,8 @@ namespace graphene { namespace protocol {
       mid  = 0,
       last = 1,
       bid  = 2,
-      ask  = 3
+      ask        = 3,
+      foreign_tx = 4
    };
 
    /// How the value in a series was rounded by its producer. A consumer that reads a series
@@ -195,8 +197,59 @@ namespace graphene { namespace protocol {
    inline bool operator >= ( const oracle_value& a, const oracle_value& b ) { return !(a < b); }
    inline bool operator != ( const oracle_value& a, const oracle_value& b ) { return !(a == b); }
 
-   /**
-    * One producer's entry in an oracle's producer set. A struct, not a bare weight, so that
+    /// Foreign chain identifiers (H3). Appended enum, never inserted.
+    enum class foreign_chain_id : uint8_t
+    {
+       bitcoin  = 0,
+       ethereum = 1,
+       solana   = 2
+    };
+
+    /// Fixed-size foreign transaction id (32 bytes, all chains).
+    struct foreign_tx_id
+    {
+       std::array<uint8_t, 32> hash{};
+
+       foreign_tx_id() = default;
+       explicit foreign_tx_id( const std::array<uint8_t, 32>& h ) : hash( h ) {}
+
+       bool operator==( const foreign_tx_id& o ) const { return hash == o.hash; }
+       bool operator!=( const foreign_tx_id& o ) const { return hash != o.hash; }
+       bool operator<( const foreign_tx_id& o ) const { return hash < o.hash; }
+    };
+
+    /// Event kind reported by a foreign chain transaction oracle.
+    enum class foreign_tx_kind : uint8_t
+    {
+       lock   = 0,
+       unlock = 1,
+       refund = 2
+    };
+
+    /// Value reported by a foreign chain transaction oracle (an event, not a ratio).
+    struct foreign_tx_value
+    {
+       foreign_chain_id  chain = foreign_chain_id::bitcoin;
+       foreign_tx_id     tx_id;
+       foreign_tx_kind   kind = foreign_tx_kind::lock;
+       int64_t           amount = 0;
+       uint8_t           foreign_asset_id = 0;
+       uint64_t          confirmation_height = 0;
+
+       foreign_tx_value() = default;
+
+       void validate() const
+       {
+          FC_ASSERT( amount >= 0, "Foreign tx amount must be non-negative" );
+       }
+    };
+
+    bool operator==( const foreign_tx_value& a, const foreign_tx_value& b );
+    inline bool operator!=( const foreign_tx_value& a, const foreign_tx_value& b )
+    { return !( a == b ); }
+
+    /**
+     * One producer's entry in an oracle's producer set. A struct, not a bare weight, so that
     * an economic layer (bonds, reward shares) can be added later without a new operation.
     * The extensions field is wire space only in this stage: no bond logic reads it.
     * See ORACLE-DESIGN.md "What the first stage does to keep this possible".
@@ -576,7 +629,11 @@ namespace graphene { namespace protocol {
 FC_REFLECT_ENUM( graphene::protocol::oracle_aggregation_method,
                  (median_of_latest)(median_over_window) )
 FC_REFLECT_ENUM( graphene::protocol::oracle_series_kind,
-                 (mid)(last)(bid)(ask) )
+                 (mid)(last)(bid)(ask)(foreign_tx) )
+FC_REFLECT_ENUM( graphene::protocol::foreign_chain_id,
+                  (bitcoin)(ethereum)(solana) )
+FC_REFLECT_ENUM( graphene::protocol::foreign_tx_kind,
+                  (lock)(unlock)(refund) )
 FC_REFLECT_ENUM( graphene::protocol::oracle_series_rounding,
                  (unspecified)(down)(up) )
 
@@ -585,6 +642,12 @@ FC_REFLECT( graphene::protocol::oracle_series,
 
 FC_REFLECT( graphene::protocol::oracle_value,
             (base_amount)(quote_amount) )
+
+FC_REFLECT( graphene::protocol::foreign_tx_id,
+            (hash) )
+
+FC_REFLECT( graphene::protocol::foreign_tx_value,
+            (chain)(tx_id)(kind)(amount)(foreign_asset_id)(confirmation_height) )
 
 FC_REFLECT( graphene::protocol::oracle_producer_entry,
              (weight)(extensions) )
@@ -624,6 +687,8 @@ FC_REFLECT( graphene::protocol::oracle_publish_operation,
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_id )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_value )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_reputation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::price_oracle )

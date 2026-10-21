@@ -892,6 +892,60 @@ optional<protocol::oracle_value> h2_read_consumed_price(
    return ( *o->consumed_value )[ series ];
 }
 
+static bool h2_consumed_foreign_promotion_proven( const database& d,
+                                                  oracle_id_type oracle,
+                                                  const oracle_object& o )
+{
+   const guard_state_object* guard = h2_find_guard( d, oracle );
+   if( guard == nullptr )
+      return false;
+   if( o.consumed_foreign_value_time == time_point_sec() )
+      return false;
+   const uint32_t delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
+   const uint32_t anchor = h2_osm_bucket_anchor(
+         uint32_t( o.consumed_foreign_value_time.sec_since_epoch() ), delay );
+   for( auto ritr = guard->promotion_log.rbegin();
+         ritr != guard->promotion_log.rend(); ++ritr )
+   {
+      if( ritr->promote_time != o.consumed_foreign_value_time )
+         continue;
+      return ritr->producer_count >= o.options.minimum_producers
+              && ritr->anchor == anchor && ritr->delay_sec == delay;
+   }
+   return false;
+}
+
+optional<protocol::foreign_tx_value> h2_read_foreign_tx(
+      const database& d, oracle_id_type oracle, time_point_sec now,
+      h2_price_liveness liveness )
+{
+   const oracle_object* o = d.find( oracle );
+   if( o == nullptr || o->options.frozen )
+      return optional<protocol::foreign_tx_value>();
+   if( !o->consumed_foreign_value.valid()
+       || o->consumed_foreign_value->empty() )
+      return optional<protocol::foreign_tx_value>();
+   if( liveness == h2_price_liveness::live
+       && !h2_oracle_has_bonded_live_set( d, *o, now ) )
+      return optional<protocol::foreign_tx_value>();
+   if( liveness == h2_price_liveness::age_exempt
+       && !h2_oracle_has_any_bond( d, *o ) )
+      return optional<protocol::foreign_tx_value>();
+   if( o->consumed_foreign_value_time == time_point_sec() )
+      return optional<protocol::foreign_tx_value>();
+   if( liveness == h2_price_liveness::live
+       && ( now - o->consumed_foreign_value_time ).to_seconds()
+            >= int64_t( o->options.value_lifetime_sec ) )
+      return optional<protocol::foreign_tx_value>();
+   const guard_state_object* guard = h2_find_guard( d, oracle );
+   if( guard == nullptr )
+      return optional<protocol::foreign_tx_value>();
+   if( liveness == h2_price_liveness::live && guard->consumption_hold )
+      return optional<protocol::foreign_tx_value>();
+   if( !h2_consumed_foreign_promotion_proven( d, oracle, *o ) )
+      return optional<protocol::foreign_tx_value>();
+   return ( *o->consumed_foreign_value )[0];
+}
 
 /// The oracle's LAST consumed price: the value the guard promoted, with the
 /// three conditions a DEAD feed trips dropped (the age beyond "never

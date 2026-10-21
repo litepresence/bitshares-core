@@ -131,6 +131,11 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        /// outlive the data it came from.
        time_point_sec consumed_value_time;
 
+       /// Foreign chain transaction oracle promoted value (H3). Distinct from
+       /// consumed_value, which carries price ratios. Appended-last.
+       optional<vector<graphene::protocol::foreign_tx_value>> consumed_foreign_value;
+       time_point_sec consumed_foreign_value_time;
+
        /**
         * Delay queue: timestamped raw samples awaiting the guard delay, oldest first.
         * Capped at GRAPHENE_ORACLE_GUARD_MAX_PENDING with time-bucketed sampling, so a

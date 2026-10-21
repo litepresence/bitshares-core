@@ -70,7 +70,7 @@ bool is_valid_reference_asset_symbol( const string& symbol )
 
 void oracle_series::validate()const
 {
-   FC_ASSERT( kind <= static_cast<uint8_t>( oracle_series_kind::ask ),
+   FC_ASSERT( kind <= static_cast<uint8_t>( oracle_series_kind::foreign_tx ),
               "Unknown series kind ${k}", ("k", kind) );
    FC_ASSERT( rounding <= static_cast<uint8_t>( oracle_series_rounding::up ),
               "Unknown series rounding ${r}", ("r", rounding) );
@@ -372,10 +372,19 @@ price convert_oracle_value_to_price(
                  asset( out_den.convert_to<int64_t>(), backing_asset ) );
 }
 
+bool operator==( const foreign_tx_value& a, const foreign_tx_value& b )
+{
+   return a.chain == b.chain && a.tx_id == b.tx_id && a.kind == b.kind
+          && a.amount == b.amount && a.foreign_asset_id == b.foreign_asset_id
+          && a.confirmation_height == b.confirmation_height;
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_id )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_value )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_reputation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::price_oracle )

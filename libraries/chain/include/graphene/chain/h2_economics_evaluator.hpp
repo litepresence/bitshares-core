@@ -102,6 +102,19 @@ namespace graphene { namespace chain {
          time_point_sec now, h2_price_liveness liveness );
 
    /**
+    * Foreign chain transaction oracle read: the promoted foreign tx value, or
+    * absent when it must not be used (frozen oracle, absent/stale value, rate
+    * hold, missing or mismatched promotion record, no bonded backing). Match
+    * is by equality (transaction id), not ratio. Fail-closed in every
+    * direction.
+    *
+    * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 3
+    */
+   optional<protocol::foreign_tx_value> h2_read_foreign_tx(
+         const database& d, oracle_id_type oracle, time_point_sec now,
+         h2_price_liveness liveness );
+
+   /**
     * Pair price through the canonical binding: the bound oracle's consumed
     * read, else the single backup's consumed read, else absent (dual-stale).
     * Unbound vaults have no price leg by construction.

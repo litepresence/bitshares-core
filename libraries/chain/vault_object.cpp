@@ -52,6 +52,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::vault_object, (graphene::db::ob
                     (backing_rate_num)
                     (backing_rate_den)
                     (foreign_redeems)
+                    (foreign_mint_deposits)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::vault_object )

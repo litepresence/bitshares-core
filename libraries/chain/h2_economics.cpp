@@ -67,8 +67,6 @@ namespace {
    using graphene::protocol::GRAPHENE_H2E_TRIPWIRE_REOPEN_WINDOWS;
    using graphene::protocol::GRAPHENE_H2E_RECOVERY_TRIGGER_BPS;
 
-   /// Promotion ring bound (mirrors the H1 guard-queue bound).
-   constexpr size_t H2E_PROMOTION_LOG_CAP = 16;
    /// Distinct-pool tracking bound per window (state must stay bounded).
    constexpr size_t H2E_TRIPWIRE_POOL_CAP = 64;
    /// Guilty-history scan bound (R4-01 backstop, shared by the oracle and

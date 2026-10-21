@@ -73,6 +73,7 @@ struct hardfork_visitor {
                                            protocol::oracle_update_operation,
                                            protocol::oracle_delete_operation,
                                            protocol::oracle_publish_operation,
+                                           protocol::oracle_foreign_publish_operation,
                                            protocol::reference_asset_create_operation >;
    using h2_primitives_ops = fc::typelist::list< protocol::vault_challenge_operation,
                                                      protocol::oracle_dispute_operation,

@@ -131,11 +131,6 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
        /// outlive the data it came from.
        time_point_sec consumed_value_time;
 
-       /// Foreign chain transaction oracle promoted value (H3). Distinct from
-       /// consumed_value, which carries price ratios. Appended-last.
-       optional<vector<graphene::protocol::foreign_tx_value>> consumed_foreign_value;
-       time_point_sec consumed_foreign_value_time;
-
        /**
         * Delay queue: timestamped raw samples awaiting the guard delay, oldest first.
         * Capped at GRAPHENE_ORACLE_GUARD_MAX_PENDING with time-bucketed sampling, so a
@@ -193,6 +188,20 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
         * has no anchor and refuses rather than guessing one.
         */
        time_point_sec dispute_cleared_time;
+
+      /// Foreign chain transaction oracle promoted value (H3). Distinct from
+      /// consumed_value, which carries price ratios. APPENDED-LAST: these two
+      /// fields sit at the END of the struct so the wire index of every
+      /// pre-existing field is unchanged.
+      optional<vector<graphene::protocol::foreign_tx_value>> consumed_foreign_value;
+      time_point_sec consumed_foreign_value_time;
+      /// Pending foreign attestations: one transaction id per producer, the
+      /// attestor set's current view of what each producer has observed. A
+      /// record is promoted when enough producers attest the SAME transaction
+      /// id (the quorum rule, the same shape as a price feed's).
+      ///
+      /// APPENDED-LAST: this field sits at the END of the struct.
+      flat_map<account_id_type, graphene::protocol::foreign_tx_id> foreign_submissions;
 
       /// @return whether a submission made at @p published is still live at @p now
       bool is_submission_live( time_point_sec published, time_point_sec now )const

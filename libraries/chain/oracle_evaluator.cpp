@@ -399,6 +399,109 @@ void_result oracle_delete_evaluator::do_apply( const oracle_delete_operation& op
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
+// Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 3
+// Defends against: a non-attestor publishing a record, an attestor with no
+// live bond publishing one, a publish against a price oracle, and a record
+// promoted without quorum.
+void_result oracle_foreign_publish_evaluator::do_evaluate(
+      const protocol::oracle_foreign_publish_operation& op )
+{ try {
+   database& d = db();
+   const auto now = d.head_block_time();
+
+   // The oracle leg: a foreign transaction record is published after the
+   // oracle hardfork, like every other oracle publish.
+   FC_ASSERT( HARDFORK_ORACLE_PASSED( now ),
+              "Not allowed until the oracle hardfork" );
+
+   _oracle = d.find( op.oracle_id );
+   FC_ASSERT( nullptr != _oracle, "Oracle ${o} does not exist", ("o", op.oracle_id) );
+   FC_ASSERT( !_oracle->options.frozen, "Oracle ${o} is frozen", ("o", op.oracle_id) );
+   // The oracle must be a foreign chain transaction oracle: its declared
+   // series must carry the foreign_tx kind.
+   {
+      bool foreign = false;
+      for( const auto& s : _oracle->series )
+         if( s.get_kind() == protocol::oracle_series_kind::foreign_tx )
+            foreign = true;
+      FC_ASSERT( foreign,
+                 "Oracle ${o} is not a foreign chain transaction oracle",
+                 ("o", op.oracle_id) );
+   }
+   // The publisher must be an attestor: a producer of this oracle.
+   FC_ASSERT( _oracle->options.producers.find( op.producer )
+                != _oracle->options.producers.end(),
+              "Producer ${a} is not a producer of oracle ${o}",
+              ("a", op.producer)("o", op.oracle_id) );
+   // The publisher must hold a LIVE producer bond: an unbonded attestor has
+   // no skin in the game and could attest anything.
+   {
+      const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                .indices().get<by_oracle_producer>();
+      const auto bitr = bond_idx.find( boost::make_tuple( op.oracle_id, op.producer ) );
+      FC_ASSERT( bitr != bond_idx.end() && !bitr->slashed,
+                 "Producer ${a} holds no live producer bond on oracle ${o}",
+                 ("a", op.producer)("o", op.oracle_id) );
+   }
+   return void_result();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
+object_id_type oracle_foreign_publish_evaluator::do_apply(
+      const protocol::oracle_foreign_publish_operation& op )
+{ try {
+   database& d = db();
+   const auto now = d.head_block_time();
+   const uint32_t delay_sec = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
+
+   // The attestor's observation is recorded. The promotion happens when enough
+   // producers attest the SAME transaction id: the quorum rule, the same shape
+   // as a price feed's.
+   d.modify( *_oracle, [&op]( oracle_object& o ) {
+      o.foreign_submissions[op.producer] = op.value.tx_id;
+   } );
+
+   uint16_t attesting = 0;
+   for( const auto& entry : _oracle->foreign_submissions )
+      if( entry.second == op.value.tx_id )
+         ++attesting;
+
+   if( attesting >= _oracle->options.minimum_producers )
+   {
+      // Promote. The promotion proof is the guard's record: quorum, the
+      // absolute-grid anchor, and the delay, exactly as a price feed's.
+      h2_ensure_oracle_econ( d, op.oracle_id );
+      const auto& gidx = d.get_index_type<guard_state_index>().indices().get<by_guard_oracle>();
+      const auto gitr = gidx.find( op.oracle_id );
+      if( gitr != gidx.end() )
+      {
+         const guard_state_object* g = &*gitr;
+         const uint32_t anchor = h2_osm_bucket_anchor(
+               uint32_t( now.sec_since_epoch() ), delay_sec );
+         d.modify( *g, [&op, &attesting, now, anchor, delay_sec]( guard_state_object& gg ) {
+            h2_promotion_record rec;
+            rec.promote_time = now;
+            rec.producer_count = attesting;
+            rec.anchor = anchor;
+            rec.delay_sec = delay_sec;
+            gg.promotion_log.push_back( rec );
+            while( gg.promotion_log.size() > H2E_PROMOTION_LOG_CAP )
+               gg.promotion_log.erase( gg.promotion_log.begin() );
+            gg.last_promo_time = now;
+         } );
+         d.modify( *_oracle, [&op, now]( oracle_object& o ) {
+            o.consumed_foreign_value = std::vector<protocol::foreign_tx_value>{ op.value };
+            o.consumed_foreign_value_time = now;
+         } );
+      }
+   }
+
+   // The advancing-unlock rule: a bonded producer's successful publication
+   // pushes its bond unlock out, exactly as on the price path.
+   advance_producer_bond_on_publish( d, op.oracle_id, op.producer, now );
+
+   return object_id_type();
+} FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
+
 void_result oracle_publish_evaluator::do_evaluate( const oracle_publish_operation& op )
 { try {
    const database& d = db();

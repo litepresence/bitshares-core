@@ -40,6 +40,8 @@
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/vault_object.hpp>
+
+#include <boost/multiprecision/cpp_int.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 
 #include <fc/io/raw.hpp>
@@ -549,20 +551,11 @@ void process_h2_vault_maintenance( database& d )
          continue;
       const asset_id_type bond_asset = itr->bond_asset;
       const vault_id_type vid = vault_id_type( itr->id );
-      // Freeze the vault and clear the expired records.
-      d.modify( *itr, [&expired]( vault_object& v ) {
+      // Freeze the vault. The expired records are cleared only for the
+      // deposits that were actually PAID: clearing a claim before paying it
+      // would destroy the claim.
+      d.modify( *itr, []( vault_object& v ) {
          v.frozen = true;
-         for( const auto& rec : expired )
-         {
-            for( auto it = v.foreign_redeems.begin(); it != v.foreign_redeems.end(); ++it )
-            {
-               if( it->deposit_id == rec.deposit_id )
-               {
-                  v.foreign_redeems.erase( it );
-                  break;
-               }
-            }
-         }
       } );
       // Reimburse each expired redeemer in bond terms, at the vault's
       // committed rate, and reduce the bond by the same amount.
@@ -580,29 +573,51 @@ void process_h2_vault_maintenance( database& d )
          //
          // Invariant: bond asset total supply is unchanged by a reimbursement;
          // the vault's bonded coverage falls by the paid amount.
+         //
+         // The payment walks the vault's bonds until the amount is covered,
+         // so a vault whose bonds are split across rows still pays in full.
          const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
          const auto range = bond_idx.equal_range( vid );
-         bool paid = false;
-         for( auto bitr = range.first; bitr != range.second; ++bitr )
+         share_type remaining = bond_terms;
+         share_type paid_total( 0 );
+         for( auto bitr = range.first; bitr != range.second && remaining > 0; ++bitr )
          {
             if( bitr->seized )
                continue;
-            if( bitr->bond_amount < bond_terms )
+            if( bitr->bond_amount <= share_type( 0 ) )
                continue;
             const vesting_balance_object* vb = d.find( bitr->vesting_balance );
-            if( vb == nullptr || vb->balance.amount < bond_terms )
+            if( vb == nullptr || vb->balance.amount <= share_type( 0 ) )
                continue;
-            d.modify( *vb, [&bond_terms]( vesting_balance_object& v ) {
-               v.balance.amount -= bond_terms;
+            const share_type avail = std::min( std::min( bitr->bond_amount, vb->balance.amount ),
+                                              remaining );
+            if( avail <= share_type( 0 ) )
+               continue;
+            d.modify( *vb, [&avail]( vesting_balance_object& v ) {
+               v.balance.amount -= avail;
             } );
-            d.modify( *bitr, [&bond_terms]( vault_bond_object& b ) {
-               b.bond_amount -= bond_terms;
+            d.modify( *bitr, [&avail]( vault_bond_object& b ) {
+               b.bond_amount -= avail;
             } );
-            paid = true;
-            break;
+            remaining -= avail;
+            paid_total += avail;
          }
-         if( paid )
-            d.adjust_balance( rec.redeemer, asset( bond_terms, bond_asset ) );
+         if( paid_total > share_type( 0 ) )
+            d.adjust_balance( rec.redeemer, asset( paid_total, bond_asset ) );
+         // The record is cleared only for the part that was paid. A shortfall
+         // (the bonds could not cover it) leaves the record in place, so the
+         // next sweep retries the payment: a claim is never destroyed unpaid.
+         if( paid_total >= bond_terms )
+            d.modify( *itr, [&rec]( vault_object& v ) {
+               for( auto it = v.foreign_redeems.begin(); it != v.foreign_redeems.end(); ++it )
+               {
+                  if( it->deposit_id == rec.deposit_id )
+                  {
+                     v.foreign_redeems.erase( it );
+                     break;
+                  }
+               }
+            } );
       }
    }
 }
@@ -1284,15 +1299,34 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
               "Vault is not foreign-backed; foreign mint refused" );
    FC_ASSERT( nullptr != d.find( op.recipient ),
               "Recipient account ${a} does not exist", ("a", op.recipient) );
+   // The H2 mint gates, applied to the H3 mint as well. A frozen vault (a
+   // challenge, the tripwire, or a coverage breach) mints nothing, and a
+   // wind-down vault mints nothing at all.
+   FC_ASSERT( _vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
+              "Vault is wound down; exits go through wind-down claims, never mints" );
+   FC_ASSERT( !_vault->frozen,
+              "Vault door is held shut; mints refused until it reopens" );
+   // Recovery suspends new debt: a mint grows outstanding, so it is new debt.
+   {
+      const auto& rec_idx = d.get_index_type<recovery_state_index>().indices();
+      if( !rec_idx.empty() )
+         FC_ASSERT( !rec_idx.begin()->new_debt_suspended,
+                    "Recovery is active: new debt suspended until scope restores" );
+   }
    // Vault authority authorization (the rotate pattern): the minter plus the
    // named co-signers must carry the vault's full threshold weight. The
-   // minter and every co-signer must be members of the vault authority.
+   // minter and every co-signer must be members of the vault authority, and
+   // the minter may NOT also be a co-signer: one signature must not satisfy
+   // the multisig twice.
    {
       const auto& auths = _vault->vault_authority.account_auths;
       const auto mitr = auths.find( op.minter );
       FC_ASSERT( mitr != auths.end(),
                  "Minter ${a} is not a member of the vault authority",
                  ("a", op.minter) );
+      FC_ASSERT( op.co_signers.find( op.minter ) == op.co_signers.end(),
+                 "Minter ${a} may not also be a co-signer: one signature must "
+                 "not satisfy the vault threshold twice", ("a", op.minter) );
       uint32_t weight = mitr->second;
       for( const account_id_type& co : op.co_signers )
       {
@@ -1305,6 +1339,18 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
       FC_ASSERT( weight >= _vault->vault_authority.weight_threshold,
                  "Foreign mint carries ${w} of ${t} required vault-threshold weight",
                  ("w", weight)("t", _vault->vault_authority.weight_threshold) );
+   }
+   // C02: replay protection. A deposit id may back at most ONE mint: the
+   // foreign lock proof is replayed otherwise, and one lock would back
+   // unlimited mints.
+   {
+      for( const auto& dep : _vault->foreign_mint_deposits )
+         FC_ASSERT( !( dep == op.deposit_id ),
+                    "Foreign deposit ${d} has already backed a mint on this vault",
+                    ("d", op.deposit_id.hash[0]) );
+      FC_ASSERT( _vault->foreign_mint_deposits.size() < GRAPHENE_H3_MAX_MINT_DEPOSITS,
+                 "Vault already carries ${n} foreign deposit records",
+                 ("n", _vault->foreign_mint_deposits.size()) );
    }
 
    FC_ASSERT( _vault->bound_oracle.valid(),
@@ -1334,9 +1380,44 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
          continue;
       live_bonds = h2_issue_sat_add( live_bonds, itr->bond_amount );
    }
-   FC_ASSERT( _vault->mint_within_secure_ratio( live_bonds,
-                _vault->outstanding + op.amount ),
-              "Post-mint vault coverage breaks the secure ratio" );
+   // C05: the coverage check must compare LIKE UNITS. The bond is in bond
+   // raw units; the outstanding is in foreign units. The vault's committed
+   // rate converts the outstanding into bond terms. Comparing raw bond units
+   // against a foreign-unit outstanding would read a foreign-backed vault as
+   // arbitrarily over- or under-collateralized.
+   {
+      const share_type outstanding_bond_terms =
+            h2_vault_convert_to_bond_terms( *_vault, _vault->outstanding + op.amount );
+      FC_ASSERT( outstanding_bond_terms > share_type( 0 ),
+                 "Vault carries no committed rate: foreign coverage is uncomputable" );
+      FC_ASSERT( _vault->mint_within_secure_ratio( live_bonds, outstanding_bond_terms ),
+                 "Post-mint vault coverage breaks the secure ratio" );
+      // I09: the rmin floor, in the foreign vault's terms. The H2 rmin is a
+      // coverage floor on the reserve (13000 bps); the foreign vault's
+      // outstanding is converted to bond terms through the committed rate, so
+      // the same floor applies in the same units.
+      {
+         const uint32_t rmin_bps = GRAPHENE_H2_ISSUE_RMIN_BPS;
+         const fc::uint128_t lhs = fc::uint128_t( live_bonds.value )
+                                * fc::uint128_t( 10000 );
+         const fc::uint128_t rhs = fc::uint128_t( outstanding_bond_terms.value )
+                                * fc::uint128_t( rmin_bps );
+         FC_ASSERT( lhs >= rhs,
+                    "Post-mint vault coverage breaks the rmin floor (${w} bps)",
+                    ("w", rmin_bps) );
+      }
+      // I09: the per-block door cap. The H2 door bounds all issuance flow
+      // through one per-block counter; the foreign door is bounded the same
+      // way, in bond terms.
+      {
+         const share_type used = _reserve != nullptr ? _reserve->door_used_bts : share_type( 0 );
+         const share_type leg = h2_vault_convert_to_bond_terms( *_vault, op.amount );
+         FC_ASSERT( boost::multiprecision::uint256_t( uint64_t( used.value ) )
+                       + boost::multiprecision::uint256_t( uint64_t( leg.value ) )
+                    <= boost::multiprecision::uint256_t( GRAPHENE_H2_ISSUE_DOOR_CAP_BTS ),
+                    "Foreign mint exceeds the per-block door cap" );
+      }
+   }
 
    const asset_object* pair_asset = d.find( _vault->vault_pair );
    FC_ASSERT( nullptr != pair_asset, "Vault pair asset does not exist" );
@@ -1401,9 +1482,21 @@ object_id_type vault_foreign_mint_evaluator::do_apply( const vault_foreign_mint_
       data.current_supply += op.amount;
    } );
 
+   // The deposit is recorded so a replayed lock proof cannot back a second
+   // mint. The ledger is bounded (GRAPHENE_H3_MAX_MINT_DEPOSITS, checked in
+   // evaluate).
    d.modify( *_vault, [&op]( vault_object& v ) {
       v.outstanding += op.amount;
+      v.foreign_mint_deposits.push_back( op.deposit_id );
    } );
+   // The per-block door counter records the foreign leg in bond terms, so the
+   // H2 door cap bounds the foreign door too.
+   if( reserve != nullptr )
+      d.modify( *reserve, [&op, &d]( reserve_object& r ) {
+         const vault_object* vv = d.find( op.vault );
+         if( vv != nullptr )
+            r.door_used_bts += h2_vault_convert_to_bond_terms( *vv, op.amount );
+      } );
 
    return reserve != nullptr ? object_id_type( reserve->id ) : object_id_type();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -1439,6 +1532,18 @@ void_result vault_foreign_unlock_evaluator::do_evaluate( const vault_foreign_unl
                 != bound->options.producers.end(),
               "Publisher ${a} is not an attestor of the vault's bound oracle",
               ("a", op.publisher) );
+   // I06: the publisher must hold a LIVE producer bond on the bound oracle.
+   // A slashed attestor has no skin in the game and must not be able to
+   // clear an SLA (the same rule the rotation path applies to a new signer).
+   {
+      const auto& bond_idx = d.get_index_type<producer_bond_index>()
+                                .indices().get<by_oracle_producer>();
+      const auto bitr = bond_idx.find( boost::make_tuple( *_vault->bound_oracle,
+                                                          op.publisher ) );
+      FC_ASSERT( bitr != bond_idx.end() && !bitr->slashed,
+                 "Publisher ${a} holds no live producer bond on the bound oracle",
+                 ("a", op.publisher) );
+   }
    // The promoted foreign record must carry the matching unlock: same deposit
    // id, same amount, and the unlock event kind.
    const auto got = h2_read_foreign_tx( d, *_vault->bound_oracle, now,
@@ -1459,6 +1564,11 @@ void_result vault_foreign_unlock_evaluator::do_evaluate( const vault_foreign_unl
       if( !( rec.deposit_id == op.deposit_id ) )
          continue;
       FC_ASSERT( !rec.unlocked, "Deposit ${d} is already unlocked", ("d", op.deposit_id.hash[0]) );
+      // I04: the unlock must unlock what was redeemed. The promoted record's
+      // amount must equal the redeem record's amount, or an attestor could
+      // unlock a smaller amount and clear the whole SLA.
+      FC_ASSERT( got->amount == rec.amount,
+                 "Foreign unlock amount does not match the redeemed amount" );
       _redeem_index = i;
       found = true;
       break;
@@ -1505,6 +1615,26 @@ void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_red
    FC_ASSERT( _vault->foreign_redeems.size() < GRAPHENE_H3_MAX_PENDING_REDEEMS,
               "Vault already carries ${n} outstanding foreign redeems",
               ("n", _vault->foreign_redeems.size()) );
+   // C03: replay protection. The deposit must be one the vault has NOT
+   // already redeemed: the same redeem twice would burn twice and open two
+   // SLA records, and one unlock plus one SLA expiry would reimburse twice.
+   {
+      bool outstanding = false;
+      for( const auto& rec : _vault->foreign_redeems )
+         if( rec.deposit_id == op.deposit_id )
+         {
+            FC_ASSERT( false, "Foreign deposit ${d} is already redeemed on this vault",
+                       ("d", op.deposit_id.hash[0]) );
+         }
+      // The deposit must have backed a mint on this vault: a redeem of a
+      // deposit the vault never minted against is refused.
+      for( const auto& dep : _vault->foreign_mint_deposits )
+         if( dep == op.deposit_id )
+            outstanding = true;
+      FC_ASSERT( outstanding,
+                 "Foreign deposit ${d} did not back a mint on this vault",
+                 ("d", op.deposit_id.hash[0]) );
+   }
 
    FC_ASSERT( nullptr != d.find( op.redeemer ),
               "Redeemer account ${a} does not exist", ("a", op.redeemer) );

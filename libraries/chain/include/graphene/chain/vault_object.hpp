@@ -109,6 +109,12 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
         // carry at most GRAPHENE_H3_MAX_PENDING_REDEEMS outstanding redeems,
         // so the vector cannot grow without limit.
         std::vector<foreign_redeem_record> foreign_redeems;
+        // ---- H3 mint-side deposit records (appended-last, never inserted) ----
+        // The deposits this vault has already minted against. A deposit id
+        // may back at most ONE mint: the foreign lock proof is replayed
+        // otherwise, and one lock would back unlimited mints. Bounded: a
+        // vault carries at most GRAPHENE_H3_MAX_MINT_DEPOSITS records.
+        std::vector<protocol::foreign_tx_id> foreign_mint_deposits;
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const

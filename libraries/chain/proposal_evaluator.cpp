@@ -311,6 +311,19 @@ struct proposal_operation_hardfork_visitor
                      "Unable to define fees for offset claims prior to the H2 price hardfork");
            FC_ASSERT(!op.new_parameters.current_fees->exists<issuance_exit_request_operation>(),
                      "Unable to define fees for issuance exits prior to the H2 price hardfork");
+           // H3: the foreign-chain legs gate with the gateway leg (the custody
+           // leg they belong to), so a committee cannot price them before the
+           // code activates.
+           FC_ASSERT(!op.new_parameters.current_fees->exists<vault_foreign_mint_operation>(),
+                     "Unable to define fees for foreign mints prior to the H2 gateway hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<vault_foreign_redeem_operation>(),
+                     "Unable to define fees for foreign redeems prior to the H2 gateway hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<vault_foreign_challenge_operation>(),
+                     "Unable to define fees for foreign challenges prior to the H2 bonds hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<vault_foreign_unlock_operation>(),
+                     "Unable to define fees for foreign unlocks prior to the H2 gateway hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_foreign_publish_operation>(),
+                     "Unable to define fees for foreign transaction publishes prior to the H2 price hardfork");
       }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
@@ -415,6 +428,9 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::oracle_publish_operation&) const {
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
    }
+   void operator()(const graphene::chain::oracle_foreign_publish_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
    void operator()(const graphene::chain::reference_asset_create_operation&) const {
       FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
    }
@@ -488,6 +504,7 @@ struct proposal_operation_hardfork_visitor
    }
    void operator()(const graphene::chain::vault_foreign_challenge_operation&) const {
       h2_require_primitives(block_time);
+      h2_require_gateway_leg(block_time);
    }
    void operator()(const graphene::chain::vault_foreign_unlock_operation&) const {
       h2_require_gateway_leg(block_time);

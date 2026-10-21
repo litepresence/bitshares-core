@@ -185,6 +185,7 @@ void database::initialize_evaluators()
    register_evaluator<vault_foreign_mint_evaluator>();
    register_evaluator<vault_foreign_challenge_evaluator>();
    register_evaluator<vault_foreign_unlock_evaluator>();
+   register_evaluator<oracle_foreign_publish_evaluator>();
    register_evaluator<vault_foreign_redeem_evaluator>();
    register_evaluator<pair_freeze_evaluator>();
    register_evaluator<winddown_claim_evaluator>();

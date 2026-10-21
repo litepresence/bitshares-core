@@ -595,6 +595,41 @@ namespace graphene { namespace protocol {
       void            validate()const;
    };
 
+   /**
+    * @brief Publishes a foreign chain transaction record.
+    * @ingroup operations
+    *
+    * The foreign chain transaction oracle's publish path (H3). A price
+    * oracle publishes a ratio; a transaction oracle publishes an EVENT: that a
+    * specific transaction happened on a foreign chain. The producer is an
+    * attestor of the oracle, and the record carries the chain, the
+    * transaction id, the event kind, the amount in the foreign asset's
+    * smallest units, and the confirmation height.
+    *
+    * The record is promoted through the SAME guard machinery as a price feed
+    * (delay queue, freeze, per-interval rate limit, promotion proof). The
+    * consumption semantics differ: a transaction record is matched by
+    * EQUALITY on the transaction id, never by ratio.
+    *
+    * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 3
+    */
+   struct oracle_foreign_publish_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = GRAPHENE_BLOCKCHAIN_PRECISION / 10; };
+
+      asset            fee;
+      account_id_type  producer;     ///< The attestor publishing the record
+      oracle_id_type   oracle_id;    ///< The foreign chain transaction oracle
+
+      /// The observed event. Exactly one record per publish.
+      foreign_tx_value value;
+
+      extensions_type  extensions;
+
+      account_id_type fee_payer()const { return producer; }
+      void            validate()const;
+   };
+
    /// @return whether @p name is acceptable as an oracle name
    bool is_valid_oracle_name( const string& name );
 
@@ -682,6 +717,9 @@ FC_REFLECT( graphene::protocol::oracle_unfreeze_operation,
             (fee)(unfreezer)(oracle)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_delete_operation,
             (fee)(owner)(oracle_id)(extensions) )
+FC_REFLECT( graphene::protocol::oracle_foreign_publish_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::oracle_foreign_publish_operation,
+            (fee)(producer)(oracle_id)(value)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_publish_operation,
             (fee)(producer)(oracle_id)(values)(extensions) )
 
@@ -706,3 +744,4 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_ope
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_foreign_publish_operation )

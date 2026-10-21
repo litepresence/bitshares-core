@@ -898,6 +898,13 @@ void_result hybrid_mint_evaluator::do_evaluate( const hybrid_mint_operation& op 
    FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
    FC_ASSERT( _vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
                "Vault is wound down; exits go through wind-down claims, never mints" );
+   // I08: a foreign-backed vault is served by the H3 legs only. The H2 mint
+   // prices the outstanding through the BTS bond and the H2 price oracle,
+   // neither of which applies to a foreign-backed vault: leaving the H2 path
+   // open would let one vault mint through two incompatible economics.
+   FC_ASSERT( !h2_vault_is_foreign_backed( *_vault ),
+              "Vault ${v} is foreign-backed; the H3 foreign mint path serves it",
+              ("v", op.vault) );
    // Stranger-mint closed: mint authority sits with the vault authority,
    // never with whoever funds a deposit. The minter must be a named member
    // of the vault's threshold custody set (the fee-payer signature rule
@@ -1357,6 +1364,11 @@ void_result hybrid_redeem_evaluator::do_evaluate( const hybrid_redeem_operation&
    FC_ASSERT( nullptr != _vault, "Vault ${v} does not exist", ("v", op.vault) );
    FC_ASSERT( _vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
               "Vault is wound down; exits go through wind-down claims, never redeems" );
+   // I08: the H2 redeem prices the burn through the BTS bond and the H2
+   // price oracle; a foreign-backed vault is served by the H3 legs only.
+   FC_ASSERT( !h2_vault_is_foreign_backed( *_vault ),
+              "Vault ${v} is foreign-backed; the H3 foreign redeem path serves it",
+              ("v", op.vault) );
    // Exits continue through a held door (H2c top-up precedent: frozen
    // blocks mints, redemptions continue pro-rata). Only the tripwire's
    // stage-3 redemptions latch and terminal wind-down shut this path.

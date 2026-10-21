@@ -302,6 +302,21 @@ void oracle_publish_operation::validate()const
       v.validate();
 }
 
+void oracle_foreign_publish_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   // The record must carry a positive amount and a non-empty transaction id:
+   // a zero-amount or zero-id record would match nothing and prove nothing.
+   FC_ASSERT( value.amount > 0,
+              "A published foreign transaction record must carry a positive amount" );
+   bool nonzero = false;
+   for( const uint8_t b : value.tx_id.hash )
+      if( b != 0 )
+         nonzero = true;
+   FC_ASSERT( nonzero, "A published foreign transaction record must carry a transaction id" );
+   value.validate();
+}
+
 price convert_oracle_value_to_price(
    const oracle_value& v,
    const reference_mapping& debt_mapping, asset_id_type debt_asset,
@@ -402,3 +417,4 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_o
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_foreign_publish_operation )

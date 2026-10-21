@@ -16,6 +16,7 @@
 #include <graphene/protocol/vault_ops.hpp>
 #include <graphene/protocol/h2_economics.hpp>
 #include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 
 #include <fc/io/raw.hpp>
@@ -380,6 +381,129 @@ BOOST_AUTO_TEST_CASE( rate_conversion_rounds_down )
    BOOST_CHECK_EQUAL( h2_vault_convert_to_bond_terms( vid( db ), share_type( 3 ) ).value, 6 );
    db.modify( vid( db ), []( vault_object& v ) { v.backing_rate_den = 0; } );
    BOOST_CHECK_EQUAL( h2_vault_convert_to_bond_terms( vid( db ), share_type( 1000 ) ).value, 0 );
+}
+
+/// C01: a foreign mint against a frozen vault is refused. The freeze is the
+/// mint halt: a challenge, the tripwire, or a coverage breach.
+BOOST_AUTO_TEST_CASE( mint_refused_on_a_frozen_vault )
+{
+   build();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = true; } );
+   graphene::protocol::foreign_tx_id dep;
+   dep.hash[0] = 0x55;
+   BOOST_CHECK_THROW( do_mint( holder, 1000, 0x55 ), fc::exception );
+}
+
+/// C02: a deposit may back at most ONE mint. A replayed lock proof would
+/// otherwise back unlimited mints.
+BOOST_AUTO_TEST_CASE( mint_refused_for_a_replayed_deposit )
+{
+   build();
+   do_mint( holder, 1000, 0x66 );
+   BOOST_CHECK_THROW( do_mint( holder, 1000, 0x66 ), fc::exception );
+}
+
+/// C03: a deposit may be redeemed at most once. A second redeem would burn
+/// twice and open two SLA records for one deposit.
+BOOST_AUTO_TEST_CASE( redeem_refused_for_a_replayed_deposit )
+{
+   build();
+   const auto dep = do_mint( holder, 1000, 0x77 );
+   do_redeem( holder, 1000, dep );
+   BOOST_CHECK_THROW( do_redeem( holder, 1000, dep ), fc::exception );
+}
+
+/// C04: the minter may not also be a co-signer: one signature must not
+/// satisfy the vault multisig twice.
+BOOST_AUTO_TEST_CASE( mint_refused_when_the_minter_is_also_a_cosigner )
+{
+   build();
+   graphene::protocol::foreign_tx_id dep;
+   dep.hash[0] = 0x88;
+   promote_foreign( make_ftv( graphene::protocol::foreign_tx_kind::lock, 0x88, 1000, 100 ),
+                    db.head_block_time() );
+   vault_foreign_mint_operation op;
+   op.vault = vid;
+   op.deposit_id = dep;
+   op.amount = share_type( 1000 );
+   op.recipient = holder;
+   op.minter = owner;
+   op.co_signers.insert( owner );   // the minter doubles as a co-signer
+   signed_transaction tx; tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx ); tx.sign( owner_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+}
+
+/// I04: the unlock must unlock what was redeemed. An unlock of a smaller
+/// amount must not clear the whole SLA.
+BOOST_AUTO_TEST_CASE( unlock_refused_for_a_mismatched_amount )
+{
+   build();
+   const auto dep = do_mint( holder, 1000, 0x99 );
+   do_redeem( holder, 1000, dep );
+   // The promoted unlock carries 500, the redeem burned 1000.
+   promote_foreign( make_ftv( graphene::protocol::foreign_tx_kind::unlock, 0x99, 500, 110 ),
+                    db.head_block_time() );
+   vault_foreign_unlock_operation op;
+   op.publisher = attestor;
+   op.vault = vid;
+   op.deposit_id = dep;
+   op.amount = share_type( 500 );
+   op.foreign_tx_hash = "deadbeef";
+   signed_transaction tx; tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx ); tx.sign( attestor_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+}
+
+/// I05: a foreign-backed vault must commit a non-zero exchange-rate numerator.
+BOOST_AUTO_TEST_CASE( register_refused_without_a_rate_numerator )
+{
+   build();
+   // A second vault with a zero numerator must be refused at registration.
+   asset_create_operation aop;
+   aop.issuer = owner; aop.symbol = "H3N0"; aop.precision = 2;
+   aop.common_options.max_supply = GRAPHENE_MAX_SHARE_SUPPLY;
+   aop.common_options.core_exchange_rate = price( asset( 2 ), asset( 1, asset_id_type( 1 ) ) );
+   signed_transaction atx; atx.operations.push_back( aop );
+   db.current_fee_schedule().set_fee( atx.operations.back() );
+   set_expiration( db, atx ); atx.sign( owner_key, db.get_chain_id() );
+   const asset_id_type pair2 = asset_id_type {
+      PUSH_TX( db, atx ).operation_results.front().get<object_id_type>() };
+
+   authority auth2( 1, owner, 1 );
+   vault_register_operation vop;
+   vop.registrar = owner;
+   vop.pair = pair2;
+   vop.vault_authority = auth2;
+   vop.min_bond = VAULT_RAW;
+   vop.min_bond_usd_cents = VAULT_USD_CENTS;
+   vop.secure_ratio_bps = 20000;
+   vop.challenge_window_sec = GRAPHENE_H2_VAULT_MAX_CHALLENGE_WINDOW_SEC;
+   vop.backing_chain = 1;
+   vop.backing_asset = "BTC";
+   vop.backing_rate_num = 0;   // refused
+   vop.backing_rate_den = 1;
+   signed_transaction vtx; vtx.operations.push_back( vop );
+   db.current_fee_schedule().set_fee( vtx.operations.back() );
+   set_expiration( db, vtx ); vtx.sign( owner_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, vtx ), fc::exception );
+}
+
+/// I08: the H2 mint path refuses a foreign-backed vault. The H3 legs serve
+/// it, and only one economics may apply to a vault.
+BOOST_AUTO_TEST_CASE( h2_mint_refused_on_a_foreign_vault )
+{
+   build();
+   hybrid_mint_operation op;
+   op.vault = vid;
+   op.deposit = asset( ORACLE_RAW, asset_id_type() );
+   op.minter = owner;
+   signed_transaction tx; tx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( tx.operations.back() );
+   set_expiration( db, tx ); tx.sign( owner_key, db.get_chain_id() );
+   BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

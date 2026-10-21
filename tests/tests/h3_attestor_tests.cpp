@@ -140,6 +140,8 @@ struct h3_attestor_fixture : database_fixture
       vop.challenge_window_sec = GRAPHENE_H2_VAULT_MAX_CHALLENGE_WINDOW_SEC;
       vop.backing_chain = 1;   // bitcoin
       vop.backing_asset = "BTC";
+      vop.backing_rate_num = 2;
+      vop.backing_rate_den = 1;
       signed_transaction vtx; vtx.operations.push_back( vop );
       db.current_fee_schedule().set_fee( vtx.operations.back() );
       set_expiration( db, vtx ); vtx.sign( owner_key, db.get_chain_id() );

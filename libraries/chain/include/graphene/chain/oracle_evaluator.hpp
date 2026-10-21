@@ -114,6 +114,24 @@ namespace graphene { namespace chain {
     * that margin, vault coverage, and issuance consume — delayed by the
     * oracle's configured guard delay, if any.
     */
+   /**
+    * The foreign chain transaction oracle's publish path (H3). A transaction
+    * oracle publishes an EVENT, not a ratio: a record is promoted when
+    * enough producers attest the SAME transaction id.
+    *
+    * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 3
+    */
+   class oracle_foreign_publish_evaluator : public evaluator<oracle_foreign_publish_evaluator>
+   {
+      public:
+         using operation_type = protocol::oracle_foreign_publish_operation;
+
+         void_result    do_evaluate( const protocol::oracle_foreign_publish_operation& op );
+         object_id_type do_apply( const protocol::oracle_foreign_publish_operation& op );
+
+         const oracle_object* _oracle = nullptr;
+   };
+
    class oracle_publish_evaluator : public evaluator<oracle_publish_evaluator>
    {
       public:

@@ -51,6 +51,9 @@ namespace graphene { namespace protocol {
    /// Max outstanding foreign redeems a vault may carry (H3). The pending
    /// redeem vector is bounded by this, so it cannot grow without limit.
    constexpr size_t GRAPHENE_H3_MAX_PENDING_REDEEMS = 16;
+   /// Max foreign deposit records a vault may carry (H3). The mint-side
+   /// deposit set is bounded by this, so it cannot grow without limit.
+   constexpr size_t GRAPHENE_H3_MAX_MINT_DEPOSITS = 1024;
    /// Foreign redeem SLA (H3): 72h, matching the Track A social-slash bond's
    /// redemption window.
    constexpr uint32_t GRAPHENE_H3_FOREIGN_REDEEM_SLA_SEC = 259200;

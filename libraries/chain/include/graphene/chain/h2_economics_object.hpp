@@ -31,6 +31,11 @@
 
 namespace graphene { namespace chain {
 
+   /// Promotion ring bound (mirrors the H1 guard-queue bound). Shared: the
+   /// price promotion path and the foreign transaction promotion path both
+   /// write the guard's promotion log.
+   constexpr size_t H2E_PROMOTION_LOG_CAP = 16;
+
 using graphene::protocol::h2_tripwire_sample;
 using graphene::protocol::price_oracle;
 

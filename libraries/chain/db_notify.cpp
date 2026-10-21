@@ -504,6 +504,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // publisher
    }
+   void operator()( const oracle_foreign_publish_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // attestor
+   }
    void operator()( const vault_foreign_redeem_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // redeemer

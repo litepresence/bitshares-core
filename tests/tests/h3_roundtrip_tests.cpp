@@ -223,6 +223,9 @@ struct h3_roundtrip_fixture : database_fixture
          rec.anchor = anchor;
          rec.delay_sec = delay;
          gg.promotion_log.push_back( rec );
+         // The foreign promotion proof reads the FOREIGN log (the price log
+         // is the price path's; a foreign publish must never evict it).
+         gg.foreign_promotion_log.push_back( rec );
          gg.last_promo_time = t;
       } );
    }

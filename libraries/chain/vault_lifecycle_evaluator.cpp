@@ -1345,7 +1345,7 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
    // unlimited mints.
    {
       for( const auto& dep : _vault->foreign_mint_deposits )
-         FC_ASSERT( !( dep == op.deposit_id ),
+         FC_ASSERT( !( dep.deposit_id == op.deposit_id ),
                     "Foreign deposit ${d} has already backed a mint on this vault",
                     ("d", op.deposit_id.hash[0]) );
       FC_ASSERT( _vault->foreign_mint_deposits.size() < GRAPHENE_H3_MAX_MINT_DEPOSITS,
@@ -1406,17 +1406,6 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
                     "Post-mint vault coverage breaks the rmin floor (${w} bps)",
                     ("w", rmin_bps) );
       }
-      // I09: the per-block door cap. The H2 door bounds all issuance flow
-      // through one per-block counter; the foreign door is bounded the same
-      // way, in bond terms.
-      {
-         const share_type used = _reserve != nullptr ? _reserve->door_used_bts : share_type( 0 );
-         const share_type leg = h2_vault_convert_to_bond_terms( *_vault, op.amount );
-         FC_ASSERT( boost::multiprecision::uint256_t( uint64_t( used.value ) )
-                       + boost::multiprecision::uint256_t( uint64_t( leg.value ) )
-                    <= boost::multiprecision::uint256_t( GRAPHENE_H2_ISSUE_DOOR_CAP_BTS ),
-                    "Foreign mint exceeds the per-block door cap" );
-      }
    }
 
    const asset_object* pair_asset = d.find( _vault->vault_pair );
@@ -1430,6 +1419,20 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
 
    _reserve = h2_find_reserve( d, _vault->vault_pair );
    _creates_reserve = ( _reserve == nullptr );
+
+   // I09/D02: the per-block door cap. The H2 door bounds all issuance flow
+   // through one per-block counter, reset at each block boundary; the foreign
+   // door is bounded the same way, in bond terms. The counter is read AFTER
+   // the reserve is found (reading it before found the counter on a null
+   // reserve, so the cap never fired).
+   {
+      const share_type used = _reserve != nullptr ? _reserve->door_used_bts : share_type( 0 );
+      const share_type leg = h2_vault_convert_to_bond_terms( *_vault, op.amount );
+      FC_ASSERT( boost::multiprecision::uint256_t( uint64_t( used.value ) )
+                      + boost::multiprecision::uint256_t( uint64_t( leg.value ) )
+                   <= boost::multiprecision::uint256_t( GRAPHENE_H2_ISSUE_DOOR_CAP_BTS ),
+                  "Foreign mint exceeds the per-block door cap" );
+   }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -1487,15 +1490,25 @@ object_id_type vault_foreign_mint_evaluator::do_apply( const vault_foreign_mint_
    // evaluate).
    d.modify( *_vault, [&op]( vault_object& v ) {
       v.outstanding += op.amount;
-      v.foreign_mint_deposits.push_back( op.deposit_id );
+      foreign_deposit_record rec;
+      rec.deposit_id = op.deposit_id;
+      rec.redeemed = false;
+      v.foreign_mint_deposits.push_back( rec );
    } );
    // The per-block door counter records the foreign leg in bond terms, so the
-   // H2 door cap bounds the foreign door too.
+   // H2 door cap bounds the foreign door too. The block stamp resets the
+   // counter at each block boundary, exactly as the H2 path does.
    if( reserve != nullptr )
-      d.modify( *reserve, [&op, &d]( reserve_object& r ) {
+      d.modify( *reserve, [&op, &d, head_block]( reserve_object& r ) {
          const vault_object* vv = d.find( op.vault );
-         if( vv != nullptr )
-            r.door_used_bts += h2_vault_convert_to_bond_terms( *vv, op.amount );
+         if( vv == nullptr )
+            return;
+         if( r.door_block != head_block )
+         {
+            r.door_block = head_block;
+            r.door_used_bts = share_type( 0 );
+         }
+         r.door_used_bts += h2_vault_convert_to_bond_terms( *vv, op.amount );
       } );
 
    return reserve != nullptr ? object_id_type( reserve->id ) : object_id_type();
@@ -1619,7 +1632,6 @@ void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_red
    // already redeemed: the same redeem twice would burn twice and open two
    // SLA records, and one unlock plus one SLA expiry would reimburse twice.
    {
-      bool outstanding = false;
       for( const auto& rec : _vault->foreign_redeems )
          if( rec.deposit_id == op.deposit_id )
          {
@@ -1627,11 +1639,20 @@ void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_red
                        ("d", op.deposit_id.hash[0]) );
          }
       // The deposit must have backed a mint on this vault: a redeem of a
-      // deposit the vault never minted against is refused.
+      // deposit the vault never minted against is refused. The redeemed flag
+      // is PERMANENT, so a deposit that was redeemed and reimbursed stays
+      // redeemed even after the SLA record is cleared on payment.
+      bool minted = false;
       for( const auto& dep : _vault->foreign_mint_deposits )
-         if( dep == op.deposit_id )
-            outstanding = true;
-      FC_ASSERT( outstanding,
+      {
+         if( !( dep.deposit_id == op.deposit_id ) )
+            continue;
+         FC_ASSERT( !dep.redeemed,
+                    "Foreign deposit ${d} was already redeemed on this vault",
+                    ("d", op.deposit_id.hash[0]) );
+         minted = true;
+      }
+      FC_ASSERT( minted,
                  "Foreign deposit ${d} did not back a mint on this vault",
                  ("d", op.deposit_id.hash[0]) );
    }
@@ -1683,6 +1704,11 @@ object_id_type vault_foreign_redeem_evaluator::do_apply( const vault_foreign_red
       rec.sla_deadline = now + GRAPHENE_H3_FOREIGN_REDEEM_SLA_SEC;
       rec.unlocked     = false;
       v.foreign_redeems.push_back( rec );
+      // The deposit is marked redeemed PERMANENTLY, so clearing the SLA
+      // record on payment cannot make the deposit redeemable a second time.
+      for( auto& dep : v.foreign_mint_deposits )
+         if( dep.deposit_id == op.deposit_id )
+            dep.redeemed = true;
    } );
 
    // Record redeem (burn) in reserve stable ledger.

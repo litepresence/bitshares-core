@@ -498,6 +498,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::oracle_object, (graphene::db::o
                     (consumed_foreign_value)
                     (consumed_foreign_value_time)
                     (foreign_submissions)
+                    (foreign_pending_queue)
                   )
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::oracle_object )

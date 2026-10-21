@@ -125,6 +125,12 @@ class guard_state_object : public abstract_object<guard_state_object, protocol_i
       time_point_sec             rate_window_start; ///< Interval-anchored window
       uint32_t                   promotion_count = 0; ///< Promotions this window
       bool                       consumption_hold = false; ///< Set past the limit
+      /// The FOREIGN transaction promotion log (H3). Separate from the price
+      /// log on purpose: the two paths have different value types, and a
+      /// foreign publish must never evict a price promotion record (that
+      /// would destroy the H2 bonded price leg's promotion proof and fail
+      /// that leg closed). Newest last, capped at 16.
+      vector<h2_promotion_record> foreign_promotion_log;
 };
 
 /**

@@ -155,9 +155,17 @@ namespace {
               continue; // R3-02: vesting withdrawals bypass the bond object;
                         // R4-03: BTS-only is enforced at lock (bond_evaluator),
                         // this asset check is belt and suspenders
+          // A live submission: the price path's map, or (for a foreign
+          // transaction oracle) the foreign attestation map. A foreign
+          // attestor that never published has no live submission, so the
+          // bonded live set does not count it.
           const auto sitr = oracle.submissions.find( bitr->producer );
-          if( sitr == oracle.submissions.end()
-              || !oracle.is_submission_live( sitr->second.first, now ) )
+          const auto fitr = oracle.foreign_submissions.find( bitr->producer );
+          const bool price_live = ( sitr != oracle.submissions.end()
+                                    && oracle.is_submission_live( sitr->second.first, now ) );
+          const bool foreign_live = ( fitr != oracle.foreign_submissions.end()
+                                      && oracle.is_submission_live( fitr->second.first, now ) );
+          if( !price_live && !foreign_live )
              continue;
           return true;
        }
@@ -902,8 +910,11 @@ static bool h2_consumed_foreign_promotion_proven( const database& d,
    const uint32_t delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
    const uint32_t anchor = h2_osm_bucket_anchor(
          uint32_t( o.consumed_foreign_value_time.sec_since_epoch() ), delay );
-   for( auto ritr = guard->promotion_log.rbegin();
-         ritr != guard->promotion_log.rend(); ++ritr )
+   // The FOREIGN promotion log, not the price log (D04): the two paths carry
+   // different value types, and a foreign publish must never evict a price
+   // promotion record.
+   for( auto ritr = guard->foreign_promotion_log.rbegin();
+         ritr != guard->foreign_promotion_log.rend(); ++ritr )
    {
       if( ritr->promote_time != o.consumed_foreign_value_time )
          continue;
@@ -1284,6 +1295,7 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::guard_state_object, (graphene::
                     (rate_window_start)
                     (promotion_count)
                     (consumption_hold)
+                    (foreign_promotion_log)
                   )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::tripwire_state_object, (graphene::db::object),

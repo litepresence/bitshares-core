@@ -48,6 +48,13 @@ using graphene::protocol::authority;
 /// One outstanding foreign redeem: the user who burned, the amount burned, the
 /// foreign-chain address to unlock to, the SLA deadline, and whether the
 /// unlock proof has arrived. The vault carries a bounded vector of these.
+/// One foreign deposit this vault has minted against.
+struct foreign_deposit_record
+{
+   protocol::foreign_tx_id deposit_id;  ///< The foreign deposit
+   bool                 redeemed = false; ///< The deposit was redeemed (permanently)
+};
+
 struct foreign_redeem_record
 {
    account_id_type      redeemer;          ///< Who burned; the miss reimburses them
@@ -62,6 +69,8 @@ struct foreign_redeem_record
 
 FC_REFLECT( graphene::chain::foreign_redeem_record,
             (redeemer)(amount)(recipient)(deposit_id)(sla_deadline)(unlocked) )
+FC_REFLECT( graphene::chain::foreign_deposit_record,
+            (deposit_id)(redeemed) )
 
 namespace graphene { namespace chain {
 
@@ -114,7 +123,11 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
         // may back at most ONE mint: the foreign lock proof is replayed
         // otherwise, and one lock would back unlimited mints. Bounded: a
         // vault carries at most GRAPHENE_H3_MAX_MINT_DEPOSITS records.
-        std::vector<protocol::foreign_tx_id> foreign_mint_deposits;
+        //
+        // The redeemed flag is PERMANENT: a deposit that was redeemed and
+        // reimbursed stays redeemed, so clearing the SLA record on payment
+        // cannot make the deposit redeemable a second time.
+        std::vector<foreign_deposit_record> foreign_mint_deposits;
 
       /// @return whether a mint of @p amount stays within the secure ratio
       bool mint_within_secure_ratio( share_type bonds, share_type new_outstanding )const

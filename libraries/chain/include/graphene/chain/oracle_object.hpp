@@ -195,13 +195,26 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       /// pre-existing field is unchanged.
       optional<vector<graphene::protocol::foreign_tx_value>> consumed_foreign_value;
       time_point_sec consumed_foreign_value_time;
-      /// Pending foreign attestations: one transaction id per producer, the
-      /// attestor set's current view of what each producer has observed. A
-      /// record is promoted when enough producers attest the SAME transaction
-      /// id (the quorum rule, the same shape as a price feed's).
+      /// Pending foreign attestations: one transaction id per producer, with
+      /// the time of the attestation, the attestor set's current view of what
+      /// each producer has observed. A record is promoted when enough
+      /// producers attest the SAME transaction id (the quorum rule, the same
+      /// shape as a price feed's).
+      ///
+      /// The timestamp matters: an attestation older than the value lifetime
+      /// is dead, and a dead attestation must not count toward the quorum.
       ///
       /// APPENDED-LAST: this field sits at the END of the struct.
-      flat_map<account_id_type, graphene::protocol::foreign_tx_id> foreign_submissions;
+      flat_map<account_id_type, std::pair<time_point_sec, graphene::protocol::foreign_tx_id>>
+            foreign_submissions;
+      /// The foreign delay queue: quorum-reached records awaiting the guard
+      /// delay, oldest first. The H1 price path's analog is pending_queue; a
+      /// foreign record is promoted only after the delay, exactly as a price
+      /// record is. Bounded by GRAPHENE_ORACLE_GUARD_MAX_PENDING.
+      ///
+      /// APPENDED-LAST: this field sits at the END of the struct.
+      std::vector<std::pair<time_point_sec, graphene::protocol::foreign_tx_value>>
+            foreign_pending_queue;
 
       /// @return whether a submission made at @p published is still live at @p now
       bool is_submission_live( time_point_sec published, time_point_sec now )const

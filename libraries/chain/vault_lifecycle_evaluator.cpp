@@ -1426,7 +1426,10 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
    // the reserve is found (reading it before found the counter on a null
    // reserve, so the cap never fired).
    {
-      const share_type used = _reserve != nullptr ? _reserve->door_used_bts : share_type( 0 );
+      // N03: the counter is read through the per-block helper, so a counter
+      // left saturated by an earlier block does not refuse the mint forever.
+      const uint32_t head_block = d.head_block_num();
+      const share_type used = h2_issue_door_used( _reserve, head_block );
       const share_type leg = h2_vault_convert_to_bond_terms( *_vault, op.amount );
       FC_ASSERT( boost::multiprecision::uint256_t( uint64_t( used.value ) )
                       + boost::multiprecision::uint256_t( uint64_t( leg.value ) )

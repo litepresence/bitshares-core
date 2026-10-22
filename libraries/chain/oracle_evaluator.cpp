@@ -463,17 +463,22 @@ object_id_type oracle_foreign_publish_evaluator::do_apply(
    // otherwise one live attestor could promote a forged amount for a
    // transaction id a historical quorum once attested.
    d.modify( *_oracle, [&op, now]( oracle_object& o ) {
-      o.foreign_submissions[op.producer] = std::make_pair( now, op.value.tx_id );
+      o.foreign_submissions[op.producer] = std::make_pair( now, op.value );
    } );
 
+   uint16_t attesting = 0;
    {
       const auto& bond_idx = d.get_index_type<producer_bond_index>()
                                 .indices().get<by_oracle_producer>();
-      uint16_t attesting = 0;
       for( const auto& entry : _oracle->foreign_submissions )
       {
-         if( !( entry.second.second == op.value.tx_id ) )
-            continue;
+         // N01: the quorum agrees on the FULL value, not only the transaction
+         // id. Agreeing on the id alone would let one producer re-publish an
+         // id the honest quorum attested, carrying a forged AMOUNT (or a
+         // forged kind, chain, or asset) straight through to the mint, which
+         // trusts the promoted record.
+         if( !protocol::foreign_tx_value_agrees( entry.second.second, op.value ) )
+            continue; // a different value, not a different attestation
          if( !_oracle->is_submission_live( entry.second.first, now ) )
             continue; // a dead attestation never counts
          const auto pitr = _oracle->options.producers.find( entry.first );
@@ -489,12 +494,32 @@ object_id_type oracle_foreign_publish_evaluator::do_apply(
 
       if( attesting >= _oracle->options.minimum_producers )
       {
-         // D03: the record enters the DELAY QUEUE, exactly as a price record
-         // does. A foreign record is promoted only after the guard delay has
-         // elapsed, not in the same block it was published.
-         d.modify( *_oracle, [&op, now]( oracle_object& o ) {
-            o.foreign_pending_queue.push_back( std::make_pair( now, op.value ) );
-            while( o.foreign_pending_queue.size() > GRAPHENE_ORACLE_GUARD_MAX_PENDING )
+         // D03/N04: the record enters the DELAY QUEUE, exactly as a price
+         // record does. A foreign record is promoted only after the guard
+         // delay has elapsed, not in the same block it was published.
+         //
+         // The queue is TIME-BUCKETED, the same fix the price path carries
+         // (R17G/R18): a full queue must span the delay whatever the publish
+         // rate. A count-trim would let a busy publish rate evict every ripe
+         // entry before the scan saw it, and the foreign feed would stall
+         // forever.
+         const uint32_t bucket = std::max<uint32_t>(
+               1, ( delay_sec + ( GRAPHENE_ORACLE_GUARD_MAX_PENDING - 2 ) )
+                    / ( GRAPHENE_ORACLE_GUARD_MAX_PENDING - 1 ) );
+         d.modify( *_oracle, [&op, now, bucket]( oracle_object& o ) {
+            if( o.foreign_pending_queue.empty()
+                || ( now - o.foreign_pending_queue.back().first ).to_seconds()
+                     >= int64_t( bucket ) )
+               o.foreign_pending_queue.push_back( std::make_pair( now, op.value ) );
+            else
+               o.foreign_pending_queue.back().second = op.value;
+            while( o.foreign_pending_queue.size() > size_t( GRAPHENE_ORACLE_GUARD_MAX_PENDING ) )
+               o.foreign_pending_queue.erase( o.foreign_pending_queue.begin() );
+            // A record older than the value lifetime can never be consumed,
+            // so drop it rather than let it ripen into a jump.
+            while( !o.foreign_pending_queue.empty()
+                   && ( now - o.foreign_pending_queue.front().first ).to_seconds()
+                        > int64_t( o.options.value_lifetime_sec ) )
                o.foreign_pending_queue.erase( o.foreign_pending_queue.begin() );
          } );
       }
@@ -521,24 +546,30 @@ object_id_type oracle_foreign_publish_evaluator::do_apply(
             const guard_state_object* g = &*gitr;
             const uint32_t anchor = h2_osm_bucket_anchor(
                   uint32_t( now.sec_since_epoch() ), delay_sec );
-            d.modify( *g, [&ready, now, anchor, delay_sec]( guard_state_object& gg ) {
-               for( const auto& v : ready )
-               {
-                  h2_promotion_record rec;
-                  rec.promote_time = now;
-                  rec.producer_count = 1; // the quorum was checked at publish
-                  rec.anchor = anchor;
-                  rec.delay_sec = delay_sec;
-                  gg.foreign_promotion_log.push_back( rec );
-               }
+            // N02: the promotion record carries the REAL attesting count, not
+            // a hardcoded 1. The proof requires
+            // producer_count >= minimum_producers, so a hardcoded 1 made every
+            // oracle with minimum_producers >= 2 fail its own promotion proof
+            // and every foreign read return empty.
+            const uint16_t attesting_count = std::max<uint16_t>(
+                  1, std::min<uint16_t>( attesting, 0xFFFF ) );
+            d.modify( *g, [&ready, now, anchor, delay_sec, attesting_count]( guard_state_object& gg ) {
+               h2_promotion_record rec;
+               rec.promote_time = now;
+               rec.producer_count = attesting_count;
+               rec.anchor = anchor;
+               rec.delay_sec = delay_sec;
+               gg.foreign_promotion_log.push_back( rec );
                while( gg.foreign_promotion_log.size() > H2E_PROMOTION_LOG_CAP )
                   gg.foreign_promotion_log.erase( gg.foreign_promotion_log.begin() );
                gg.last_promo_time = now;
             } );
             d.modify( *_oracle, [&ready, now]( oracle_object& o ) {
+               // The NEWEST ripe record is the consumed value (the newest
+               // observation is the current truth); the older ones leave the
+               // queue without being consumed.
                o.consumed_foreign_value = std::vector<protocol::foreign_tx_value>{ ready.back() };
                o.consumed_foreign_value_time = now;
-               // The promoted records leave the queue.
                const size_t drop = std::min( ready.size(), o.foreign_pending_queue.size() );
                o.foreign_pending_queue.erase( o.foreign_pending_queue.begin(),
                                              o.foreign_pending_queue.begin() + drop );

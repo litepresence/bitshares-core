@@ -205,7 +205,7 @@ class oracle_object : public abstract_object<oracle_object, protocol_ids, oracle
       /// is dead, and a dead attestation must not count toward the quorum.
       ///
       /// APPENDED-LAST: this field sits at the END of the struct.
-      flat_map<account_id_type, std::pair<time_point_sec, graphene::protocol::foreign_tx_id>>
+      flat_map<account_id_type, std::pair<time_point_sec, graphene::protocol::foreign_tx_value>>
             foreign_submissions;
       /// The foreign delay queue: quorum-reached records awaiting the guard
       /// delay, oldest first. The H1 price path's analog is pending_queue; a

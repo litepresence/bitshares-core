@@ -202,6 +202,14 @@ namespace graphene { namespace chain {
     share_type h2_issue_sat_add( share_type a, share_type b );
 
     /**
+     * The per-block door counter for @p reserve at @p head_block: zero when
+     * the reserve has not been used in this block, the accumulated amount
+     * otherwise. The H2 door bounds all issuance flow through this one
+     * counter; the foreign door reads the same counter.
+     */
+    share_type h2_issue_door_used( const reserve_object* reserve, uint32_t head_block );
+
+    /**
      * Restore face the halt REVERT would re-mint for @p reserve (PC-01):
      * face_burned summed over the STILL-UNVESTED pending door outputs at
      * @p now -- the exact set `h2_issue_on_pair_halt` reverts. Matured,

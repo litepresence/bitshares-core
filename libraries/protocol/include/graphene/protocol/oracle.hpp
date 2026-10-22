@@ -245,6 +245,22 @@ namespace graphene { namespace protocol {
     };
 
     bool operator==( const foreign_tx_value& a, const foreign_tx_value& b );
+
+    /**
+     * Whether two foreign transaction records AGREE on the fields the
+     * consumers trust. The confirmation height is NOT one of them: two
+     * observers of the same transaction can legitimately see different
+     * heights. Everything else is: the chain, the transaction id, the event
+     * kind, the amount, and the foreign asset. A quorum that agrees only on
+     * the transaction id would let a producer re-publish an id the honest
+     * quorum attested with a forged amount, and the mint trusts the promoted
+     * record.
+     */
+    inline bool foreign_tx_value_agrees( const foreign_tx_value& a, const foreign_tx_value& b )
+    {
+       return a.chain == b.chain && a.tx_id == b.tx_id && a.kind == b.kind
+              && a.amount == b.amount && a.foreign_asset_id == b.foreign_asset_id;
+    }
     inline bool operator!=( const foreign_tx_value& a, const foreign_tx_value& b )
     { return !( a == b ); }
 

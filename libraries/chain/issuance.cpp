@@ -208,12 +208,16 @@ uint256_t h2_issue_surplus_face( share_type bts_raw, share_type supply_face,
 
 /// Door accounting: the counter belongs to @p head_block iff the reserve
 /// exists and stamped this block; otherwise the block opens at zero.
+} // namespace
+
 share_type h2_issue_door_used( const reserve_object* reserve, uint32_t head_block )
 {
    if( reserve == nullptr || reserve->door_block != head_block )
       return share_type( 0 );
    return reserve->door_used_bts;
 }
+
+namespace {
 
 /// Spend @p amount from @p bands center-outward (order 3,4,2,5,1,6,0:
 /// the active issuance band first, then alternating premium/discount).

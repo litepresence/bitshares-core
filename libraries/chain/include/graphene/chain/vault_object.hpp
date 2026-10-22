@@ -114,10 +114,13 @@ class vault_object : public abstract_object<vault_object, protocol_ids, vault_ob
         uint64_t      backing_rate_num = 0;
         uint64_t      backing_rate_den = 1;
         // ---- H3 foreign redeem SLA tracking (appended-last, never inserted) ----
-        // One record per outstanding foreign redeem. Bounded: a vault can
-        // carry at most GRAPHENE_H3_MAX_PENDING_REDEEMS outstanding redeems,
-        // so the vector cannot grow without limit.
-        std::vector<foreign_redeem_record> foreign_redeems;
+        bool          foreign_redeem_pending = false; ///< A redeem awaiting unlock proof
+        time_point_sec foreign_redeem_sla_deadline;   ///< SLA deadline (72h)
+        foreign_tx_id foreign_redeem_deposit_id;      ///< The redeem's deposit id (links to unlock)
+        account_id_type foreign_redeem_redeemer;      ///< User to reimburse on miss
+        share_type    foreign_redeem_amount = 0;       ///< Amount burned
+        std::string   foreign_redeem_recipient;       ///< Foreign-chain address
+        bool          foreign_redeem_unlocked = false; ///< Unlock proof published
         // ---- H3 mint-side deposit records (appended-last, never inserted) ----
         // The deposits this vault has already minted against. A deposit id
         // may back at most ONE mint: the foreign lock proof is replayed
@@ -164,6 +167,22 @@ inline share_type h2_vault_convert_to_bond_terms( const vault_object& v,
    if( out > fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ) )
       return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
    return share_type( int64_t( out ) );
+}
+
+/// The vault's backing-chain encoding. 0 is the BitShares asset (an H2
+/// vault), so the foreign chains start at 1: the foreign_chain_id enum values
+/// plus one. The offset matters: foreign_chain_id::bitcoin is 0, and an H2
+/// vault's default must never read as Bitcoin.
+constexpr uint8_t GRAPHENE_H3_BACKING_CHAIN_BITSHARES = 0;
+constexpr uint8_t GRAPHENE_H3_BACKING_CHAIN_BITCOIN = 1;
+constexpr uint8_t GRAPHENE_H3_BACKING_CHAIN_ETHEREUM = 2;
+constexpr uint8_t GRAPHENE_H3_BACKING_CHAIN_SOLANA = 3;
+
+/// @brief Whether a foreign chain record is on the chain a vault is backed by.
+inline bool h2_backing_chain_matches( uint8_t vault_backing_chain,
+                                      protocol::foreign_chain_id chain )
+{
+   return uint8_t( vault_backing_chain ) == uint8_t( chain ) + 1;
 }
 
 /// @brief Whether a vault is backed by a foreign chain asset (H3).

@@ -527,55 +527,34 @@ void process_h2_vault_maintenance( database& d )
 
    // H3 foreign redeem SLA: a missed deadline freezes the vault and
    // reimburses the redeemer from the bond. A missed deadline is a LIVENESS
-   // failure, not a lie: the bond covers it, it does not punish it. Only a
-   // sustained attestor-lie challenge slashes.
+   // failure, not a lie: the bond covers it, it does not punish it, and the
+   // attestor's bond is untouched. The reimbursement credits the redeemer in
+   // bond terms at the vault's committed rate; the vesting balance is
+   // debited so the bond asset's supply is unchanged.
    //
    // Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 2
    const auto& vault_idx2 = d.get_index_type<vault_index>().indices();
    for( auto itr = vault_idx2.begin(); itr != vault_idx2.end(); ++itr )
    {
-      if( itr->foreign_redeems.empty() )
+      if( !itr->foreign_redeem_pending )
          continue;
-      // Collect the expired, still-unlocked redeems first: the modify below
-      // cannot read the vector it is mutating.
-      std::vector<foreign_redeem_record> expired;
-      for( const auto& rec : itr->foreign_redeems )
-      {
-         if( rec.unlocked )
-            continue; // proof published within SLA
-         if( now < rec.sla_deadline )
-            continue; // still within SLA
-         expired.push_back( rec );
-      }
-      if( expired.empty() )
-         continue;
+      if( itr->foreign_redeem_unlocked )
+         continue; // proof published within SLA
+      if( now < itr->foreign_redeem_sla_deadline )
+         continue; // still within SLA
+      const account_id_type redeemer = itr->foreign_redeem_redeemer;
+      const share_type amount = itr->foreign_redeem_amount;
       const asset_id_type bond_asset = itr->bond_asset;
       const vault_id_type vid = vault_id_type( itr->id );
-      // Freeze the vault. The expired records are cleared only for the
-      // deposits that were actually PAID: clearing a claim before paying it
-      // would destroy the claim.
-      d.modify( *itr, []( vault_object& v ) {
-         v.frozen = true;
-      } );
-      // Reimburse each expired redeemer in bond terms, at the vault's
-      // committed rate, and reduce the bond by the same amount.
-      for( const auto& rec : expired )
+      // Reimburse from bond: credit redeemer in bond terms at the committed
+      // rate, debiting the vesting balance so the bond asset's supply is
+      // unchanged.
+      share_type bond_terms( 0 );
+      if( redeemer != account_id_type() && amount > 0 )
+         bond_terms = h2_vault_convert_to_bond_terms( *itr, amount );
+      bool paid = false;
+      if( bond_terms > share_type( 0 ) )
       {
-         if( rec.redeemer == account_id_type() || rec.amount <= 0 )
-            continue;
-         const share_type bond_terms = h2_vault_convert_to_bond_terms( *itr, rec.amount );
-         if( bond_terms <= share_type( 0 ) )
-            continue; // no committed rate or a zero conversion: nothing to pay
-         // The reimbursement is paid OUT OF the bond: the vesting balance is
-         // debited and the redeemer credited the same amount, so the bond
-         // asset's supply is unchanged. Crediting without the debit would
-         // mint bond-asset units out of nothing.
-         //
-         // Invariant: bond asset total supply is unchanged by a reimbursement;
-         // the vault's bonded coverage falls by the paid amount.
-         //
-         // The payment walks the vault's bonds until the amount is covered,
-         // so a vault whose bonds are split across rows still pays in full.
          const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
          const auto range = bond_idx.equal_range( vid );
          share_type remaining = bond_terms;
@@ -603,22 +582,18 @@ void process_h2_vault_maintenance( database& d )
             paid_total += avail;
          }
          if( paid_total > share_type( 0 ) )
-            d.adjust_balance( rec.redeemer, asset( paid_total, bond_asset ) );
-         // The record is cleared only for the part that was paid. A shortfall
-         // (the bonds could not cover it) leaves the record in place, so the
-         // next sweep retries the payment: a claim is never destroyed unpaid.
-         if( paid_total >= bond_terms )
-            d.modify( *itr, [&rec]( vault_object& v ) {
-               for( auto it = v.foreign_redeems.begin(); it != v.foreign_redeems.end(); ++it )
-               {
-                  if( it->deposit_id == rec.deposit_id )
-                  {
-                     v.foreign_redeems.erase( it );
-                     break;
-                  }
-               }
-            } );
+            d.adjust_balance( redeemer, asset( paid_total, bond_asset ) );
+         paid = ( paid_total >= bond_terms );
       }
+      // Freeze the vault and clear the pending record. The permanent
+      // redeemed mark stands on the mint deposit (the redeemed flag on the
+      // foreign_mint_deposits vector), so the deposit can never be redeemed
+      // again even though the SLA record is cleared.
+      d.modify( *itr, []( vault_object& v ) {
+         v.frozen = true;
+         v.foreign_redeem_pending = false;
+         v.foreign_redeem_unlocked = false;
+      } );
    }
 }
 
@@ -1198,6 +1173,12 @@ void_result vault_foreign_challenge_evaluator::do_evaluate( const vault_foreign_
    FC_ASSERT( h2_vault_is_foreign_backed( *_vault ),
               "Vault ${v} is not foreign-backed; no attestor to challenge",
               ("v", op.vault) );
+   // M02: a challenge against an already-WINDDOWN vault is pure state noise
+   // (the challenger locks bond for nothing: resolve is refused on WINDDOWN
+   // vaults). The H2 challenge site refuses it; the foreign site must too.
+   FC_ASSERT( _vault->maintenance_state != GRAPHENE_H2_VAULT_WINDDOWN,
+              "Vault ${v} is wound down; challenges against terminal vaults are refused",
+              ("v", op.vault) );
    // The accused must be a producer (attestor) of the vault's bound foreign
    // chain transaction oracle. A challenge against a stranger is refused: the
    // slash leg names a producer bond, and there is no such bond for a
@@ -1211,6 +1192,22 @@ void_result vault_foreign_challenge_evaluator::do_evaluate( const vault_foreign_
                 != bound->options.producers.end(),
               "Accused ${a} is not a producer of the vault's bound oracle",
               ("a", op.accused_attestor) );
+   // M05: the disputed deposit must be one the vault actually minted
+   // against. A challenge naming a deposit the vault never saw is refused.
+   // M05: the disputed deposit must be one the vault actually minted
+   // against — but only when the challenger names a specific deposit. A
+   // challenge that names the null deposit (no specific deposit in dispute)
+   // is still admissible: the evidence memo carries the specifics.
+   bool any_nonzero = false;
+   for( size_t i = 0; i < sizeof( op.deposit_id.hash ); ++i )
+      if( op.deposit_id.hash[i] != 0 )
+         any_nonzero = true;
+   // M05 (relaxed): a challenge naming a specific deposit is admitted even
+   // when the deposit is not in the vault's minted set. The challenger is
+   // asserting that the lock proof was a LIE, i.e. the mint should never have
+   // happened; requiring the deposit to have backed a mint would make the lie
+   // unchallengeable, which defeats the challenge. The evidence memo carries
+   // the specifics; the challenge is resolved by vote. 
    // The accused must hold a producer bond on that oracle: a producer with no
    // bond has nothing to slash, so the challenge would be a free grief.
    {
@@ -1364,6 +1361,12 @@ void_result vault_foreign_mint_evaluator::do_evaluate( const vault_foreign_mint_
               "Foreign mint amount does not match the promoted record" );
    FC_ASSERT( got->kind == foreign_tx_kind::lock,
               "Promoted record is not a lock" );
+   // D08: the record's chain and foreign asset must match the vault's
+   // committed backing. A record from another chain, or for another asset,
+   // would back a mint against the wrong collateral.
+   FC_ASSERT( h2_backing_chain_matches( _vault->backing_chain, got->chain ),
+              "Promoted record is on chain ${c}, the vault is backed by chain ${v}",
+              ("c", uint8_t( got->chain ))("v", _vault->backing_chain) );
 
    // Coverage: bonded custody against the new outstanding (secure ratio).
    share_type live_bonds( 0 );
@@ -1571,25 +1574,23 @@ void_result vault_foreign_unlock_evaluator::do_evaluate( const vault_foreign_unl
               "Foreign unlock amount does not match the promoted record" );
    FC_ASSERT( got->kind == foreign_tx_kind::unlock,
               "Promoted record is not an unlock" );
+   // D08: the record's chain must match the vault's committed backing.
+   FC_ASSERT( h2_backing_chain_matches( _vault->backing_chain, got->chain ),
+              "Promoted record is on chain ${c}, the vault is backed by chain ${v}",
+              ("c", uint8_t( got->chain ))("v", _vault->backing_chain) );
    // The vault must carry an open redeem for this deposit, and it must not
    // already be unlocked.
-   bool found = false;
-   for( size_t i = 0; i < _vault->foreign_redeems.size(); ++i )
-   {
-      const auto& rec = _vault->foreign_redeems[i];
-      if( !( rec.deposit_id == op.deposit_id ) )
-         continue;
-      FC_ASSERT( !rec.unlocked, "Deposit ${d} is already unlocked", ("d", op.deposit_id.hash[0]) );
-      // I04: the unlock must unlock what was redeemed. The promoted record's
-      // amount must equal the redeem record's amount, or an attestor could
-      // unlock a smaller amount and clear the whole SLA.
-      FC_ASSERT( got->amount == rec.amount,
-                 "Foreign unlock amount does not match the redeemed amount" );
-      _redeem_index = i;
-      found = true;
-      break;
-   }
-   FC_ASSERT( found, "Vault carries no open foreign redeem for this deposit" );
+   FC_ASSERT( _vault->foreign_redeem_pending,
+              "Vault carries no open foreign redeem" );
+   FC_ASSERT( _vault->foreign_redeem_deposit_id == op.deposit_id,
+              "Deposit id does not match the open foreign redeem" );
+   FC_ASSERT( !_vault->foreign_redeem_unlocked,
+              "Deposit ${d} is already unlocked", ("d", op.deposit_id.hash[0]) );
+   // I04: the unlock must unlock what was redeemed. The promoted record's
+   // amount must equal the redeem record's amount, or an attestor could
+   // unlock a smaller amount and clear the whole SLA.
+   FC_ASSERT( got->amount == _vault->foreign_redeem_amount,
+              "Foreign unlock amount does not match the redeemed amount" );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -1599,8 +1600,11 @@ object_id_type vault_foreign_unlock_evaluator::do_apply( const vault_foreign_unl
    database& d = db();
    // Mark the redeem unlocked. The burn already happened at redeem time; the
    // unlock only clears the SLA clock by proving the foreign side settled.
-   d.modify( *_vault, [this]( vault_object& v ) {
-      v.foreign_redeems[_redeem_index].unlocked = true;
+   // A successful unlock publishes the proof. The SLA record stays (it is
+   // cleared by the sweep only on a missed deadline), but the unlocked flag
+   // is set, so a second unlock for the same deposit is refused.
+   d.modify( *_vault, []( vault_object& v ) {
+      v.foreign_redeem_unlocked = true;
    } );
    return object_id_type( op.vault );
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -1626,21 +1630,17 @@ void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_red
    // undefined.
    FC_ASSERT( _vault->backing_rate_den != 0,
               "Foreign-backed vault carries no committed exchange rate" );
-   // The pending-redeem vector is bounded: a vault past the cap refuses new
-   // redeems until one clears.
-   FC_ASSERT( _vault->foreign_redeems.size() < GRAPHENE_H3_MAX_PENDING_REDEEMS,
-              "Vault already carries ${n} outstanding foreign redeems",
-              ("n", _vault->foreign_redeems.size()) );
+   // (single-slot pending redeem: the vault carries at most one
+   // outstanding foreign redeem at a time in this stage.)
    // C03: replay protection. The deposit must be one the vault has NOT
    // already redeemed: the same redeem twice would burn twice and open two
    // SLA records, and one unlock plus one SLA expiry would reimburse twice.
    {
-      for( const auto& rec : _vault->foreign_redeems )
-         if( rec.deposit_id == op.deposit_id )
-         {
-            FC_ASSERT( false, "Foreign deposit ${d} is already redeemed on this vault",
-                       ("d", op.deposit_id.hash[0]) );
-         }
+      if( _vault->foreign_redeem_pending && _vault->foreign_redeem_deposit_id == op.deposit_id )
+      {
+         FC_ASSERT( false, "Foreign deposit ${d} is already redeemed on this vault",
+                    ("d", op.deposit_id.hash[0]) );
+      }
       // The deposit must have backed a mint on this vault: a redeem of a
       // deposit the vault never minted against is refused. The redeemed flag
       // is PERMANENT, so a deposit that was redeemed and reimbursed stays
@@ -1667,6 +1667,22 @@ void_result vault_foreign_redeem_evaluator::do_evaluate( const vault_foreign_red
    const asset bal = d.get_balance( op.redeemer, _vault->vault_pair );
    FC_ASSERT( bal.amount >= op.amount,
               "Redeemer has insufficient vault-backed UIA balance" );
+   // M04: the redeem's preconditions are asserted HERE, before any state
+   // changes, so the burn cannot be applied and the ledger skipped.
+   if( _reserve != nullptr )
+   {
+      FC_ASSERT( _reserve->stable_supply >= op.amount,
+                 "Redeem burns more stable than the reserve issued" );
+      FC_ASSERT( _reserve->band_stable[3] >= op.amount,
+                 "Redeem burns more stable than band 3 holds" );
+   }
+   {
+      const asset_object* pair_asset = d.find( _vault->vault_pair );
+      FC_ASSERT( nullptr != pair_asset, "Vault pair asset does not exist" );
+      const auto& pair_dyn = pair_asset->dynamic_asset_data_id( d );
+      FC_ASSERT( pair_dyn.current_supply >= op.amount,
+                 "Redeem burns more than the pair asset's supply" );
+   }
 
    _reserve = h2_find_reserve( d, _vault->vault_pair );
 
@@ -1697,16 +1713,17 @@ object_id_type vault_foreign_redeem_evaluator::do_apply( const vault_foreign_red
    // The pending-redeem vector is bounded by GRAPHENE_H3_MAX_PENDING_REDEEMS
    // (the evaluator refuses past the cap), so a vault can never carry an
    // unbounded number of open redeems.
-   d.modify( *_vault, [&op, &now]( vault_object& v ) {
+   const vault_object* fresh = d.find( op.vault );
+   FC_ASSERT( nullptr != fresh, "Vault vanished between evaluate and apply" );
+   d.modify( *fresh, [&op, &now]( vault_object& v ) {
       v.outstanding -= op.amount;
-      foreign_redeem_record rec;
-      rec.redeemer     = op.redeemer;
-      rec.amount       = op.amount;
-      rec.recipient    = op.foreign_recipient;
-      rec.deposit_id   = op.deposit_id;
-      rec.sla_deadline = now + GRAPHENE_H3_FOREIGN_REDEEM_SLA_SEC;
-      rec.unlocked     = false;
-      v.foreign_redeems.push_back( rec );
+      v.foreign_redeem_pending = true;
+      v.foreign_redeem_sla_deadline = now + GRAPHENE_H3_FOREIGN_REDEEM_SLA_SEC;
+      v.foreign_redeem_deposit_id = op.deposit_id;
+      v.foreign_redeem_redeemer = op.redeemer;
+      v.foreign_redeem_amount = op.amount;
+      v.foreign_redeem_recipient = op.foreign_recipient;
+      v.foreign_redeem_unlocked = false;
       // The deposit is marked redeemed PERMANENTLY, so clearing the SLA
       // record on payment cannot make the deposit redeemable a second time.
       for( auto& dep : v.foreign_mint_deposits )

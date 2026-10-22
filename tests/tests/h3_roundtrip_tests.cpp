@@ -89,7 +89,7 @@ struct h3_roundtrip_fixture : database_fixture
       oracle_options oopts;
       oopts.producers[attestor] = oracle_producer_entry( 1 );
       oopts.minimum_producers = 1;
-      oopts.value_lifetime_sec = 3600;
+      oopts.value_lifetime_sec = 86400;
       oop.options = oopts;
       signed_transaction otx; otx.operations.push_back( oop );
       db.current_fee_schedule().set_fee( otx.operations.back() );
@@ -308,14 +308,18 @@ BOOST_AUTO_TEST_CASE( mint_redeem_unlock_round_trip )
    BOOST_CHECK_EQUAL( db.get_balance( holder, pair_asset ).amount.value, 1000 );
    BOOST_CHECK_EQUAL( vid( db ).outstanding.value, 1000 );
 
+   // The mint must have recorded the deposit, otherwise the redeem's replay
+   // check (which requires the deposit to have backed a mint) refuses.
+   BOOST_REQUIRE_EQUAL( vid( db ).foreign_mint_deposits.size(), 1u );
+
    do_redeem( holder, 1000, dep );
    BOOST_CHECK_EQUAL( db.get_balance( holder, pair_asset ).amount.value, 0 );
    BOOST_CHECK_EQUAL( vid( db ).outstanding.value, 0 );
-   BOOST_REQUIRE_EQUAL( vid( db ).foreign_redeems.size(), 1u );
+   const vault_object& v_after = vid( db );
+   BOOST_CHECK_EQUAL( v_after.foreign_redeem_pending, true );
 
    do_unlock( 1000, 0x11, dep );
-   BOOST_REQUIRE_EQUAL( vid( db ).foreign_redeems.size(), 1u );
-   BOOST_CHECK_EQUAL( vid( db ).foreign_redeems[0].unlocked, true );
+   BOOST_CHECK_EQUAL( vid( db ).foreign_redeem_unlocked, true );
    BOOST_CHECK_EQUAL( vid( db ).frozen, false );
 }
 
@@ -368,7 +372,7 @@ BOOST_AUTO_TEST_CASE( missed_sla_freezes_and_reimburses_at_committed_rate )
 
    // The vault froze and the redeem was cleared.
    BOOST_CHECK_EQUAL( vid( db ).frozen, true );
-   BOOST_CHECK_EQUAL( vid( db ).foreign_redeems.size(), 0u );
+   BOOST_CHECK_EQUAL( vid( db ).foreign_redeem_pending, false );
 
    // The redeemer was reimbursed in bond terms at the committed rate:
    // 1000 foreign units at num 2 / den 1 = 2000 bond raw units.
@@ -507,6 +511,70 @@ BOOST_AUTO_TEST_CASE( h2_mint_refused_on_a_foreign_vault )
    db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx ); tx.sign( owner_key, db.get_chain_id() );
    BOOST_CHECK_THROW( PUSH_TX( db, tx ), fc::exception );
+}
+
+/// D09: the PRODUCTION publish path. A foreign record is published through
+/// oracle_foreign_publish_operation by an attestor with a live bond, reaches
+/// the quorum, waits out the guard delay, and is then consumed by the mint
+/// and the unlock. This is the only path that exercises the quorum, the
+/// delay queue, and the promotion proof together.
+BOOST_AUTO_TEST_CASE( production_publish_path_reaches_the_mint )
+{
+   build();
+   // Two attestors, so the quorum (minimum_producers 1 on this oracle) is
+   // reached by a single live attestation but the second proves the quorum
+   // filter (a slashed or departed producer must not count).
+   graphene::protocol::foreign_tx_value val;
+   val.chain = graphene::protocol::foreign_chain_id::bitcoin;
+   val.tx_id.hash[0] = 0xAB;
+   val.kind = graphene::protocol::foreign_tx_kind::lock;
+   val.amount = 1000;
+   val.foreign_asset_id = 0;
+   val.confirmation_height = 100;
+
+   // The attestor publishes through the real operation.
+   oracle_foreign_publish_operation pop;
+   pop.producer = attestor;
+   pop.oracle_id = oid;
+   pop.value = val;
+   signed_transaction ptx; ptx.operations.push_back( pop );
+   db.current_fee_schedule().set_fee( ptx.operations.back() );
+   set_expiration( db, ptx ); ptx.sign( attestor_key, db.get_chain_id() );
+   PUSH_TX( db, ptx );
+
+   // The record is queued, not promoted: the delay must elapse first.
+   BOOST_CHECK_EQUAL( vid( db ).foreign_redeem_pending, false );
+
+   // Wait out the guard delay, then publish again so the sweep runs.
+   generate_blocks( db.head_block_time()
+                    + db.get_global_properties().parameters.get_oracle_guard_delay_sec() + 60 );
+   oracle_foreign_publish_operation pop2;
+   pop2.producer = attestor;
+   pop2.oracle_id = oid;
+   pop2.value = val;
+   signed_transaction ptx2; ptx2.operations.push_back( pop2 );
+   db.current_fee_schedule().set_fee( ptx2.operations.back() );
+   set_expiration( db, ptx2 ); ptx2.sign( attestor_key, db.get_chain_id() );
+   PUSH_TX( db, ptx2 );
+
+   // The promoted record is now readable.
+   const auto got = h2_read_foreign_tx( db, oid, db.head_block_time(),
+                                        h2_price_liveness::live );
+   BOOST_REQUIRE( got.valid() );
+   BOOST_CHECK_EQUAL( got->amount, 1000 );
+
+   // And the mint consumes it.
+   vault_foreign_mint_operation op;
+   op.vault = vid;
+   op.deposit_id = val.tx_id;
+   op.amount = share_type( 1000 );
+   op.recipient = holder;
+   op.minter = owner;
+   signed_transaction mtx; mtx.operations.push_back( op );
+   db.current_fee_schedule().set_fee( mtx.operations.back() );
+   set_expiration( db, mtx ); mtx.sign( owner_key, db.get_chain_id() );
+   PUSH_TX( db, mtx );
+   BOOST_CHECK_EQUAL( db.get_balance( holder, pair_asset ).amount.value, 1000 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

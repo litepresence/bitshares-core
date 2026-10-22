@@ -125,6 +125,11 @@ share_type vault_foreign_challenge_operation::calculate_fee( const fee_params_t&
 
 void vault_foreign_mint_operation::validate()const
 {
+   // M03: the co-signer set is bounded by the vault authority member cap, so
+   // the operation cannot carry an unbounded signature list.
+   FC_ASSERT( co_signers.size() <= GRAPHENE_H2_VAULT_MAX_AUTHORITY_MEMBERS,
+              "Foreign mint names ${n} co-signers, above the ${m} authority-member cap",
+              ("n", co_signers.size())("m", GRAPHENE_H2_VAULT_MAX_AUTHORITY_MEMBERS) );
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
    FC_ASSERT( amount > 0, "Foreign mint amount must be positive" );
    FC_ASSERT( amount <= GRAPHENE_MAX_SHARE_SUPPLY,

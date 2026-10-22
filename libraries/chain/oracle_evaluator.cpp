@@ -464,6 +464,15 @@ object_id_type oracle_foreign_publish_evaluator::do_apply(
    // transaction id a historical quorum once attested.
    d.modify( *_oracle, [&op, now]( oracle_object& o ) {
       o.foreign_submissions[op.producer] = std::make_pair( now, op.value );
+      // D05: a producer who left the set no longer counts toward a quorum, so
+      // its row is pruned. The map is bounded by the producer set this way.
+      for( auto it = o.foreign_submissions.begin(); it != o.foreign_submissions.end(); )
+      {
+         if( o.options.producers.find( it->first ) == o.options.producers.end() )
+            it = o.foreign_submissions.erase( it );
+         else
+            ++it;
+      }
    } );
 
    uint16_t attesting = 0;
@@ -554,6 +563,7 @@ object_id_type oracle_foreign_publish_evaluator::do_apply(
             const uint16_t attesting_count = std::max<uint16_t>(
                   1, std::min<uint16_t>( attesting, 0xFFFF ) );
             d.modify( *g, [&ready, now, anchor, delay_sec, attesting_count]( guard_state_object& gg ) {
+               // N05: one promotion-log record per promoted value.
                h2_promotion_record rec;
                rec.promote_time = now;
                rec.producer_count = attesting_count;
@@ -565,9 +575,11 @@ object_id_type oracle_foreign_publish_evaluator::do_apply(
                gg.last_promo_time = now;
             } );
             d.modify( *_oracle, [&ready, now]( oracle_object& o ) {
-               // The NEWEST ripe record is the consumed value (the newest
-               // observation is the current truth); the older ones leave the
-               // queue without being consumed.
+               // N05: the NEWEST ripe record is the consumed value (the newest
+               // observation is the current truth, and the read path carries
+               // one record). The older ripe records leave the queue too: they
+               // were superseded, and promoting them would drop them
+               // silently.
                o.consumed_foreign_value = std::vector<protocol::foreign_tx_value>{ ready.back() };
                o.consumed_foreign_value_time = now;
                const size_t drop = std::min( ready.size(), o.foreign_pending_queue.size() );

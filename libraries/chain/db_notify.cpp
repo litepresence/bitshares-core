@@ -13,6 +13,7 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
+#include <graphene/chain/accs_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/transaction_history_object.hpp>
@@ -608,6 +609,20 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
            break;
         } case custom_object_type:
           break;
+        case accs_gateway_object_type: {
+           const auto* aobj = dynamic_cast<const accs_gateway_object*>(obj);
+           accounts.insert( aobj->declared_by );
+           break;
+        }
+        case accs_orderbook_object_type:
+          break;
+        case accs_offer_object_type: {
+           const auto* aobj = dynamic_cast<const accs_offer_object*>(obj);
+           accounts.insert( aobj->seller );
+           if( aobj->matched_buyer != account_id_type() )
+              accounts.insert( aobj->matched_buyer );
+           break;
+        }
         case proposal_object_type:{
            const auto* aobj = dynamic_cast<const proposal_object*>(obj);
            transaction_get_impacted_accs( aobj->proposed_transaction, accounts,

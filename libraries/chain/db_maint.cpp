@@ -45,6 +45,7 @@
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/accs_evaluator.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/vote_count.hpp>
@@ -1631,6 +1632,10 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    // after the X-06-pinned expiry/vault/tripwire prefix, whose relative
    // order is untouched. Pre-gateway no-op.
    process_h2_seasoning(*this);
+
+   // F2 ACCS: expire open offers past their expiry block, mark matched
+   // offers past SLA as claimable. Pre-gateway no-op.
+   process_accs_maintenance(*this);
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

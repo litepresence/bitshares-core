@@ -87,6 +87,8 @@ namespace graphene { namespace chain {
          void_result do_apply( const accs_fulfill_operation& op );
    };
 
+   void process_accs_maintenance( database& d );
+
    class accs_claim_griefing_evaluator : public evaluator<accs_claim_griefing_evaluator>
    {
       public:

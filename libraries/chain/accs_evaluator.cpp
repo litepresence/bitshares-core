@@ -157,19 +157,19 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
       if( ob.base_asset == op.base_asset && ob.chain_id == op.chain_id
           && ob.foreign_asset_id == op.foreign_asset_id )
       {
-         orderbook = const_cast<accs_orderbook_object*>( d.find( protocol::accs_orderbook_id_type( ob.id ) ) );
+         orderbook = const_cast<accs_orderbook_object*>( &*ob_idx.find( ob.id ) );
          break;
       }
    }
 
    if( !orderbook )
    {
-      orderbook = &d.create<accs_orderbook_object>( [&op]( accs_orderbook_object& o ) {
+      orderbook = const_cast<accs_orderbook_object*>( &d.create<accs_orderbook_object>( [&op]( accs_orderbook_object& o ) {
          o.base_asset = op.base_asset;
          o.chain_id = op.chain_id;
          o.foreign_asset_id = op.foreign_asset_id;
          o.next_offer_id = 1;
-      } );
+      } ) );
    }
 
    // Deduct base asset from seller (escrow)

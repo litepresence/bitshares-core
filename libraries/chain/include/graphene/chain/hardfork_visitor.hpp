@@ -86,7 +86,14 @@ struct hardfork_visitor {
                                               protocol::vault_foreign_mint_operation,
                                               protocol::vault_foreign_redeem_operation,
                                               protocol::vault_foreign_challenge_operation,
-                                              protocol::vault_foreign_unlock_operation >;
+                                              protocol::vault_foreign_unlock_operation,
+                                              protocol::accs_declare_gateway_operation,
+                                              protocol::accs_deactivate_gateway_operation,
+                                              protocol::accs_create_offer_operation,
+                                              protocol::accs_cancel_offer_operation,
+                                              protocol::accs_match_offer_operation,
+                                              protocol::accs_fulfill_operation,
+                                              protocol::accs_claim_griefing_operation >;
    using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
                                             protocol::oracle_bond_release_operation,
                                             protocol::vault_resolve_operation,

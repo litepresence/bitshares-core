@@ -508,6 +508,34 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // attestor
    }
+   void operator()( const accs_declare_gateway_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // committee_member
+   }
+   void operator()( const accs_deactivate_gateway_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // committee_member
+   }
+   void operator()( const accs_create_offer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // seller
+   }
+   void operator()( const accs_cancel_offer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // seller
+   }
+   void operator()( const accs_match_offer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // buyer
+   }
+   void operator()( const accs_fulfill_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // publisher
+   }
+   void operator()( const accs_claim_griefing_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimer
+   }
    void operator()( const vault_foreign_redeem_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // redeemer

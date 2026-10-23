@@ -69,6 +69,8 @@
 #include <graphene/chain/bond_evaluator.hpp>
 #include <graphene/chain/challenge_evaluator.hpp>
 #include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/accs_evaluator.hpp>
+#include <graphene/chain/accs_object.hpp>
 #include <graphene/chain/h2_economics_evaluator.hpp>
 #include <graphene/chain/h2_economics_object.hpp>
 #include <graphene/chain/issuance_evaluator.hpp>
@@ -187,6 +189,13 @@ void database::initialize_evaluators()
    register_evaluator<vault_foreign_unlock_evaluator>();
    register_evaluator<oracle_foreign_publish_evaluator>();
    register_evaluator<vault_foreign_redeem_evaluator>();
+   register_evaluator<accs_declare_gateway_evaluator>();
+   register_evaluator<accs_deactivate_gateway_evaluator>();
+   register_evaluator<accs_create_offer_evaluator>();
+   register_evaluator<accs_cancel_offer_evaluator>();
+   register_evaluator<accs_match_offer_evaluator>();
+   register_evaluator<accs_fulfill_evaluator>();
+   register_evaluator<accs_claim_griefing_evaluator>();
    register_evaluator<pair_freeze_evaluator>();
    register_evaluator<winddown_claim_evaluator>();
    register_evaluator<oracle_fallback_set_evaluator>();
@@ -238,6 +247,9 @@ void database::initialize_indexes()
    add_index< primary_index<reward_pool_index> >();
    add_index< primary_index<guard_state_index> >();
    add_index< primary_index<tripwire_index> >();
+   add_index< primary_index<accs_gateway_index> >();
+   add_index< primary_index<accs_orderbook_index> >();
+   add_index< primary_index<accs_offer_index> >();
    add_index< primary_index<recovery_state_index> >();
    add_index< primary_index<seasoning_record_index> >();
    add_index< primary_index<reserve_index> >();

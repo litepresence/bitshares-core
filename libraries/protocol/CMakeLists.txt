@@ -38,6 +38,7 @@ list(APPEND SOURCES account.cpp
                     vault_ops.cpp
                     challenge_ops.cpp
                     vault_lifecycle_ops.cpp
+                    accs_ops.cpp
                     h2_economics.cpp
                     issuance_ops.cpp
                     seasoning_ops.cpp

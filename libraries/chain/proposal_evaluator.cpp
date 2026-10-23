@@ -512,6 +512,27 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::vault_foreign_redeem_operation&) const {
       h2_require_gateway_leg(block_time);
    }
+   void operator()(const graphene::chain::accs_declare_gateway_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_deactivate_gateway_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_create_offer_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_cancel_offer_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_match_offer_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_fulfill_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_claim_griefing_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
 
    // loop and self visit in proposals
    void operator()(const graphene::chain::proposal_create_operation &v) const {

@@ -399,6 +399,9 @@ GRAPHENE_DEFINE_IDS(protocol, protocol_ids, /*protocol objects are not prefixed*
                      /* 1.36.x */ (seasoning)
                      /* 1.37.x */ (reserve)
                      /* 1.38.x */ (offset_pool)
+                     /* 1.39.x */ (accs_gateway)
+                     /* 1.40.x */ (accs_orderbook)
+                     /* 1.41.x */ (accs_offer)
                      )
 
 FC_REFLECT(graphene::protocol::public_key_type, (key_data))

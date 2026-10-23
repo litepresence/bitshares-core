@@ -67,8 +67,8 @@ class accs_orderbook_object : public abstract_object<accs_orderbook_object, prot
       asset_id_type base_asset;          ///< BitShares asset being sold
       uint8_t       chain_id = 0;        ///< Foreign chain
       std::string   foreign_asset_id;    ///< Foreign token identifier
-      std::vector<uint64_t> open_offers;    ///< Offer IDs in open state
-      std::vector<uint64_t> matched_offers; ///< Offer IDs in matched state
+      std::vector<protocol::accs_offer_id_type> open_offers;    ///< Offer IDs in open state
+      std::vector<protocol::accs_offer_id_type> matched_offers; ///< Offer IDs in matched state
       uint64_t      next_offer_id = 1;   ///< Monotonic counter
 };
 

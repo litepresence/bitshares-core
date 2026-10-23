@@ -28,6 +28,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/account_object.hpp>
 #include <graphene/chain/asset_object.hpp>
+#include <graphene/chain/balance_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
 
 #include <graphene/chain/hardfork.hpp>
@@ -38,11 +39,13 @@ void_result accs_declare_gateway_evaluator::do_evaluate( const accs_declare_gate
 { try {
    const database& d = db();
 
-   FC_ASSERT( nullptr != d.find( op.committee_member ),
-              "Committee member ${a} does not exist", ("a", op.committee_member) );
-
-   const committee_member_object* cm = d.find( op.committee_member );
-   FC_ASSERT( nullptr != cm, "Not a committee member" );
+   const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   const auto member_itr = member_idx.find( op.committee_member );
+   FC_ASSERT( member_itr != member_idx.end(),
+              "Account ${a} is not a registered committee member", ("a", op.committee_member) );
+   const auto& elected = d.get_global_properties().active_committee_members;
+   FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+              "Account ${a} is registered but not on the elected committee", ("a", op.committee_member) );
 
    // Check no existing active gateway for this (chain_id, foreign_asset_id) pair
    const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
@@ -96,7 +99,7 @@ void process_accs_maintenance( database& d )
       if( ob )
       {
          d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-            auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->offer_id );
+            auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->id );
             if( it != o.open_offers.end() ) o.open_offers.erase( it );
          } );
       }
@@ -126,9 +129,8 @@ void_result accs_create_offer_evaluator::do_evaluate( const accs_create_offer_op
               ("c", op.chain_id)("a", op.foreign_asset_id) );
 
    // Check seller has sufficient balance
-   const auto& bal_idx = d.get_index_type<balance_index>().indices();
-   // Simplified: just check the account exists for now
-   // Full balance check would require balance_object lookup
+   FC_ASSERT( d.get_balance( op.seller, op.base_asset ) >= asset( op.base_amount, op.base_asset ),
+              "Seller has insufficient balance for the offer" );
 
    // Expiry validation
    if( op.expiry > 0 )
@@ -193,7 +195,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
    // Add to orderbook's open offers
    // (modify orderbook)
    d.modify( *orderbook, [&new_offer]( accs_orderbook_object& o ) {
-      o.open_offers.push_back( new_offer.offer_id );
+      o.open_offers.push_back( new_offer.id );
    } );
 
    return new_offer.id;
@@ -229,7 +231,7 @@ void_result accs_cancel_offer_evaluator::do_apply( const accs_cancel_offer_opera
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->offer_id );
+         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->id );
          if( it != o.open_offers.end() ) o.open_offers.erase( it );
       } );
    }
@@ -273,9 +275,9 @@ void_result accs_match_offer_evaluator::do_apply( const accs_match_offer_operati
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->offer_id );
+         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->id );
          if( it != o.open_offers.end() ) o.open_offers.erase( it );
-         o.matched_offers.push_back( offer->offer_id );
+         o.matched_offers.push_back( offer->id );
       } );
    }
 
@@ -317,7 +319,7 @@ void_result accs_fulfill_evaluator::do_apply( const accs_fulfill_operation& op )
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), offer->offer_id );
+         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), offer->id );
          if( it != o.matched_offers.end() ) o.matched_offers.erase( it );
       } );
    }
@@ -359,7 +361,7 @@ void_result accs_claim_griefing_evaluator::do_apply( const accs_claim_griefing_o
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), offer->offer_id );
+         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), offer->id );
          if( it != o.matched_offers.end() ) o.matched_offers.erase( it );
       } );
    }
@@ -370,7 +372,13 @@ void_result accs_claim_griefing_evaluator::do_apply( const accs_claim_griefing_o
 void_result accs_deactivate_gateway_evaluator::do_evaluate( const accs_deactivate_gateway_operation& op )
 { try {
    const database& d = db();
-   FC_ASSERT( nullptr != d.find( op.committee_member ), "Committee member does not exist" );
+   const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   const auto member_itr = member_idx.find( op.committee_member );
+   FC_ASSERT( member_itr != member_idx.end(),
+              "Account ${a} is not a registered committee member", ("a", op.committee_member) );
+   const auto& elected = d.get_global_properties().active_committee_members;
+   FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+              "Account ${a} is registered but not on the elected committee", ("a", op.committee_member) );
 
    // Find active gateway
    bool found = false;

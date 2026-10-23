@@ -120,7 +120,7 @@ namespace graphene { namespace protocol {
 
       asset            fee;
       account_id_type  seller;           ///< Must equal offer.seller
-      uint64_t         offer_id;         ///< The offer to cancel
+      accs_offer_id_type  offer_id;         ///< The offer to cancel
       extensions_type  extensions;        ///< Appended-last rule
 
       account_id_type fee_payer()const { return seller; }
@@ -138,7 +138,7 @@ namespace graphene { namespace protocol {
 
       asset            fee;
       account_id_type  buyer;            ///< Bob; pays fee + griefing bond
-      uint64_t         offer_id;        ///< The offer to match
+      accs_offer_id_type  offer_id;        ///< The offer to match
       share_type       griefing_bond;    ///< Bob's bond (must be >= minimum)
       extensions_type  extensions;       ///< Appended-last rule
 
@@ -161,7 +161,7 @@ namespace graphene { namespace protocol {
 
       asset            fee;
       account_id_type  publisher;        ///< The attestor publishing the proof
-      uint64_t         offer_id;        ///< The matched offer
+      accs_offer_id_type  offer_id;        ///< The matched offer
       std::string      foreign_tx_hash;  ///< Foreign chain transaction hash
       share_type       amount;           ///< Foreign amount sent (must equal offer.foreign_amount)
       extensions_type  extensions;       ///< Appended-last rule
@@ -181,7 +181,7 @@ namespace graphene { namespace protocol {
 
       asset            fee;
       account_id_type  claimer;          ///< Alice; must equal offer.seller
-      uint64_t         offer_id;        ///< The matched offer
+      accs_offer_id_type  offer_id;        ///< The matched offer
       extensions_type  extensions;       ///< Appended-last rule
 
       account_id_type fee_payer()const { return claimer; }

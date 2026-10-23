@@ -39,7 +39,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_declare_gateway_operation;
 
          void_result    do_evaluate( const accs_declare_gateway_operation& op );
-         object_id_type do_apply( const accs_declare_gateway_operation& op );
+         object_id_type do_apply( const accs_declare_gateway_operation& op ) const;
    };
 
    class accs_deactivate_gateway_evaluator : public evaluator<accs_deactivate_gateway_evaluator>
@@ -48,7 +48,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_deactivate_gateway_operation;
 
          void_result do_evaluate( const accs_deactivate_gateway_operation& op );
-         void_result do_apply( const accs_deactivate_gateway_operation& op );
+         void_result do_apply( const accs_deactivate_gateway_operation& op ) const;
    };
 
    class accs_create_offer_evaluator : public evaluator<accs_create_offer_evaluator>
@@ -57,7 +57,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_create_offer_operation;
 
          void_result    do_evaluate( const accs_create_offer_operation& op );
-         object_id_type do_apply( const accs_create_offer_operation& op );
+         object_id_type do_apply( const accs_create_offer_operation& op ) const;
    };
 
    class accs_cancel_offer_evaluator : public evaluator<accs_cancel_offer_evaluator>
@@ -66,7 +66,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_cancel_offer_operation;
 
          void_result do_evaluate( const accs_cancel_offer_operation& op );
-         void_result do_apply( const accs_cancel_offer_operation& op );
+         void_result do_apply( const accs_cancel_offer_operation& op ) const;
    };
 
    class accs_match_offer_evaluator : public evaluator<accs_match_offer_evaluator>
@@ -75,7 +75,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_match_offer_operation;
 
          void_result do_evaluate( const accs_match_offer_operation& op );
-         void_result do_apply( const accs_match_offer_operation& op );
+         void_result do_apply( const accs_match_offer_operation& op ) const;
    };
 
    class accs_fulfill_evaluator : public evaluator<accs_fulfill_evaluator>
@@ -84,7 +84,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_fulfill_operation;
 
          void_result do_evaluate( const accs_fulfill_operation& op );
-         void_result do_apply( const accs_fulfill_operation& op );
+         void_result do_apply( const accs_fulfill_operation& op ) const;
    };
 
    void process_accs_maintenance( database& d );
@@ -95,7 +95,7 @@ namespace graphene { namespace chain {
          using operation_type = accs_claim_griefing_operation;
 
          void_result do_evaluate( const accs_claim_griefing_operation& op );
-         void_result do_apply( const accs_claim_griefing_operation& op );
+         void_result do_apply( const accs_claim_griefing_operation& op ) const;
    };
 
 } } // graphene::chain

@@ -87,7 +87,7 @@ void process_accs_maintenance( database& d )
    for( const auto& offer : offer_idx )
    {
       if( offer.state == 0 && offer.expiry > 0 && now_block >= offer.expiry )
-         to_expire.push_back( offer.id );
+         to_expire.push_back( protocol::accs_offer_id_type( offer.id ) );
    }
    for( protocol::accs_offer_id_type oid : to_expire )
    {
@@ -95,11 +95,11 @@ void process_accs_maintenance( database& d )
       if( !offer || offer->state != 0 ) continue;
       d.adjust_balance( offer->seller, asset( offer->base_amount, offer->base_asset ) );
       d.modify( *offer, []( accs_offer_object& o ) { o.state = 3; } );
-      const accs_orderbook_object* ob = d.find( offer->orderbook );
+      const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
       if( ob )
       {
          d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-            auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->id );
+            auto it = std::find( o.open_offers.begin(), o.open_offers.end(), protocol::accs_offer_id_type( offer->id ) );
             if( it != o.open_offers.end() ) o.open_offers.erase( it );
          } );
       }
@@ -157,7 +157,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
       if( ob.base_asset == op.base_asset && ob.chain_id == op.chain_id
           && ob.foreign_asset_id == op.foreign_asset_id )
       {
-         orderbook = const_cast<accs_orderbook_object*>( d.find( ob.id ) );
+         orderbook = const_cast<accs_orderbook_object*>( d.find( protocol::accs_orderbook_id_type( ob.id ) ) );
          break;
       }
    }
@@ -195,7 +195,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
    // Add to orderbook's open offers
    // (modify orderbook)
    d.modify( *orderbook, [&new_offer]( accs_orderbook_object& o ) {
-      o.open_offers.push_back( new_offer.id );
+      o.open_offers.push_back( protocol::accs_offer_id_type( new_offer.id ) );
    } );
 
    return new_offer.id;
@@ -227,11 +227,11 @@ void_result accs_cancel_offer_evaluator::do_apply( const accs_cancel_offer_opera
    } );
 
    // Remove from orderbook's open offers
-   const accs_orderbook_object* ob = d.find( offer->orderbook );
+   const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->id );
+         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), protocol::accs_offer_id_type( offer->id ) );
          if( it != o.open_offers.end() ) o.open_offers.erase( it );
       } );
    }
@@ -271,13 +271,13 @@ void_result accs_match_offer_evaluator::do_apply( const accs_match_offer_operati
    } );
 
    // Move from open to matched in orderbook
-   const accs_orderbook_object* ob = d.find( offer->orderbook );
+   const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), offer->id );
+         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), protocol::accs_offer_id_type( offer->id ) );
          if( it != o.open_offers.end() ) o.open_offers.erase( it );
-         o.matched_offers.push_back( offer->id );
+         o.matched_offers.push_back( protocol::accs_offer_id_type( offer->id ) );
       } );
    }
 
@@ -315,11 +315,11 @@ void_result accs_fulfill_evaluator::do_apply( const accs_fulfill_operation& op )
    } );
 
    // Remove from orderbook's matched offers
-   const accs_orderbook_object* ob = d.find( offer->orderbook );
+   const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), offer->id );
+         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), protocol::accs_offer_id_type( offer->id ) );
          if( it != o.matched_offers.end() ) o.matched_offers.erase( it );
       } );
    }
@@ -357,11 +357,11 @@ void_result accs_claim_griefing_evaluator::do_apply( const accs_claim_griefing_o
    } );
 
    // Remove from orderbook's matched offers
-   const accs_orderbook_object* ob = d.find( offer->orderbook );
+   const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
    if( ob )
    {
       d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), offer->id );
+         auto it = std::find( o.matched_offers.begin(), o.matched_offers.end(), protocol::accs_offer_id_type( offer->id ) );
          if( it != o.matched_offers.end() ) o.matched_offers.erase( it );
       } );
    }

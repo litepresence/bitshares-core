@@ -62,7 +62,7 @@ void_result accs_declare_gateway_evaluator::do_evaluate( const accs_declare_gate
 object_id_type accs_declare_gateway_evaluator::do_apply( const accs_declare_gateway_operation& op ) const
 { try {
    database& d = db();
-   const auto& new_gw = d.create<accs_gateway_object>( [&op]( accs_gateway_object& g ) {
+   const auto& new_gw = d.create<accs_gateway_object>( [&op, &d]( accs_gateway_object& g ) {
       g.chain_id = op.chain_id;
       g.foreign_asset_id = op.foreign_asset_id;
       g.declared_by = op.committee_member;
@@ -83,13 +83,13 @@ void process_accs_maintenance( database& d )
    const uint32_t now_block = d.head_block_num();
 
    const auto& offer_idx = d.get_index_type<accs_offer_index>().indices();
-   std::vector<object_id_type> to_expire;
+   std::vector<protocol::accs_offer_id_type> to_expire;
    for( const auto& offer : offer_idx )
    {
       if( offer.state == 0 && offer.expiry > 0 && now_block >= offer.expiry )
          to_expire.push_back( offer.id );
    }
-   for( auto oid : to_expire )
+   for( protocol::accs_offer_id_type oid : to_expire )
    {
       const accs_offer_object* offer = d.find( oid );
       if( !offer || offer->state != 0 ) continue;
@@ -152,12 +152,12 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
    // Find or create orderbook for (base_asset, chain_id, foreign_asset_id)
    accs_orderbook_object* orderbook = nullptr;
    const auto& ob_idx = d.get_index_type<accs_orderbook_index>().indices();
-   for( auto& ob : ob_idx )
+   for( const auto& ob : ob_idx )
    {
       if( ob.base_asset == op.base_asset && ob.chain_id == op.chain_id
           && ob.foreign_asset_id == op.foreign_asset_id )
       {
-         orderbook = const_cast<accs_orderbook_object*>( &ob );
+         orderbook = const_cast<accs_orderbook_object*>( d.find( ob.id ) );
          break;
       }
    }

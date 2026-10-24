@@ -294,9 +294,6 @@ processed_transaction database::_push_transaction( const precomputable_transacti
    auto temp_session = _undo_db.start_undo_session();
    auto processed_trx = _apply_transaction( trx );
    _pending_tx.push_back(processed_trx);
-
-   // notify_changed_objects();
-   // The transaction applied successfully. Merge its changes into the pending block session.
    temp_session.merge();
 
    // notify anyone listening to pending transactions

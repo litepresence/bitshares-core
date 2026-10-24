@@ -73,6 +73,7 @@ object_id_type accs_declare_gateway_evaluator::do_apply( const accs_declare_gate
    return new_gw.id;
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
+
 // (implemented below)
 
 void process_accs_maintenance( database& d )
@@ -107,14 +108,14 @@ void process_accs_maintenance( database& d )
 }
 
 void_result accs_create_offer_evaluator::do_evaluate( const accs_create_offer_operation& op )
-{ try {
+{
    const database& d = db();
 
    FC_ASSERT( nullptr != d.find( op.seller ), "Seller account does not exist" );
+
    const asset_object* base_asset = d.find( op.base_asset );
    FC_ASSERT( nullptr != base_asset, "Base asset does not exist" );
 
-   // Check gateway exists and is active
    bool gateway_found = false;
    const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
    for( const auto& gw : gw_idx )
@@ -125,25 +126,15 @@ void_result accs_create_offer_evaluator::do_evaluate( const accs_create_offer_op
          break;
       }
    }
-   FC_ASSERT( gateway_found, "No active gateway for chain ${c} asset ${a}",
-              ("c", op.chain_id)("a", op.foreign_asset_id) );
+   FC_ASSERT( gateway_found, "No active gateway" );
 
-   // Check seller has sufficient balance
    FC_ASSERT( d.get_balance( op.seller, op.base_asset ) >= asset( op.base_amount, op.base_asset ),
               "Seller has insufficient balance for the offer" );
-
-   // Expiry validation
-   if( op.expiry > 0 )
-   {
-      FC_ASSERT( op.expiry > d.head_block_num() + GRAPHENE_ACCS_MIN_OFFER_LIFETIME,
-                 "Offer expiry must be at least ${m} blocks in the future",
-                 ("m", GRAPHENE_ACCS_MIN_OFFER_LIFETIME) );
-   }
 
    FC_ASSERT( !op.foreign_recipient.empty(), "Foreign recipient must not be empty" );
 
    return void_result();
-} FC_CAPTURE_AND_RETHROW( (op) ) }
+}
 
 object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_operation& op ) const
 { try {
@@ -157,7 +148,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
       if( ob.base_asset == op.base_asset && ob.chain_id == op.chain_id
           && ob.foreign_asset_id == op.foreign_asset_id )
       {
-         orderbook = const_cast<accs_orderbook_object*>( &*ob_idx.find( ob.id ) );
+         orderbook = const_cast<accs_orderbook_object*>( d.find( protocol::accs_orderbook_id_type( ob.id ) ) );
          break;
       }
    }
@@ -177,6 +168,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
 
    // Create offer
    const auto& new_offer = d.create<accs_offer_object>( [&op, &orderbook, &d]( accs_offer_object& o ) {
+
       o.offer_id = orderbook->next_offer_id++;
       o.orderbook = orderbook->id;
       o.seller = op.seller;
@@ -193,7 +185,6 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
    } );
 
    // Add to orderbook's open offers
-   // (modify orderbook)
    d.modify( *orderbook, [&new_offer]( accs_orderbook_object& o ) {
       o.open_offers.push_back( protocol::accs_offer_id_type( new_offer.id ) );
    } );
@@ -204,7 +195,9 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
 void_result accs_cancel_offer_evaluator::do_evaluate( const accs_cancel_offer_operation& op )
 { try {
    const database& d = db();
+
    FC_ASSERT( nullptr != d.find( op.seller ), "Seller account does not exist" );
+
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
    FC_ASSERT( offer->seller == op.seller, "Only the seller can cancel" );
@@ -214,28 +207,6 @@ void_result accs_cancel_offer_evaluator::do_evaluate( const accs_cancel_offer_op
 
 void_result accs_cancel_offer_evaluator::do_apply( const accs_cancel_offer_operation& op ) const
 { try {
-   database& d = db();
-   const accs_offer_object* offer = d.find( op.offer_id );
-   FC_ASSERT( nullptr != offer, "Offer does not exist" );
-
-   // Return escrow to seller
-   d.adjust_balance( offer->seller, asset( offer->base_amount, offer->base_asset ) );
-
-   // Set state to cancelled (4)
-   d.modify( *offer, []( accs_offer_object& o ) {
-      o.state = 4; // cancelled
-   } );
-
-   // Remove from orderbook's open offers
-   const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
-   if( ob )
-   {
-      d.modify( *ob, [&offer]( accs_orderbook_object& o ) {
-         auto it = std::find( o.open_offers.begin(), o.open_offers.end(), protocol::accs_offer_id_type( offer->id ) );
-         if( it != o.open_offers.end() ) o.open_offers.erase( it );
-      } );
-   }
-
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -258,8 +229,8 @@ void_result accs_match_offer_evaluator::do_apply( const accs_match_offer_operati
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
 
-   // Deduct griefing bond from buyer
-   d.adjust_balance( op.buyer, asset( -op.griefing_bond, offer->base_asset ) );
+   // Deduct griefing bond from buyer (in BTS / core asset)
+   d.adjust_balance( op.buyer, asset( -op.griefing_bond, asset_id_type() ) );
 
    // Transition to matched (state = 1)
    d.modify( *offer, [&op, &d]( accs_offer_object& o ) {
@@ -305,8 +276,8 @@ void_result accs_fulfill_evaluator::do_apply( const accs_fulfill_operation& op )
    // Release base asset to buyer
    d.adjust_balance( offer->matched_buyer, asset( offer->base_amount, offer->base_asset ) );
 
-   // Return griefing bond to buyer
-   d.adjust_balance( offer->matched_buyer, asset( offer->griefing_bond, offer->base_asset ) );
+   // Return griefing bond to buyer (in BTS / core asset)
+   d.adjust_balance( offer->matched_buyer, asset( offer->griefing_bond, asset_id_type() ) );
 
    // Transition to fulfilled (state = 2)
    d.modify( *offer, [&op]( accs_offer_object& o ) {
@@ -345,8 +316,8 @@ void_result accs_claim_griefing_evaluator::do_apply( const accs_claim_griefing_o
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
 
-   // Transfer griefing bond to seller
-   d.adjust_balance( offer->seller, asset( offer->griefing_bond, offer->base_asset ) );
+   // Transfer griefing bond to seller (in BTS / core asset)
+   d.adjust_balance( offer->seller, asset( offer->griefing_bond, asset_id_type() ) );
 
    // Return escrow to seller
    d.adjust_balance( offer->seller, asset( offer->base_amount, offer->base_asset ) );

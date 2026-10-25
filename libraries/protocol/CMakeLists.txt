@@ -3,6 +3,7 @@ file(GLOB HEADERS "include/graphene/protocol/*.hpp")
 list(APPEND SOURCES account.cpp
                     assert.cpp
                     asset_ops.cpp
+                    accs_ops.cpp
                     block.cpp
                     confidential.cpp
                     chain_parameters.cpp

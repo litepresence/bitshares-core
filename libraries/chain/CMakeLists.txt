@@ -52,6 +52,7 @@ add_library( graphene_chain
              oracle_object.cpp
              bond_evaluator.cpp
              accs_evaluator.cpp
+             f_activation.cpp
              h2_economics.cpp
              accs_object.cpp
              balance_evaluator.cpp

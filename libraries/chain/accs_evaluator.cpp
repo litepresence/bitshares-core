@@ -23,6 +23,7 @@
  */
 #include <graphene/chain/accs_evaluator.hpp>
 #include <graphene/chain/accs_object.hpp>
+#include <graphene/chain/f_activation.hpp>
 
 #include <algorithm>
 #include <cstring>
@@ -47,7 +48,7 @@ namespace graphene { namespace chain {
 void_result accs_declare_gateway_evaluator::do_evaluate( const accs_declare_gateway_operation& op )
 { try {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
 
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
    const auto member_itr = member_idx.find( op.committee_member );
@@ -170,7 +171,7 @@ object_id_type accs_declare_gateway_evaluator::do_apply( const accs_declare_gate
 
 void process_accs_maintenance( database& d )
 {
-   if( !HARDFORK_H2_GATEWAY_PASSED( d.head_block_time() ) )
+   if( !HARDFORK_F_ACCS_PASSED( d.head_block_time() ) )
       return;
 
    const uint32_t now_block = d.head_block_num();
@@ -235,7 +236,7 @@ void process_accs_maintenance( database& d )
 void_result accs_create_offer_evaluator::do_evaluate( const accs_create_offer_operation& op )
 {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
 
    FC_ASSERT( nullptr != d.find( op.seller ), "Seller account does not exist" );
 
@@ -351,7 +352,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
 void_result accs_cancel_offer_evaluator::do_evaluate( const accs_cancel_offer_operation& op )
 { try {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
 
    FC_ASSERT( nullptr != d.find( op.seller ), "Seller account does not exist" );
 
@@ -397,7 +398,7 @@ void_result accs_cancel_offer_evaluator::do_apply( const accs_cancel_offer_opera
 void_result accs_match_offer_evaluator::do_evaluate( const accs_match_offer_operation& op )
 { try {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
    FC_ASSERT( nullptr != d.find( op.buyer ), "Buyer account does not exist" );
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
@@ -458,7 +459,7 @@ void_result accs_match_offer_evaluator::do_apply( const accs_match_offer_operati
 void_result accs_fulfill_evaluator::do_evaluate( const accs_fulfill_operation& op )
 { try {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
    FC_ASSERT( nullptr != d.find( op.publisher ), "Publisher does not exist" );
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
@@ -609,7 +610,7 @@ void_result accs_fulfill_evaluator::do_apply( const accs_fulfill_operation& op )
 void_result accs_claim_griefing_evaluator::do_evaluate( const accs_claim_griefing_operation& op )
 { try {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
    FC_ASSERT( nullptr != d.find( op.claimer ), "Claimer account does not exist" );
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
@@ -660,7 +661,7 @@ void_result accs_claim_griefing_evaluator::do_apply( const accs_claim_griefing_o
 void_result accs_deactivate_gateway_evaluator::do_evaluate( const accs_deactivate_gateway_operation& op )
 { try {
    const database& d = db();
-   h2_require_gateway_leg( d.head_block_time() );
+   f_require_accs_leg( d.head_block_time() );
    const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
    const auto member_itr = member_idx.find( op.committee_member );
    FC_ASSERT( member_itr != member_idx.end(),

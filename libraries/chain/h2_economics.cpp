@@ -37,6 +37,7 @@
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/chain/oracle_substrate.hpp>
 #include <graphene/chain/winddown_object.hpp>
 #include <graphene/protocol/vault_lifecycle_ops.hpp>
 
@@ -90,108 +91,6 @@ namespace {
       if( sum > uint256_t( uint64_t( GRAPHENE_MAX_SHARE_SUPPLY ) ) )
          return share_type( GRAPHENE_MAX_SHARE_SUPPLY );
       return share_type( int64_t( uint64_t( sum ) ) );
-   }
-
-   const guard_state_object* h2_find_guard( const database& d, oracle_id_type oid )
-   {
-      const auto& idx = d.get_index_type<guard_state_index>().indices().get<by_guard_oracle>();
-      const auto itr = idx.find( oid );
-      return itr == idx.end() ? nullptr : &*itr;
-   }
-
-    /// Bonded-live gate (X-01): does @p oracle have a non-empty bonded live
-    /// set at @p now (unslashed producer bond + live submission + current
-    /// producer entry)? Extracted from the reward live-set computation below
-    /// so reads, the tripwire feed leg, and payouts share one definition.
-    /// H1-style oracles (live values, no bonds) report false: H2 reads fail
-    /// closed without bonded backing, never on unbonded medians.
-    ///
-    /// R3-02 hardening (fail-closed tightenings only):
-    /// - Producer weight must exceed 0: a zero-weight entry backs nothing
-    ///   (the reward path pays it zero), so it must not satisfy the gate.
-    /// - The bond must still be locked: release deletes the object
-    ///   (oracle_bond_release_evaluator::do_apply in bond_evaluator.cpp), so
-    ///   a live object means unreleased — but vesting withdrawals bypass the
-    ///   object, so the referenced vesting balance must still cover
-    ///   bond_amount, and @p now must precede unlock_time (releasable-but-
-    ///   unreleased bonds do not back reads; the advancing-unlock rule keeps
-    ///   active publishers ahead of their unlock).
-    /// - Cost: one bounded scan per call (at most
-    ///   GRAPHENE_ORACLE_MAX_PRODUCERS bond rows: one bond exists per
-    ///   (oracle, producer) by lock refusal, but removed producers' bonds
-    ///   linger (no delete on producer removal), so MORE than 32 rows per
-    ///   oracle is reachable and the 33rd+ row truncates unread — a live
-    ///   producer past the cap backs no read and earns nothing (fail-closed
-    ///   self-grief: only the owner can strand rows by churning the producer
-    ///   set, and the strand is committee-visible on-chain). The reward
-    ///   live-set below shares this exact bound and truncation, so reads
-    ///   and payouts never disagree on who is live. Callers pay the scan
-    ///   once per oracle read (h2_read_consumed_price) and twice per pair
-    ///   per sweep through the tripwire feed leg (primary + single backup),
-    ///   i.e. worst case O(oracles x producers) per sweep.
-    bool h2_oracle_has_bonded_live_set( const database& d, const oracle_object& oracle,
-                                        time_point_sec now )
-    {
-       const auto& bond_idx = d.get_index_type<producer_bond_index>()
-                                 .indices().get<by_oracle_producer>();
-       size_t scanned = 0;
-       for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oracle_id_type( oracle.id ) ) );
-             bitr != bond_idx.end() && bitr->oracle == oracle.id; ++bitr )
-       {
-          if( ++scanned > GRAPHENE_ORACLE_MAX_PRODUCERS )
-             break; // structural cap (see above): unreachable, bounds the read
-          if( bitr->slashed )
-             continue;
-          const auto pitr = oracle.options.producers.find( bitr->producer );
-          if( pitr == oracle.options.producers.end() )
-             continue;
-          if( pitr->second.weight == 0 )
-             continue; // R3-02: zero weight backs nothing (reward path pays zero)
-          if( bitr->bond_amount <= share_type( 0 ) || now >= bitr->unlock_time )
-             continue; // R3-02: releasable or unfunded-record bonds do not back reads
-           const vesting_balance_object* vb = d.find( bitr->vesting_balance );
-           if( vb == nullptr || vb->balance.asset_id != asset_id_type()
-               || vb->balance.amount < bitr->bond_amount )
-              continue; // R3-02: vesting withdrawals bypass the bond object;
-                        // R4-03: BTS-only is enforced at lock (bond_evaluator),
-                        // this asset check is belt and suspenders
-          // A live submission: the price path's map, or (for a foreign
-          // transaction oracle) the foreign attestation map. A foreign
-          // attestor that never published has no live submission, so the
-          // bonded live set does not count it.
-          const auto sitr = oracle.submissions.find( bitr->producer );
-          const auto fitr = oracle.foreign_submissions.find( bitr->producer );
-          const bool price_live = ( sitr != oracle.submissions.end()
-                                    && oracle.is_submission_live( sitr->second.first, now ) );
-          const bool foreign_live = ( fitr != oracle.foreign_submissions.end()
-                                      && oracle.is_submission_live( fitr->second.first, now ) );
-          if( !price_live && !foreign_live )
-             continue;
-          return true;
-       }
-       return false;
-    }
-
-   /// Whether the oracle has at least one producer with a non-slashed bond,
-   /// regardless of liveness. The settlement path (age_exempt) drops the
-   /// live-submission part of the bonded live set (a dead feed has no live
-   /// submission) but keeps this gate, so an oracle that was never bonded
-   /// (no bond rows at all) has no settlement price. Unbonded oracles can
-   /// never move bonded medians, debt taps, or wind-down seats.
-   bool h2_oracle_has_any_bond( const database& d, const oracle_object& oracle )
-   {
-      const auto& bond_idx = d.get_index_type<producer_bond_index>()
-                                .indices().get<by_oracle_producer>();
-      for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oracle_id_type( oracle.id ) ) );
-            bitr != bond_idx.end() && bitr->oracle == oracle.id; ++bitr )
-      {
-         if( bitr->slashed )
-            continue;
-         if( bitr->bond_amount <= share_type( 0 ) )
-            continue;
-         return true;
-      }
-      return false;
    }
 
    /// Interval-anchored window for @p now (H1 guard_epoch precedent).

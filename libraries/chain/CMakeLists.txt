@@ -48,6 +48,7 @@ add_library( graphene_chain
              challenge_evaluator.cpp
              vault_lifecycle_evaluator.cpp
              accs_evaluator.cpp
+             oracle_substrate.cpp
              h2_economics.cpp
              issuance.cpp
              h2_activation.cpp

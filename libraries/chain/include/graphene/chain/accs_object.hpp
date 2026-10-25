@@ -51,6 +51,9 @@ class accs_gateway_object : public abstract_object<accs_gateway_object, protocol
    public:
       uint8_t     chain_id = 0;          ///< Foreign chain enum
       std::string foreign_asset_id;      ///< Empty = native asset
+      uint8_t     foreign_asset_code = 0; ///< F1 foreign asset index (0 = native)
+      oracle_id_type oracle_id;          ///< Bound F1 foreign-tx oracle
+      std::vector<protocol::foreign_tx_id> consumed_tx_hashes; ///< Durable replay guard (append-only)
       account_id_type declared_by;       ///< Committee member
       uint32_t    declared_at = 0;       ///< Block number
       uint32_t    min_confirmations = 6; ///< Per-chain minimum

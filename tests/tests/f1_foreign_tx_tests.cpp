@@ -116,6 +116,7 @@ static foreign_tx_value make_ftv( foreign_chain_id chain, uint8_t b0, int64_t am
    v.amount = amount;
    v.foreign_asset_id = 0;
    v.confirmation_height = height;
+   v.confirmation_count = height;
    return v;
 }
 
@@ -155,7 +156,7 @@ static void promote_foreign( database_fixture& f, oracle_id_type oid,
 }
 
 
-BOOST_FIXTURE_TEST_SUITE( h3_foreign_tx_tests, database_fixture )
+BOOST_FIXTURE_TEST_SUITE( f1_foreign_tx_tests, database_fixture )
 
 BOOST_AUTO_TEST_CASE( foreign_tx_value_round_trips )
 {

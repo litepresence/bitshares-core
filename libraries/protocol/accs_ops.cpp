@@ -30,7 +30,8 @@ namespace graphene { namespace protocol {
 void accs_declare_gateway_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
-   FC_ASSERT( chain_id < 256, "Invalid chain id" );
+   FC_ASSERT( chain_id <= 2, "Invalid chain id" );
+   FC_ASSERT( foreign_asset_id.size() <= 256, "Foreign asset id too long" );
 }
 
 share_type accs_declare_gateway_operation::calculate_fee( const fee_params_t& schedule )const
@@ -56,7 +57,7 @@ void accs_create_offer_operation::validate()const
    FC_ASSERT( foreign_amount > 0, "Foreign amount must be positive" );
    FC_ASSERT( !foreign_recipient.empty(), "Foreign recipient must not be empty" );
    FC_ASSERT( foreign_recipient.size() <= 256, "Foreign recipient too long" );
-   FC_ASSERT( chain_id < 256, "Invalid chain id" );
+   FC_ASSERT( chain_id <= 2, "Invalid chain id" );
    FC_ASSERT( foreign_asset_id.size() <= 256, "Foreign asset id too long" );
 }
 

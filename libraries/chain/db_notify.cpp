@@ -493,18 +493,6 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // requester
    }
-   void operator()( const vault_foreign_mint_operation& op )
-   {
-      _impacted.insert( op.fee_payer() ); // recipient
-   }
-   void operator()( const vault_foreign_challenge_operation& op )
-   {
-      _impacted.insert( op.fee_payer() ); // challenger
-   }
-   void operator()( const vault_foreign_unlock_operation& op )
-   {
-      _impacted.insert( op.fee_payer() ); // publisher
-   }
    void operator()( const oracle_foreign_publish_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // attestor
@@ -536,10 +524,6 @@ struct get_impacted_account_visitor
    void operator()( const accs_claim_griefing_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // claimer
-   }
-   void operator()( const vault_foreign_redeem_operation& op )
-   {
-      _impacted.insert( op.fee_payer() ); // redeemer
    }
    void operator()( const credit_deal_expired_operation& op )
    {

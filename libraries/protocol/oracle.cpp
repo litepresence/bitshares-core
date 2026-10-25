@@ -391,7 +391,8 @@ bool operator==( const foreign_tx_value& a, const foreign_tx_value& b )
 {
    return a.chain == b.chain && a.tx_id == b.tx_id && a.kind == b.kind
           && a.amount == b.amount && a.foreign_asset_id == b.foreign_asset_id
-          && a.confirmation_height == b.confirmation_height;
+          && a.confirmation_height == b.confirmation_height
+          && a.confirmation_count == b.confirmation_count;
 }
 
 } } // graphene::protocol

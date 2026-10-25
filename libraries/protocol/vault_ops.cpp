@@ -52,18 +52,6 @@ void vault_register_operation::validate()const
    FC_ASSERT( challenge_window_sec <= GRAPHENE_H2_VAULT_MAX_CHALLENGE_WINDOW_SEC,
               "Challenge window exceeds ${m} seconds",
               ("m", GRAPHENE_H2_VAULT_MAX_CHALLENGE_WINDOW_SEC) );
-   // A foreign-backed vault must commit an exchange rate: the burn is
-   // reimbursed in bond terms, and without a rate the reimbursement is
-   // undefined. An H2 vault (backing_chain 0) carries the 1:1 default.
-   if( backing_chain != 0 )
-   {
-      FC_ASSERT( backing_rate_den != 0,
-                 "A foreign-backed vault must commit a non-zero exchange rate" );
-      FC_ASSERT( backing_rate_num != 0,
-                 "A foreign-backed vault must commit a non-zero exchange-rate "
-                 "numerator: a zero numerator prices the foreign asset at "
-                 "nothing, and the reimbursement would silently pay zero" );
-   }
    if( memo.valid() )
       FC_ASSERT( memo->size() <= GRAPHENE_H2_VAULT_MAX_MEMO_LENGTH,
                  "Memo should not exceed ${m} characters",

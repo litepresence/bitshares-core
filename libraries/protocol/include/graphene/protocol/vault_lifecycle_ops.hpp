@@ -209,120 +209,6 @@ namespace graphene { namespace protocol {
       share_type      calculate_fee( const fee_params_t& k )const;
    };
 
-    /**
-     * @brief Challenges a foreign-backed vault's attestor for a lie.
-     * @ingroup operations
-     *
-     * The attestor model: a lock proof that does not correspond to a real
-     * foreign-chain transaction is a LIE, not a liveness failure. A missed
-     * redemption SLA freezes the vault and reimburses the user from the bond
-     * (the missed-deadline rule, in the maintenance sweep). This operation is
-     * the lie path: it names the accused attestor and the disputed deposit id,
-     * and a sustained challenge slashes the accused attestor's producer bond
-     * and winds the vault down.
-     *
-     * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 2
-     */
-    struct vault_foreign_challenge_operation : public base_operation
-    {
-       struct fee_params_t {
-         uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION;
-         uint32_t price_per_kbyte = GRAPHENE_BLOCKCHAIN_PRECISION;
-      };
-
-       asset                fee;
-       account_id_type      challenger;        ///< Posts the bond; must exist
-       vault_id_type        vault;             ///< Target vault; must be foreign-backed
-       account_id_type      accused_attestor;  ///< Accused attestor; must be a producer of the bound oracle
-       foreign_tx_id        deposit_id;        ///< The disputed foreign deposit
-       share_type           challenge_bond;    ///< Escrowed; raw BTS smallest units
-       uint64_t             challenge_bond_usd_cents = 0; ///< USD-terms record; floor $837.50
-       string               evidence_memo;     ///< Transparent evidence carrier, 1..1000 chars
-       extensions_type      extensions;        ///< Appended-last rule
-
-       account_id_type fee_payer()const { return challenger; }
-       void            validate()const;
-       share_type      calculate_fee( const fee_params_t& k )const;
-    };
-
-    /**
-     * @brief Publishes the unlock proof for an outstanding foreign redeem.
-     * @ingroup operations
-     *
-     * The attestor observes the unlock on the foreign chain and publishes the
-     * proof here. The publisher must be a producer (attestor) of the vault's
-     * bound foreign chain transaction oracle, and the promoted foreign
-     * transaction record must carry the matching unlock: the same deposit id,
-     * the same amount, and the unlock event kind. The operation is the
-     * attestor model in consensus form: the proof is a published claim, and
-     * the attestor's producer bond is what stands behind it.
-     *
-     * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 7
-     */
-    struct vault_foreign_unlock_operation : public base_operation
-    {
-       struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
-
-       asset                fee;
-       account_id_type      publisher;        ///< The attestor publishing the proof
-       vault_id_type        vault;            ///< Target vault; must be foreign-backed
-       foreign_tx_id        deposit_id;       ///< The redeem's deposit id
-       share_type           amount = 0;       ///< Unlocked amount (foreign units)
-       std::string          foreign_tx_hash;  ///< The foreign chain transaction hash (transparent)
-       extensions_type      extensions;       ///< Appended-last rule
-
-       account_id_type fee_payer()const { return publisher; }
-       void            validate()const;
-       share_type      calculate_fee( const fee_params_t& k )const;
-    };
-
-    struct vault_foreign_mint_operation : public base_operation
-    {
-       struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
-
-       asset            fee;
-       vault_id_type    vault;
-       foreign_tx_id    deposit_id;
-       share_type       amount;
-       account_id_type  recipient;
-       account_id_type  minter;            ///< Vault authority member who signs
-       /// Other vault authority members who co-sign (the rotate pattern):
-       /// each named account's active authority is signature-required, and the
-       /// evaluator sums minter + co-signer weights against the vault's
-       /// threshold.
-       flat_set<account_id_type> co_signers;
-       extensions_type  extensions;
-
-       account_id_type fee_payer()const { return minter; }
-       void            validate()const;
-       share_type      calculate_fee( const fee_params_t& k )const;
-       void get_required_active_authorities( flat_set<account_id_type>& a )const
-       {
-          for( const auto& co : co_signers )
-             a.insert( co );
-       }
-    };
-
-    struct vault_foreign_redeem_operation : public base_operation
-    {
-       struct fee_params_t { uint64_t fee = 5 * GRAPHENE_BLOCKCHAIN_PRECISION; };
-
-       asset            fee;
-       account_id_type  redeemer;
-       vault_id_type    vault;
-       share_type       amount;
-       /// The deposit being redeemed: the foreign deposit id the vault
-       /// minted against. The unlock proof must carry the same id, so the
-       /// three legs (lock, mint, redeem, unlock) share one identifier.
-       foreign_tx_id    deposit_id;
-       std::string      foreign_recipient;
-       extensions_type  extensions;
-
-       account_id_type fee_payer()const { return redeemer; }
-       void            validate()const;
-       share_type      calculate_fee( const fee_params_t& k )const;
-    };
-
  } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::vault_rotate_operation::fee_params_t, (fee) )
@@ -330,9 +216,6 @@ FC_REFLECT( graphene::protocol::vault_bond_release_operation::fee_params_t, (fee
 FC_REFLECT( graphene::protocol::vault_resolve_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::pair_freeze_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::winddown_claim_operation::fee_params_t, (fee) )
-FC_REFLECT( graphene::protocol::vault_foreign_mint_operation::fee_params_t, (fee) )
-FC_REFLECT( graphene::protocol::vault_foreign_challenge_operation::fee_params_t, (fee)(price_per_kbyte) )
-FC_REFLECT( graphene::protocol::vault_foreign_unlock_operation::fee_params_t, (fee) )
 
 FC_REFLECT( graphene::protocol::vault_rotate_operation,
              (fee)(rotator)(vault)(new_authority)(memo)(co_signers)(extensions) )
@@ -344,32 +227,14 @@ FC_REFLECT( graphene::protocol::pair_freeze_operation,
             (fee)(freezer)(vault)(oracle)(extensions) )
 FC_REFLECT( graphene::protocol::winddown_claim_operation,
             (fee)(claimant)(winddown)(claim_amount)(tranche)(extensions) )
-FC_REFLECT( graphene::protocol::vault_foreign_mint_operation,
-            (fee)(vault)(deposit_id)(amount)(recipient)(minter)(co_signers)(extensions) )
-FC_REFLECT( graphene::protocol::vault_foreign_challenge_operation,
-            (fee)(challenger)(vault)(accused_attestor)(deposit_id)(challenge_bond)
-            (challenge_bond_usd_cents)(evidence_memo)(extensions) )
-FC_REFLECT( graphene::protocol::vault_foreign_unlock_operation,
-            (fee)(publisher)(vault)(deposit_id)(amount)(foreign_tx_hash)(extensions) )
-FC_REFLECT( graphene::protocol::vault_foreign_redeem_operation,
-            (fee)(redeemer)(vault)(amount)(deposit_id)(foreign_recipient)(extensions) )
-FC_REFLECT( graphene::protocol::vault_foreign_redeem_operation::fee_params_t, (fee) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_rotate_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_bond_release_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation::fee_params_t )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation::fee_params_t )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_redeem_operation::fee_params_t )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_rotate_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_bond_release_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_resolve_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::pair_freeze_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::winddown_claim_operation )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_mint_operation )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_challenge_operation::fee_params_t )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_challenge_operation )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_unlock_operation::fee_params_t )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_unlock_operation )
-GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::vault_foreign_redeem_operation )

@@ -235,6 +235,7 @@ namespace graphene { namespace protocol {
        int64_t           amount = 0;
        uint8_t           foreign_asset_id = 0;
        uint64_t          confirmation_height = 0;
+       uint64_t          confirmation_count = 0;
 
        foreign_tx_value() = default;
 
@@ -698,7 +699,7 @@ FC_REFLECT( graphene::protocol::foreign_tx_id,
             (hash) )
 
 FC_REFLECT( graphene::protocol::foreign_tx_value,
-            (chain)(tx_id)(kind)(amount)(foreign_asset_id)(confirmation_height) )
+            (chain)(tx_id)(kind)(amount)(foreign_asset_id)(confirmation_height)(confirmation_count) )
 
 FC_REFLECT( graphene::protocol::oracle_producer_entry,
              (weight)(extensions) )

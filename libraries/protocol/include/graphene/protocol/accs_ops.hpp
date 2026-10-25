@@ -38,6 +38,8 @@ namespace graphene { namespace protocol {
    constexpr uint64_t GRAPHENE_ACCS_MIN_GRIEFING_BOND_USD_CENTS = 8375;
    /// ACCS offer cleanup age: 100800 blocks (~3.5 days).
    constexpr uint32_t GRAPHENE_ACCS_OFFER_CLEANUP_AGE = 100800;
+   /// ACCS max open offers per orderbook (state bound).
+   constexpr uint32_t GRAPHENE_ACCS_MAX_OPEN_OFFERS_PER_ORDERBOOK = 1000;
 
    /**
     * @brief Declares a foreign-chain or foreign-subtoken ACCS gateway.
@@ -56,6 +58,8 @@ namespace graphene { namespace protocol {
       account_id_type committee_member;  ///< Must be a seated committee member
       uint8_t         chain_id;          ///< Foreign chain enum (BTC, ETH, SOL, etc.)
       std::string     foreign_asset_id;  ///< Empty = native asset; contract address for subtokens
+      uint8_t         foreign_asset_code; ///< F1 foreign asset index (0 = native)
+      oracle_id_type  oracle_id;         ///< Bound F1 foreign-tx oracle
       extensions_type extensions;         ///< Appended-last rule
 
       account_id_type fee_payer()const { return committee_member; }
@@ -200,7 +204,7 @@ FC_REFLECT( graphene::protocol::accs_fulfill_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::accs_claim_griefing_operation::fee_params_t, (fee) )
 
 FC_REFLECT( graphene::protocol::accs_declare_gateway_operation,
-            (fee)(committee_member)(chain_id)(foreign_asset_id)(extensions) )
+            (fee)(committee_member)(chain_id)(foreign_asset_id)(foreign_asset_code)(oracle_id)(extensions) )
 FC_REFLECT( graphene::protocol::accs_deactivate_gateway_operation,
             (fee)(committee_member)(chain_id)(foreign_asset_id)(extensions) )
 FC_REFLECT( graphene::protocol::accs_create_offer_operation,

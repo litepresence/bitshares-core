@@ -34,7 +34,7 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::accs_orderbook_objec
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::accs_offer_object )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::accs_gateway_object, (graphene::db::object),
-                    (chain_id)(foreign_asset_id)(declared_by)(declared_at)
+                    (chain_id)(foreign_asset_id)(foreign_asset_code)(oracle_id)(consumed_tx_hashes)(declared_by)(declared_at)
                     (min_confirmations)(active) )
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::accs_orderbook_object, (graphene::db::object),
                     (base_asset)(chain_id)(foreign_asset_id)(open_offers)

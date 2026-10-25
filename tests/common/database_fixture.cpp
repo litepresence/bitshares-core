@@ -70,6 +70,7 @@ extern std::string GRAPHENE_TESTING_ES_URL;
 namespace graphene { namespace chain {
 
 using std::cout;
+using std::cerr;
 
 namespace buf = boost::unit_test::framework;
 

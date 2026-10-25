@@ -165,18 +165,14 @@ namespace graphene { namespace protocol {
              /* 101 */ offset_deposit_operation,
              /* 102 */ offset_claim_operation,
              /* 103 */ issuance_exit_request_operation,
-             /* 104 */ vault_foreign_mint_operation,
-             /* 105 */ vault_foreign_redeem_operation,
-             /* 106 */ vault_foreign_challenge_operation,
-             /* 107 */ vault_foreign_unlock_operation,
-             /* 108 */ oracle_foreign_publish_operation,
-             /* 109 */ accs_declare_gateway_operation,
-             /* 110 */ accs_deactivate_gateway_operation,
-             /* 111 */ accs_create_offer_operation,
-             /* 112 */ accs_cancel_offer_operation,
-             /* 113 */ accs_match_offer_operation,
-             /* 114 */ accs_fulfill_operation,
-             /* 115 */ accs_claim_griefing_operation
+             /* 104 */ oracle_foreign_publish_operation,
+             /* 105 */ accs_declare_gateway_operation,
+             /* 106 */ accs_deactivate_gateway_operation,
+             /* 107 */ accs_create_offer_operation,
+             /* 108 */ accs_cancel_offer_operation,
+             /* 109 */ accs_match_offer_operation,
+             /* 110 */ accs_fulfill_operation,
+             /* 111 */ accs_claim_griefing_operation
             >;
 
    /**

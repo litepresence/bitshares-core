@@ -130,6 +130,8 @@ struct accs_fixture : database_fixture
       op.committee_member = alice_account_id;
       op.chain_id = chain_id;
       op.foreign_asset_id = foreign_asset_id;
+      op.foreign_asset_code = 0;
+      op.oracle_id = oracle_id;
       signed_transaction tx; tx.operations.push_back( op );
       db.current_fee_schedule().set_fee( tx.operations.back() );
       set_expiration( db, tx ); tx.sign( alice_key, db.get_chain_id() );
@@ -206,6 +208,8 @@ BOOST_AUTO_TEST_CASE( declare_gateway_duplicate_refused )
    op.committee_member = alice_account_id;
    op.chain_id = 1;
    op.foreign_asset_id = "";
+   op.foreign_asset_code = 0;
+   op.oracle_id = oracle_id;
    signed_transaction tx; tx.operations.push_back( op );
    db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx ); tx.sign( alice_key, db.get_chain_id() );
@@ -220,6 +224,8 @@ BOOST_AUTO_TEST_CASE( declare_gateway_non_committee_refused )
    op.committee_member = bob_account_id;
    op.chain_id = 1;
    op.foreign_asset_id = "";
+   op.foreign_asset_code = 0;
+   op.oracle_id = oracle_id;
    signed_transaction tx; tx.operations.push_back( op );
    db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx ); tx.sign( bob_key, db.get_chain_id() );
@@ -304,7 +310,7 @@ BOOST_AUTO_TEST_CASE( cancel_open_offer )
    signed_transaction tx; tx.operations.push_back( op );
    db.current_fee_schedule().set_fee( tx.operations.back() );
    set_expiration( db, tx ); tx.sign( alice_key, db.get_chain_id() );
-   // PUSH_TX( db, tx );
+   PUSH_TX( db, tx );
    (void)offer_id;
 }
 

@@ -32,10 +32,11 @@ namespace graphene { namespace chain {
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::accs_gateway_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::accs_orderbook_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::accs_offer_object )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::accs_consumed_tx_object )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::accs_gateway_object, (graphene::db::object),
-                    (chain_id)(foreign_asset_id)(foreign_asset_code)(oracle_id)(consumed_tx_hashes)(declared_by)(declared_at)
-                    (min_confirmations)(active) )
+                    (chain_id)(foreign_asset_id)(foreign_asset_code)(oracle_id)(declared_by)(declared_at)
+                    (min_confirmations)(active)(consumed_tx_count) )
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::accs_orderbook_object, (graphene::db::object),
                     (base_asset)(chain_id)(foreign_asset_id)(open_offers)
                     (matched_offers)(next_offer_id) )
@@ -44,3 +45,5 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::accs_offer_object, (graphene::d
                     (foreign_asset_id)(base_amount)(foreign_amount)(foreign_recipient)
                     (escrow_balance)(state)(expiry)(matched_at)(matched_buyer)
                     (griefing_bond)(sla_deadline)(expected_tx_hash)(created_block) )
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::accs_consumed_tx_object, (graphene::db::object),
+                    (chain_id)(foreign_asset_id)(tx)(consumed_block) )

@@ -57,14 +57,14 @@ void_result accs_declare_gateway_evaluator::do_evaluate( const accs_declare_gate
    FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
               "Account ${a} is registered but not on the elected committee", ("a", op.committee_member) );
 
-   // Check no existing active gateway for this (chain_id, foreign_asset_id) pair
-   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& gw : gw_idx )
-   {
-      if( gw.chain_id == op.chain_id && gw.foreign_asset_id == op.foreign_asset_id && gw.active )
-         FC_ASSERT( false, "Active gateway already exists for chain ${c} asset ${a}",
-                    ("c", op.chain_id)("a", op.foreign_asset_id) );
-   }
+   // At most one gateway record exists per (chain_id, foreign_asset_id) pair;
+   // the pair index enforces the invariant, so a new declaration only conflicts
+   // with an ACTIVE record of the same pair.
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( op.chain_id, op.foreign_asset_id ) );
+   FC_ASSERT( gw_itr == gw_idx.end() || !gw_itr->active,
+              "Active gateway already exists for chain ${c} asset ${a}",
+              ("c", op.chain_id)("a", op.foreign_asset_id) );
 
    // The gateway must bind an F1 foreign-transaction oracle.
    const oracle_object* oracle = d.find( op.oracle_id );
@@ -91,26 +91,61 @@ object_id_type accs_declare_gateway_evaluator::do_apply( const accs_declare_gate
 { try {
    database& d = db();
 
-   // Carry forward any consumed-tx hashes from prior (possibly deactivated)
-   // gateways for the same (chain, asset) pair, so replay protection survives
-   // redeclaration.
-   std::vector<protocol::foreign_tx_id> carried;
-   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& g : gw_idx )
+   // Replay-set durability (F1F2-C01): replay protection lives on
+   // accs_consumed_tx rows keyed (chain_id, foreign_asset_id, tx), never on
+   // the gateway instance, so deactivation and redeclaration cannot reset it.
+   // The gateway record only carries an acceleration counter, re-synced from
+   // the rows on every (re)declaration, so the count can never silently
+   // reset even if the pair's record is recreated.
+   // Spec: docs/superpowers/specs/2026-10-24-three-track-split-design.md §9
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( op.chain_id, op.foreign_asset_id ) );
+   const uint32_t head_block = d.head_block_num();
+   uint32_t consumed_count = 0;
    {
-      if( g.chain_id == op.chain_id && g.foreign_asset_id == op.foreign_asset_id )
-         for( const auto& h : g.consumed_tx_hashes )
-            carried.push_back( h );
+      // Committee-frequency resync: count the pair's consumed rows once, on
+      // every (re)declaration, so the counter cannot drift from the durable
+      // rows. chain_id 3 is the first value past the declared range.
+      const auto& cidx = d.get_index_type<accs_consumed_tx_index>()
+                            .indices().get<by_chain_asset_tx>();
+      auto lower = cidx.lower_bound( boost::make_tuple( op.chain_id, std::string(),
+                                                        protocol::foreign_tx_id() ) );
+      auto upper = cidx.lower_bound( boost::make_tuple( uint8_t( 3 ), std::string(),
+                                                        protocol::foreign_tx_id() ) );
+      consumed_count = static_cast<uint32_t>( std::distance( lower, upper ) );
    }
 
-   const auto& new_gw = d.create<accs_gateway_object>( [&op, &d, &carried]( accs_gateway_object& g ) {
+   if( gw_itr != gw_idx.end() )
+   {
+      // Redeclaration reuses the pair's existing record in place instead of
+      // stacking a second object on the same (chain, asset) pair.
+      d.modify( *gw_itr, [&op, &head_block, &consumed_count]( accs_gateway_object& g ) {
+         g.foreign_asset_code = op.foreign_asset_code;
+         g.oracle_id = op.oracle_id;
+         g.declared_by = op.committee_member;
+         g.declared_at = head_block;
+         switch( op.chain_id )
+         {
+            case 0: g.min_confirmations = 6; break;   // BTC
+            case 1: g.min_confirmations = 12; break;  // ETH
+            case 2: g.min_confirmations = 32; break;  // SOL
+            default: g.min_confirmations = 6; break;
+         }
+         g.active = true;
+         g.consumed_tx_count = consumed_count;
+      } );
+      return gw_itr->id;
+   }
+
+   const auto& new_gw = d.create<accs_gateway_object>( [&op, &head_block,
+                                                        &consumed_count]( accs_gateway_object& g ) {
       g.chain_id = op.chain_id;
       g.foreign_asset_id = op.foreign_asset_id;
       g.foreign_asset_code = op.foreign_asset_code;
       g.oracle_id = op.oracle_id;
-      g.consumed_tx_hashes = carried;
+      g.consumed_tx_count = consumed_count;
       g.declared_by = op.committee_member;
-      g.declared_at = d.head_block_num();
+      g.declared_at = head_block;
       switch( op.chain_id )
       {
          case 0: g.min_confirmations = 6; break;   // BTC
@@ -137,15 +172,19 @@ void process_accs_maintenance( database& d )
    std::vector<protocol::accs_offer_id_type> to_expire;
    for( const auto& offer : offer_idx )
    {
-      if( offer.state == 0 && offer.expiry > 0 && now_block >= offer.expiry )
+      if( offer.state == static_cast<uint8_t>( accs_offer_state::open )
+          && offer.expiry > 0 && now_block >= offer.expiry )
          to_expire.push_back( protocol::accs_offer_id_type( offer.id ) );
    }
    for( protocol::accs_offer_id_type oid : to_expire )
    {
       const accs_offer_object* offer = d.find( oid );
-      if( !offer || offer->state != 0 ) continue;
+      if( !offer || offer->state != static_cast<uint8_t>( accs_offer_state::open ) ) continue;
       d.adjust_balance( offer->seller, asset( offer->escrow_balance, offer->base_asset ) );
-      d.modify( *offer, []( accs_offer_object& o ) { o.state = 3; o.escrow_balance = 0; } );
+      d.modify( *offer, []( accs_offer_object& o ) {
+         o.state = static_cast<uint8_t>( accs_offer_state::expired );
+         o.escrow_balance = 0;
+      } );
       const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
       if( ob )
       {
@@ -160,7 +199,10 @@ void process_accs_maintenance( database& d )
    std::vector<protocol::accs_offer_id_type> to_clean;
    for( const auto& offer : offer_idx )
    {
-      if( ( offer.state == 2 || offer.state == 3 || offer.state == 4 )
+      const uint8_t os = offer.state;
+      if( ( os == static_cast<uint8_t>( accs_offer_state::fulfilled )
+            || os == static_cast<uint8_t>( accs_offer_state::expired )
+            || os == static_cast<uint8_t>( accs_offer_state::cancelled ) )
           && offer.created_block > 0
           && now_block >= static_cast<uint32_t>( static_cast<uint64_t>( offer.created_block ) + GRAPHENE_ACCS_OFFER_CLEANUP_AGE ) )
          to_clean.push_back( protocol::accs_offer_id_type( offer.id ) );
@@ -193,28 +235,42 @@ void_result accs_create_offer_evaluator::do_evaluate( const accs_create_offer_op
    const asset_object* base_asset = d.find( op.base_asset );
    FC_ASSERT( nullptr != base_asset, "Base asset does not exist" );
 
-   bool gateway_found = false;
-   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& gw : gw_idx )
-   {
-      if( gw.chain_id == op.chain_id && gw.foreign_asset_id == op.foreign_asset_id && gw.active )
-      {
-         gateway_found = true;
-         break;
-      }
-   }
-   FC_ASSERT( gateway_found, "No active gateway" );
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( op.chain_id, op.foreign_asset_id ) );
+   FC_ASSERT( gw_itr != gw_idx.end() && gw_itr->active, "No active gateway" );
 
-   // State bound: cap open offers per orderbook.
-   const auto& ob_idx2 = d.get_index_type<accs_orderbook_index>().indices();
-   for( const auto& ob : ob_idx2 )
+   // Per-chain recipient format bounds (M06): conservative charset + length
+   // only, checked in validate() and again here; no address checksums in
+   // consensus. Spec: docs/superpowers/specs/2026-10-20-f2-accs-orderbook-settlement.md §3.1
+   protocol::accs_validate_foreign_recipient( op.chain_id, op.foreign_recipient );
+
+   // State bound: cap open offers per orderbook (I06) — the cap refuses a new
+   // offer, never evicts an existing one, so open_offer vectors stay bounded.
+   const auto& ob_idx = d.get_index_type<accs_orderbook_index>().indices().get<by_pair>();
+   const auto ob_itr = ob_idx.find( boost::make_tuple( op.base_asset, op.chain_id,
+                                                       op.foreign_asset_id ) );
+   if( ob_itr != ob_idx.end() )
+      FC_ASSERT( ob_itr->open_offers.size() < GRAPHENE_ACCS_MAX_OPEN_OFFERS_PER_ORDERBOOK,
+                 "Orderbook open-offer cap reached" );
+
+   // State bound: cap open offers per seller (I06) so a single account cannot
+   // stack an unbounded number of escrowed offers across orderbooks. The walk
+   // is bounded by the seller's own open offers, not the whole offer set.
    {
-      if( ob.base_asset == op.base_asset && ob.chain_id == op.chain_id
-          && ob.foreign_asset_id == op.foreign_asset_id )
+      const auto& of_idx = d.get_index_type<accs_offer_index>()
+                              .indices().get<by_seller_state>();
+      auto sitr = of_idx.lower_bound( boost::make_tuple( op.seller,
+                          static_cast<uint8_t>( accs_offer_state::open ) ) );
+      uint32_t open_count = 0;
+      while( sitr != of_idx.end()
+             && sitr->seller == op.seller
+             && sitr->state == static_cast<uint8_t>( accs_offer_state::open ) )
       {
-         FC_ASSERT( ob.open_offers.size() < GRAPHENE_ACCS_MAX_OPEN_OFFERS_PER_ORDERBOOK,
-                    "Orderbook open-offer cap reached" );
+         ++open_count;
+         ++sitr;
       }
+      FC_ASSERT( open_count < GRAPHENE_ACCS_MAX_OPEN_OFFERS_PER_ACCOUNT,
+                 "Seller open-offer cap reached" );
    }
 
    FC_ASSERT( d.get_balance( op.seller, op.base_asset ) >= asset( op.base_amount, op.base_asset ),
@@ -233,17 +289,13 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
    database& d = db();
 
    // Find or create orderbook for (base_asset, chain_id, foreign_asset_id)
+   // through the pair index.
    accs_orderbook_object* orderbook = nullptr;
-   const auto& ob_idx = d.get_index_type<accs_orderbook_index>().indices();
-   for( const auto& ob : ob_idx )
-   {
-      if( ob.base_asset == op.base_asset && ob.chain_id == op.chain_id
-          && ob.foreign_asset_id == op.foreign_asset_id )
-      {
-         orderbook = const_cast<accs_orderbook_object*>( d.find( protocol::accs_orderbook_id_type( ob.id ) ) );
-         break;
-      }
-   }
+   const auto& ob_idx = d.get_index_type<accs_orderbook_index>().indices().get<by_pair>();
+   const auto ob_itr = ob_idx.find( boost::make_tuple( op.base_asset, op.chain_id,
+                                                       op.foreign_asset_id ) );
+   if( ob_itr != ob_idx.end() )
+      orderbook = const_cast<accs_orderbook_object*>( &*ob_itr );
 
    if( !orderbook )
    {
@@ -271,7 +323,7 @@ object_id_type accs_create_offer_evaluator::do_apply( const accs_create_offer_op
       o.foreign_amount = op.foreign_amount;
       o.foreign_recipient = op.foreign_recipient;
       o.escrow_balance = op.base_amount;
-      o.state = 0; // open
+      o.state = static_cast<uint8_t>( accs_offer_state::open );
       o.expiry = op.expiry;
       o.created_block = d.head_block_num();
    } );
@@ -299,7 +351,8 @@ void_result accs_cancel_offer_evaluator::do_evaluate( const accs_cancel_offer_op
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
    FC_ASSERT( offer->seller == op.seller, "Only the seller can cancel" );
-   FC_ASSERT( offer->state == 0, "Only open offers can be cancelled" ); // 0 = open
+   FC_ASSERT( offer->state == static_cast<uint8_t>( accs_offer_state::open ),
+              "Only open offers can be cancelled" );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -309,11 +362,17 @@ void_result accs_cancel_offer_evaluator::do_apply( const accs_cancel_offer_opera
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
 
-   // Return escrow to seller.
+   // Release escrow to seller. Supply invariant: balances in circulation +
+   // outstanding escrow_balance must keep summing to the base asset's supply,
+   // so the locked field reads zero after the terminal transition (M07).
    d.adjust_balance( offer->seller, asset( offer->escrow_balance, offer->base_asset ) );
 
-   // Mark cancelled.
-   d.modify( *offer, []( accs_offer_object& o ) { o.state = 4; o.escrow_balance = 0; } ); // cancelled
+   // Mark cancelled; escrow_balance is the authoritative locked field and is
+   // zeroed on the terminal transition (M07).
+   d.modify( *offer, []( accs_offer_object& o ) {
+      o.state = static_cast<uint8_t>( accs_offer_state::cancelled );
+      o.escrow_balance = 0;
+   } );
 
    // Remove from orderbook open list.
    const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
@@ -335,13 +394,23 @@ void_result accs_match_offer_evaluator::do_evaluate( const accs_match_offer_oper
    FC_ASSERT( nullptr != d.find( op.buyer ), "Buyer account does not exist" );
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
-   FC_ASSERT( offer->state == 0, "Only open offers can be matched" ); // 0 = open
+   FC_ASSERT( offer->state == static_cast<uint8_t>( accs_offer_state::open ),
+              "Only open offers can be matched" );
    FC_ASSERT( offer->seller != op.buyer, "Cannot match your own offer" );
    FC_ASSERT( op.griefing_bond >= GRAPHENE_ACCS_MIN_GRIEFING_BOND_USD_CENTS,
               "Griefing bond below minimum" );
    if( offer->expiry != 0 )
       FC_ASSERT( d.head_block_num() < offer->expiry,
                  "Offer has expired" );
+
+   // An offer whose gateway is deactivated cannot take a new buyer bond (M09):
+   // a match would extend the pair's active settlement surface after the
+   // committee shut the gateway down.
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( offer->chain_id, offer->foreign_asset_id ) );
+   FC_ASSERT( gw_itr != gw_idx.end() && gw_itr->active,
+              "Offer's gateway is not active" );
+
    FC_ASSERT( d.get_balance( op.buyer, asset_id_type() ) >= asset( op.griefing_bond, asset_id_type() ),
               "Buyer has insufficient balance for griefing bond" );
    return void_result();
@@ -356,9 +425,9 @@ void_result accs_match_offer_evaluator::do_apply( const accs_match_offer_operati
    // Deduct griefing bond from buyer (in BTS / core asset)
    d.adjust_balance( op.buyer, asset( -op.griefing_bond, asset_id_type() ) );
 
-   // Transition to matched (state = 1)
+   // Transition to matched
    d.modify( *offer, [&op, &d]( accs_offer_object& o ) {
-      o.state = 1; // matched
+      o.state = static_cast<uint8_t>( accs_offer_state::matched );
       o.matched_buyer = op.buyer;
       o.matched_at = d.head_block_num();
       o.griefing_bond = op.griefing_bond;
@@ -386,35 +455,56 @@ void_result accs_fulfill_evaluator::do_evaluate( const accs_fulfill_operation& o
    FC_ASSERT( nullptr != d.find( op.publisher ), "Publisher does not exist" );
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
-   FC_ASSERT( offer->state == 1, "Only matched offers can be fulfilled" ); // 1 = matched
+   FC_ASSERT( offer->state == static_cast<uint8_t>( accs_offer_state::matched ),
+              "Only matched offers can be fulfilled" );
    FC_ASSERT( op.amount == offer->foreign_amount, "Amount must equal offer foreign_amount" );
    FC_ASSERT( d.head_block_num() <= offer->sla_deadline, "SLA deadline exceeded" );
 
-   // Bind to the gateway's F1 oracle first (needed for the durable replay guard).
-   const accs_gateway_object* gw = nullptr;
-   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& g : gw_idx )
-   {
-      if( g.chain_id == offer->chain_id && g.foreign_asset_id == offer->foreign_asset_id && g.active )
-      { gw = &g; break; }
-   }
-   FC_ASSERT( nullptr != gw, "No active gateway for this offer" );
-   FC_ASSERT( gw->oracle_id != oracle_id_type(), "Gateway has no bound oracle" );
+   // Locate the pair's gateway record through the pair index. The record may
+   // be inactive; the active check below is what an exchange against this
+   // offer requires. A bound oracle without an object is refused by the
+   // existence check that follows (the former identity sentinel also rejected
+   // the first oracle of a chain, whose id equals the default id value).
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( offer->chain_id, offer->foreign_asset_id ) );
+   FC_ASSERT( gw_itr != gw_idx.end(), "No gateway record for this offer" );
+   FC_ASSERT( gw_itr->active, "No active gateway for this offer" );
+   const accs_gateway_object* gw = &*gw_itr;
 
-   // Durable replay protection: the foreign tx hash must not have been consumed.
+   // Governance/validation of the bound oracle must be re-checked here: the
+   // gateway record is the attestor binding, not the op's oracle field.
+   const oracle_object* gw_oracle = d.find( gw->oracle_id );
+   FC_ASSERT( nullptr != gw_oracle, "Gateway has no bound oracle" );
+
+   // Validate and decode the 32-byte foreign tx id. The operation's validate()
+   // enforces the canonical lowercase hex wire form, so comparing the decoded
+   // bytes is exact equality.
    foreign_tx_id tx_id;
    FC_ASSERT( op.foreign_tx_hash.size() == 64, "Foreign tx hash must be 64 hex chars" );
    size_t decoded = fc::from_hex( op.foreign_tx_hash, reinterpret_cast<char*>( tx_id.hash.data() ), 32 );
    FC_ASSERT( decoded == 32, "Foreign tx hash is not valid hex" );
-   for( const auto& h : gw->consumed_tx_hashes )
-      FC_ASSERT( h != tx_id,
-                 "Foreign transaction ${h} has already fulfilled an offer",
-                 ("h", op.foreign_tx_hash) );
+
+   // Durable replay protection (F1F2-C01): the consumed set lives on
+   // accs_consumed_tx rows keyed (chain_id, foreign_asset_id, tx), independent
+   // of any gateway instance; committee deactivation and redeclaration cannot
+   // reset or recreate it. Byte equality on the decoded tx id.
+   // Spec: docs/superpowers/specs/2026-10-24-three-track-split-design.md §9
+   const auto& consumed_idx = d.get_index_type<accs_consumed_tx_index>()
+                                 .indices().get<by_chain_asset_tx>();
+   FC_ASSERT( consumed_idx.find( boost::make_tuple( offer->chain_id, offer->foreign_asset_id,
+                                                    tx_id ) ) == consumed_idx.end(),
+              "Foreign transaction has already fulfilled an offer for this pair" );
+
+   // The pair's replay set is capped; the cap is carried on the pair's gateway
+   // record and re-synced from the rows at each (re)declaration. At the cap the
+   // set fails closed: this fulfill is refused, no older guard is evicted, and
+   // the set never silently resets.
+   FC_ASSERT( gw->consumed_tx_count < GRAPHENE_ACCS_MAX_CONSUMED_TX_PER_PAIR,
+              "Consumed-tx replay set at cap for chain ${c} asset ${a}",
+              ("c", offer->chain_id)("a", offer->foreign_asset_id) );
 
    // Publisher must be an attestor with a live bond.
-   const oracle_object* oracle = d.find( gw->oracle_id );
-   FC_ASSERT( nullptr != oracle, "Bound oracle does not exist" );
-   FC_ASSERT( oracle->options.producers.find( op.publisher ) != oracle->options.producers.end(),
+   FC_ASSERT( gw_oracle->options.producers.find( op.publisher ) != gw_oracle->options.producers.end(),
               "Publisher ${a} is not an attestor of the bound oracle", ("a", op.publisher) );
    {
       const auto& bond_idx = d.get_index_type<producer_bond_index>().indices().get<by_oracle_producer>();
@@ -427,10 +517,11 @@ void_result accs_fulfill_evaluator::do_evaluate( const accs_fulfill_operation& o
    const auto got = h2_read_foreign_tx( d, gw->oracle_id, d.head_block_time(), h2_price_liveness::live );
    FC_ASSERT( got.valid(), "No promoted foreign transaction record for this oracle" );
 
-   // tx_id already decoded in the replay-protection block above.
-
    FC_ASSERT( got->tx_id == tx_id, "Foreign tx hash does not match the promoted record" );
    FC_ASSERT( got->amount == op.amount, "Foreign amount does not match the promoted record" );
+   // Kind-mapping invariant (N03): an ACCS offer is a lock-flow settlement, so
+   // only foreign_tx_kind::lock records satisfy it — lock/mint records map to
+   // the lock flow while withdraw/burn records map to no ACCS offer flow.
    FC_ASSERT( got->kind == protocol::foreign_tx_kind::lock,
               "Promoted record is not a lock" );
    FC_ASSERT( static_cast<uint8_t>( got->chain ) == offer->chain_id,
@@ -449,36 +540,51 @@ void_result accs_fulfill_evaluator::do_apply( const accs_fulfill_operation& op )
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
 
-   // Release base asset to buyer
+   // Release base asset to buyer and return the griefing bond to buyer.
+   // Supply invariant (F1F2-I03): asset balances in circulation +
+   // offer.escrow_balance (base) and outstanding griefing_bond (core) must
+   // keep summing to the assets' supplies; releasing the locked values moves
+   // them without minting or burning, so both fields read zero on the
+   // terminal offer below.
    d.adjust_balance( offer->matched_buyer, asset( offer->base_amount, offer->base_asset ) );
 
    // Return griefing bond to buyer (in BTS / core asset)
    d.adjust_balance( offer->matched_buyer, asset( offer->griefing_bond, asset_id_type() ) );
 
-   // Transition to fulfilled (state = 2)
+   // Transition to fulfilled
    d.modify( *offer, [&op]( accs_offer_object& o ) {
-      o.state = 2; // fulfilled
+      o.state = static_cast<uint8_t>( accs_offer_state::fulfilled );
       o.expected_tx_hash = op.foreign_tx_hash;
       o.escrow_balance = 0;
       o.griefing_bond = 0;
    } );
 
-   // Durable replay guard: record the consumed tx hash on the gateway.
-   const accs_gateway_object* gw2 = nullptr;
-   const auto& gw_idx2 = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& g : gw_idx2 )
-   {
-      if( g.chain_id == offer->chain_id && g.foreign_asset_id == offer->foreign_asset_id && g.active )
-      { gw2 = &g; break; }
-   }
-   if( gw2 )
-   {
-      foreign_tx_id consumed_id;
-      fc::from_hex( op.foreign_tx_hash, reinterpret_cast<char*>( consumed_id.hash.data() ), 32 );
-      d.modify( *gw2, [&consumed_id]( accs_gateway_object& g ) {
-         g.consumed_tx_hashes.push_back( consumed_id );
-      } );
-   }
+   // Durable replay guard (F1F2-C01): create the consumed-tx row keyed
+   // (chain_id, foreign_asset_id, tx). Rows survive every gateway lifecycle
+   // event, are byte-compared at every fulfill, and only this path (and the
+   // committee's count resync at declaration) touch them.
+   // Spec: docs/superpowers/specs/2026-10-24-three-track-split-design.md §9
+   foreign_tx_id consumed_id;
+   FC_ASSERT( op.foreign_tx_hash.size() == 64, "Foreign tx hash must be 64 hex chars" );
+   size_t decoded = fc::from_hex( op.foreign_tx_hash, reinterpret_cast<char*>( consumed_id.hash.data() ), 32 );
+   FC_ASSERT( decoded == 32, "Foreign tx hash is not valid hex" );
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( offer->chain_id, offer->foreign_asset_id ) );
+   FC_ASSERT( gw_itr != gw_idx.end(), "No gateway record for this offer" );
+   // Fail-closed cap on the apply side: create the row only under the cap, so
+   // the row count never grows past GRAPHENE_ACCS_MAX_CONSUMED_TX_PER_PAIR
+   // even if the counter were stale; the evaluate-side pre-check refused at
+   // count >= cap, and this guard enforces the same bound at mutation time.
+   FC_ASSERT( gw_itr->consumed_tx_count < GRAPHENE_ACCS_MAX_CONSUMED_TX_PER_PAIR,
+              "Consumed-tx replay set at cap for this pair" );
+
+   d.create<accs_consumed_tx_object>( [&]( accs_consumed_tx_object& c ) {
+      c.chain_id = offer->chain_id;
+      c.foreign_asset_id = offer->foreign_asset_id;
+      c.tx = consumed_id;
+      c.consumed_block = d.head_block_num();
+   } );
+   d.modify( *gw_itr, []( accs_gateway_object& g ) { ++g.consumed_tx_count; } );
 
    // Remove from orderbook's matched offers
    const accs_orderbook_object* ob = d.find( protocol::accs_orderbook_id_type( offer->orderbook ) );
@@ -501,7 +607,8 @@ void_result accs_claim_griefing_evaluator::do_evaluate( const accs_claim_griefin
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
    FC_ASSERT( offer->seller == op.claimer, "Only the seller can claim griefing" );
-   FC_ASSERT( offer->state == 1, "Only matched offers can be claimed" ); // 1 = matched
+   FC_ASSERT( offer->state == static_cast<uint8_t>( accs_offer_state::matched ),
+              "Only matched offers can be claimed" );
    FC_ASSERT( d.head_block_num() > offer->sla_deadline, "SLA deadline not yet exceeded" );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -512,15 +619,20 @@ void_result accs_claim_griefing_evaluator::do_apply( const accs_claim_griefing_o
    const accs_offer_object* offer = d.find( op.offer_id );
    FC_ASSERT( nullptr != offer, "Offer does not exist" );
 
-   // Transfer griefing bond to seller (in BTS / core asset)
+   // One ordered sequence of balance moves (M10): the griefing bond moves to
+   // the seller first, then the escrow, then the offer's row state is
+   // written. Supply invariant: balances in circulation + escrow_balance
+   // (base) + griefing_bond (core) outstanding must keep summing to the
+   // assets' supplies; both locked fields read zero after the move below.
    d.adjust_balance( offer->seller, asset( offer->griefing_bond, asset_id_type() ) );
 
    // Return escrow to seller
    d.adjust_balance( offer->seller, asset( offer->escrow_balance, offer->base_asset ) );
 
-   // Transition to expired (state = 3)
+   // Transition to expired; escrow_balance is the authoritative locked field
+   // and griefing_bond the bond field; both zero on the terminal transition.
    d.modify( *offer, []( accs_offer_object& o ) {
-      o.state = 3; // expired
+      o.state = static_cast<uint8_t>( accs_offer_state::expired );
       o.escrow_balance = 0;
       o.griefing_bond = 0;
    } );
@@ -550,17 +662,11 @@ void_result accs_deactivate_gateway_evaluator::do_evaluate( const accs_deactivat
    FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
               "Account ${a} is registered but not on the elected committee", ("a", op.committee_member) );
 
-   // Find active gateway
+   // Find active gateway through the pair index
    bool found = false;
-   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& gw : gw_idx )
-   {
-      if( gw.chain_id == op.chain_id && gw.foreign_asset_id == op.foreign_asset_id && gw.active )
-      {
-         found = true;
-         break;
-      }
-   }
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( op.chain_id, op.foreign_asset_id ) );
+   found = ( gw_itr != gw_idx.end() && gw_itr->active );
    FC_ASSERT( found, "No active gateway to deactivate" );
 
    return void_result();
@@ -569,17 +675,12 @@ void_result accs_deactivate_gateway_evaluator::do_evaluate( const accs_deactivat
 void_result accs_deactivate_gateway_evaluator::do_apply( const accs_deactivate_gateway_operation& op ) const
 { try {
    database& d = db();
-   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices();
-   for( const auto& gw : gw_idx )
-   {
-      if( gw.chain_id == op.chain_id && gw.foreign_asset_id == op.foreign_asset_id && gw.active )
-      {
-         d.modify( gw, []( accs_gateway_object& g ) {
-            g.active = false;
-         } );
-         break;
-      }
-   }
+   const auto& gw_idx = d.get_index_type<accs_gateway_index>().indices().get<by_chain_asset>();
+   const auto gw_itr = gw_idx.find( boost::make_tuple( op.chain_id, op.foreign_asset_id ) );
+   FC_ASSERT( gw_itr != gw_idx.end() && gw_itr->active, "No active gateway to deactivate" );
+   d.modify( *gw_itr, []( accs_gateway_object& g ) {
+      g.active = false;
+   } );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 

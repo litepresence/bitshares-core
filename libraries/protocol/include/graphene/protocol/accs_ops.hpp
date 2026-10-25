@@ -40,6 +40,22 @@ namespace graphene { namespace protocol {
    constexpr uint32_t GRAPHENE_ACCS_OFFER_CLEANUP_AGE = 100800;
    /// ACCS max open offers per orderbook (state bound).
    constexpr uint32_t GRAPHENE_ACCS_MAX_OPEN_OFFERS_PER_ORDERBOOK = 1000;
+   /// ACCS max open offers per account (state bound).
+   constexpr uint32_t GRAPHENE_ACCS_MAX_OPEN_OFFERS_PER_ACCOUNT = 256;
+
+   /**
+    * @brief Per-chain recipient format bounds for the declared ACCS chains.
+    * @ingroup operations
+    *
+    * Conservative charset + length rules only; no address checksums in
+    * consensus, because over-tight validation that rejects legitimate
+    * addresses is worse than none. What this defends against: an offer's
+    * foreign_recipient being a string no foreign-chain wallet could pay out
+    * to, which would strand the matched buyer's foreign leg and force the
+    * SLA/claim path on every offer with a malformed recipient.
+    * Spec: docs/superpowers/specs/2026-10-20-f2-accs-orderbook-settlement.md §3.1
+    */
+   void accs_validate_foreign_recipient( uint8_t chain_id, const std::string& recipient );
 
    /**
     * @brief Declares a foreign-chain or foreign-subtoken ACCS gateway.

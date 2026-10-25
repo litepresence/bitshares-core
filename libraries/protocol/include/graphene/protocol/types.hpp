@@ -402,6 +402,7 @@ GRAPHENE_DEFINE_IDS(protocol, protocol_ids, /*protocol objects are not prefixed*
                      /* 1.39.x */ (accs_gateway)
                      /* 1.40.x */ (accs_orderbook)
                      /* 1.41.x */ (accs_offer)
+                     /* 1.42.x */ (accs_consumed_tx)
                      )
 
 FC_REFLECT(graphene::protocol::public_key_type, (key_data))

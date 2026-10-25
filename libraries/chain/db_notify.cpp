@@ -607,6 +607,8 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
               accounts.insert( aobj->matched_buyer );
            break;
         }
+        case accs_consumed_tx_object_type:
+          break;
         case proposal_object_type:{
            const auto* aobj = dynamic_cast<const proposal_object*>(obj);
            transaction_get_impacted_accs( aobj->proposed_transaction, accounts,

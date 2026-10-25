@@ -246,6 +246,7 @@ void database::initialize_indexes()
    add_index< primary_index<accs_gateway_index> >();
    add_index< primary_index<accs_orderbook_index> >();
    add_index< primary_index<accs_offer_index> >();
+   add_index< primary_index<accs_consumed_tx_index> >();
    add_index< primary_index<recovery_state_index> >();
    add_index< primary_index<seasoning_record_index> >();
    add_index< primary_index<reserve_index> >();

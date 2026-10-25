@@ -41,6 +41,14 @@ add_library( graphene_chain
              samet_fund_evaluator.cpp
              credit_offer_evaluator.cpp
              oracle_evaluator.cpp
+             reference_asset_object.cpp
+             vault_evaluator.cpp
+             vault_lifecycle_evaluator.cpp
+             vault_object.cpp
+             issuance.cpp
+             challenge_evaluator.cpp
+             seasoning.cpp
+             h2_activation.cpp
              oracle_object.cpp
              bond_evaluator.cpp
              accs_evaluator.cpp

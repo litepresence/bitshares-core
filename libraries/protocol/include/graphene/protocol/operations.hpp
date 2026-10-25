@@ -48,6 +48,7 @@
 #include <graphene/protocol/h2_economics.hpp>
 #include <graphene/protocol/issuance_ops.hpp>
 #include <graphene/protocol/seasoning_ops.hpp>
+#include <graphene/protocol/stealth.hpp>
 #include <graphene/protocol/vesting.hpp>
 #include <graphene/protocol/withdraw_permission.hpp>
 #include <graphene/protocol/witness.hpp>
@@ -165,14 +166,20 @@ namespace graphene { namespace protocol {
              /* 101 */ offset_deposit_operation,
              /* 102 */ offset_claim_operation,
              /* 103 */ issuance_exit_request_operation,
-             /* 104 */ oracle_foreign_publish_operation,
-             /* 105 */ accs_declare_gateway_operation,
-             /* 106 */ accs_deactivate_gateway_operation,
-             /* 107 */ accs_create_offer_operation,
-             /* 108 */ accs_cancel_offer_operation,
-             /* 109 */ accs_match_offer_operation,
-             /* 110 */ accs_fulfill_operation,
-             /* 111 */ accs_claim_griefing_operation
+             /* 104 */ stealth_transfer_operation,
+             /* 105 */ freeze_blind_operation,
+             /* 106 */ turnstile_reproof_operation,
+             /* 107 */ parity_review_operation,
+             /* 108 */ stealth_explicit_spend_operation,
+             /* 109 */ stealth_pool_exchange_operation,
+             /* 110 */ oracle_foreign_publish_operation,
+             /* 111 */ accs_declare_gateway_operation,
+             /* 112 */ accs_deactivate_gateway_operation,
+             /* 113 */ accs_create_offer_operation,
+             /* 114 */ accs_cancel_offer_operation,
+             /* 115 */ accs_match_offer_operation,
+             /* 116 */ accs_fulfill_operation,
+             /* 117 */ accs_claim_griefing_operation
             >;
 
    /**

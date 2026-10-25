@@ -103,6 +103,14 @@ struct hardfork_visitor {
                                              protocol::offset_deposit_operation,
                                              protocol::offset_claim_operation,
                                              protocol::issuance_exit_request_operation >;
+   // Reserved G-track stubs (tags 104-109): disabled until Task 5 replaces
+   // them with the real stealth implementations.
+   using reserved_g_ops = fc::typelist::list< protocol::stealth_transfer_operation,
+                                              protocol::freeze_blind_operation,
+                                              protocol::turnstile_reproof_operation,
+                                              protocol::parity_review_operation,
+                                              protocol::stealth_explicit_spend_operation,
+                                              protocol::stealth_pool_exchange_operation >;
 
    fc::time_point_sec now;
 
@@ -160,6 +168,9 @@ struct hardfork_visitor {
                      && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
                                          HARDFORK_H2_GATEWAY_TIME,
                                          HARDFORK_H2_PRICE_TIME ); }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<reserved_g_ops, Op>(), bool>
+    visit() { return false; }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

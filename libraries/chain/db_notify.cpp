@@ -42,6 +42,15 @@ struct get_impacted_account_visitor
 
    using result_type = void;
 
+   // Default for operation types without a specialized impacted-account rule
+   // (e.g. reserved G-track stubs): the fee payer is the only impacted
+   // account. Explicit overloads below take precedence.
+   template<typename T>
+   void operator()( const T& op )
+   {
+      _impacted.insert( op.fee_payer() );
+   }
+
    void operator()( const transfer_operation& op )
    {
       _impacted.insert( op.to );

@@ -110,7 +110,7 @@ namespace graphene { namespace chain {
     *
     * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 3
     */
-   optional<protocol::foreign_tx_value> h2_read_foreign_tx(
+   optional<protocol::foreign_tx_value> f_read_foreign_tx(
          const database& d, oracle_id_type oracle, time_point_sec now,
          h2_price_liveness liveness );
 

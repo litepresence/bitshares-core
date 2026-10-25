@@ -312,7 +312,7 @@ struct accs_fixture : database_fixture
    }
 
    /// Publish + promote a lock record through the F1 oracle shell so fulfill's
-   /// h2_read_foreign_tx can read it (mirrors the F1 foreign-tx test recipe).
+   /// f_read_foreign_tx can read it (mirrors the F1 foreign-tx test recipe).
    graphene::protocol::foreign_tx_value promote_lock( uint8_t hash_b0, int64_t amount,
                                             uint64_t height )
    {

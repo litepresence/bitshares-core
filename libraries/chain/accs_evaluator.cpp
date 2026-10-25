@@ -522,7 +522,7 @@ void_result accs_fulfill_evaluator::do_evaluate( const accs_fulfill_operation& o
    }
 
    // Verify the promoted F1 foreign-transaction record.
-   const auto got = h2_read_foreign_tx( d, gw->oracle_id, d.head_block_time(), h2_price_liveness::live );
+   const auto got = f_read_foreign_tx( d, gw->oracle_id, d.head_block_time(), h2_price_liveness::live );
    FC_ASSERT( got.valid(), "No promoted foreign transaction record for this oracle" );
 
    FC_ASSERT( got->tx_id == tx_id, "Foreign tx hash does not match the promoted record" );

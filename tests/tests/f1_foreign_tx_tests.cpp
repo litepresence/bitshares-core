@@ -192,7 +192,7 @@ BOOST_AUTO_TEST_CASE( foreign_tx_oracle_publishes_lock_promoted_readable )
    foreign_tx_value val = make_ftv( foreign_chain_id::bitcoin, 1, 1000, 10 );
    time_point_sec t = db.head_block_time();
    promote_foreign( *this, oid, val, t );
-   auto got = h2_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
+   auto got = f_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
    BOOST_REQUIRE( got.valid() );
    BOOST_CHECK( got->tx_id.hash[0] == 1 );
    } FC_LOG_AND_RETHROW()
@@ -214,7 +214,7 @@ BOOST_AUTO_TEST_CASE( foreign_tx_oracle_stale_live_not_readable )
    foreign_tx_value val = make_ftv( foreign_chain_id::bitcoin, 2, 1000, 10 );
    time_point_sec t = db.head_block_time() - 4000;
    promote_foreign( *this, oid, val, t );
-   auto got = h2_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
+   auto got = f_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
    BOOST_CHECK( !got.valid() );
    } FC_LOG_AND_RETHROW()
 }
@@ -235,7 +235,7 @@ BOOST_AUTO_TEST_CASE( foreign_tx_oracle_stale_age_exempt_readable )
    foreign_tx_value val = make_ftv( foreign_chain_id::bitcoin, 3, 1000, 10 );
    time_point_sec t = db.head_block_time() - 4000;
    promote_foreign( *this, oid, val, t );
-   auto got = h2_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::age_exempt );
+   auto got = f_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::age_exempt );
    BOOST_CHECK( got.valid() );
    } FC_LOG_AND_RETHROW()
 }
@@ -257,7 +257,7 @@ BOOST_AUTO_TEST_CASE( foreign_tx_oracle_unbonded_not_readable )
    promote_foreign( *this, oid, val, db.head_block_time() );
    // need guard shell
    h2_ensure_oracle_econ( db, oid );
-   auto got = h2_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
+   auto got = f_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
    BOOST_CHECK( !got.valid() );
    } FC_LOG_AND_RETHROW()
 }
@@ -279,7 +279,7 @@ BOOST_AUTO_TEST_CASE( foreign_tx_oracle_frozen_not_readable )
    promote_foreign( *this, oid, val, db.head_block_time() );
    // freeze
    db.modify( oid( db ), []( oracle_object& o ){ o.options.frozen = true; } );
-   auto got = h2_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
+   auto got = f_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
    BOOST_CHECK( !got.valid() );
    } FC_LOG_AND_RETHROW()
 }
@@ -298,7 +298,7 @@ BOOST_AUTO_TEST_CASE( foreign_tx_oracle_never_consumed_not_readable )
    const oracle_id_type oid = make_foreign_oracle( *this, alice_id, alice_private_key, bob_id, bts_ref, usd_ref );
    lock_producer_bond( *this, bob_id, bob_private_key, oid );
    // no consumed value
-   auto got = h2_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
+   auto got = f_read_foreign_tx( db, oid, db.head_block_time(), h2_price_liveness::live );
    BOOST_CHECK( !got.valid() );
    } FC_LOG_AND_RETHROW()
 }
@@ -363,8 +363,8 @@ BOOST_AUTO_TEST_CASE( foreign_tx_match_by_tx_id_equality )
    promote_foreign( *this, o1, v1, db.head_block_time() );
    promote_foreign( *this, o2, v2, db.head_block_time() );
 
-   auto g1 = h2_read_foreign_tx( db, o1, db.head_block_time(), h2_price_liveness::live );
-   auto g2 = h2_read_foreign_tx( db, o2, db.head_block_time(), h2_price_liveness::live );
+   auto g1 = f_read_foreign_tx( db, o1, db.head_block_time(), h2_price_liveness::live );
+   auto g2 = f_read_foreign_tx( db, o2, db.head_block_time(), h2_price_liveness::live );
    BOOST_REQUIRE( g1.valid() && g2.valid() );
    BOOST_CHECK( g1->tx_id != g2->tx_id );
    } FC_LOG_AND_RETHROW()

@@ -46,13 +46,6 @@
 
 namespace graphene { namespace chain {
 
-bool h2_legs_ordered( const fc::time_point_sec& bonds,
-                       const fc::time_point_sec& gateway,
-                       const fc::time_point_sec& price )
-{
-   return bonds < gateway && gateway < price;
-}
-
 
 namespace {
    using boost::multiprecision::uint256_t;

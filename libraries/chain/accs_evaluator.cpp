@@ -108,10 +108,17 @@ object_id_type accs_declare_gateway_evaluator::do_apply( const accs_declare_gate
       // rows. chain_id 3 is the first value past the declared range.
       const auto& cidx = d.get_index_type<accs_consumed_tx_index>()
                             .indices().get<by_chain_asset_tx>();
-      auto lower = cidx.lower_bound( boost::make_tuple( op.chain_id, std::string(),
+      // Resync is per (chain, asset) pair: count only this pair's durable rows.
+      // Walking by chain_id alone (chain >= declared) would pull in every
+      // higher chain's and every other asset's consumed rows and inflate the
+      // counter, failing closed on unrelated pairs (F1F2-C01 follow-up).
+      auto lower = cidx.lower_bound( boost::make_tuple( op.chain_id, op.foreign_asset_id,
                                                         protocol::foreign_tx_id() ) );
-      auto upper = cidx.lower_bound( boost::make_tuple( uint8_t( 3 ), std::string(),
-                                                        protocol::foreign_tx_id() ) );
+      auto upper = lower;
+      while( upper != cidx.end() &&
+             upper->chain_id == op.chain_id &&
+             upper->foreign_asset_id == op.foreign_asset_id )
+         ++upper;
       consumed_count = static_cast<uint32_t>( std::distance( lower, upper ) );
    }
 

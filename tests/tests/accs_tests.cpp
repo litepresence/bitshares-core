@@ -1049,4 +1049,28 @@ BOOST_AUTO_TEST_CASE( orderbooks_are_distinct_per_pair )
    BOOST_CHECK( off1->orderbook != off2->orderbook );
 }
 
+/// The declaration-time counter resync is per (chain, asset) pair: rows
+/// consumed on a different chain must not inflate this pair's counter.
+/// (F1F2-C01 follow-up: cross-pair over-count in the resync loop.)
+BOOST_AUTO_TEST_CASE( accs_consumed_tx_count_resync_is_per_pair )
+{
+   build();
+   // Seed consumed rows on chain 2 (a different chain than the one declared).
+   for( uint32_t i = 0; i < 5; ++i )
+      db.create<accs_consumed_tx_object>( [&]( accs_consumed_tx_object& c ) {
+         c.chain_id = 2;
+         c.foreign_asset_id = "other-pair";
+         c.tx.hash[0] = uint8_t( i );
+         c.consumed_block = 1;
+      } );
+
+   // Declare a chain-1 gateway; its counter must reflect only chain-1 rows.
+   declare_gateway( 1 );
+   const auto& gw_idx = db.get_index_type<accs_gateway_index>()
+                           .indices().get<by_chain_asset>();
+   auto gw = gw_idx.find( boost::make_tuple( uint8_t(1), std::string() ) );
+   BOOST_REQUIRE( gw != gw_idx.end() );
+   BOOST_CHECK_EQUAL( gw->consumed_tx_count, 0u );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

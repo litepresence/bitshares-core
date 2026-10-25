@@ -31,6 +31,7 @@
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/protocol/credit_offer.hpp>
 #include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/accs_ops.hpp>
 #include <graphene/protocol/custom.hpp>
 #include <graphene/protocol/custom_authority.hpp>
 #include <graphene/protocol/fba.hpp>
@@ -170,7 +171,15 @@ namespace graphene { namespace protocol {
              /* 106 */ turnstile_reproof_operation,  // G1 BSIP-2 (STEALTH hardfork-gated)
              /* 107 */ parity_review_operation,      // BSIP-2 §2 (STEALTH hardfork-gated)
              /* 108 */ stealth_explicit_spend_operation,
-              /* 109 */ stealth_pool_exchange_operation   // G2 BSIP-2 pool swaps (STEALTH hardfork-gated)
+              /* 109 */ stealth_pool_exchange_operation,   // G2 BSIP-2 pool swaps (STEALTH hardfork-gated)
+             /* 110 */ oracle_foreign_publish_operation,
+             /* 111 */ accs_declare_gateway_operation,
+             /* 112 */ accs_deactivate_gateway_operation,
+             /* 113 */ accs_create_offer_operation,
+             /* 114 */ accs_cancel_offer_operation,
+             /* 115 */ accs_match_offer_operation,
+             /* 116 */ accs_fulfill_operation,
+             /* 117 */ accs_claim_griefing_operation
             >;
 
    /**

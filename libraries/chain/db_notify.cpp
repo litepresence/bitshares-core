@@ -41,6 +41,12 @@ struct get_impacted_account_visitor
 
    using result_type = void;
 
+   template<typename T>
+   void operator()( const T& op )
+   {
+      _impacted.insert( op.fee_payer() );
+   }
+
    void operator()( const transfer_operation& op )
    {
       _impacted.insert( op.to );

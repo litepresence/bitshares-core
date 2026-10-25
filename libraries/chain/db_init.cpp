@@ -35,6 +35,7 @@
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/accs_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>

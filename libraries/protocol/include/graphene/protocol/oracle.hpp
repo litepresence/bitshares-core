@@ -25,6 +25,7 @@
 
 #include <graphene/protocol/base.hpp>
 #include <graphene/protocol/asset.hpp>
+#include <array>
 
 namespace graphene { namespace protocol {
 
@@ -71,10 +72,27 @@ namespace graphene { namespace protocol {
    /// Upper bound on the committee-set guard delay (1 day). Bounds the pending queue's
    /// time span; enforced in chain_parameters::validate().
    constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_DELAY_SEC = 86400;
+   /// H1-FINAL-06 + R17G: coded floor on the committee-set OSM
+   /// delay. Sub-minute values are refused at validate (the unset default is
+   /// the floor), and the whole-hour stall classes are covered by the R17G
+   /// bucket repair plus the t8b2 regression.
+   constexpr uint32_t GRAPHENE_ORACLE_GUARD_MIN_DELAY_SEC
+      = GRAPHENE_ORACLE_GUARD_DEFAULT_DELAY_SEC;
 
    /// Upper bound on an oracle's guarded pending queue. Samples are bucketed so a full
    /// queue always spans the configured delay whatever the publish rate.
    constexpr uint32_t GRAPHENE_ORACLE_GUARD_MAX_PENDING = 16;
+
+   /**
+    * GOV-R9-02 consensus time-lock: a challenge-set freeze costs a 2/3
+    * supermajority of the deciding set, while `oracle_unfreeze` costs one
+    * seated member and one op fee. The op therefore may not apply until this
+    * many seconds after the oracle's `open_disputes` last reached 0 (the
+    * clear anchor is recorded then; never recorded = never cleared = never
+    * unfrozen through this op). Integer seconds against head-block time
+    * only: no wall-clock, no floats.
+    */
+   constexpr uint32_t GRAPHENE_ORACLE_UNFREEZE_DELAY_SEC = 14 * 24 * 60 * 60;
 
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MIN_SYMBOL_LENGTH = 2;
     constexpr size_t GRAPHENE_REFERENCE_ASSET_MAX_SYMBOL_LENGTH = 16;
@@ -117,7 +135,8 @@ namespace graphene { namespace protocol {
       mid  = 0,
       last = 1,
       bid  = 2,
-      ask  = 3
+      ask        = 3,
+      foreign_tx = 4
    };
 
    /// How the value in a series was rounded by its producer. A consumer that reads a series
@@ -178,8 +197,76 @@ namespace graphene { namespace protocol {
    inline bool operator >= ( const oracle_value& a, const oracle_value& b ) { return !(a < b); }
    inline bool operator != ( const oracle_value& a, const oracle_value& b ) { return !(a == b); }
 
-   /**
-    * One producer's entry in an oracle's producer set. A struct, not a bare weight, so that
+    /// Foreign chain identifiers (H3). Appended enum, never inserted.
+    enum class foreign_chain_id : uint8_t
+    {
+       bitcoin  = 0,
+       ethereum = 1,
+       solana   = 2
+    };
+
+    /// Fixed-size foreign transaction id (32 bytes, all chains).
+    struct foreign_tx_id
+    {
+       std::array<uint8_t, 32> hash{};
+
+       foreign_tx_id() = default;
+       explicit foreign_tx_id( const std::array<uint8_t, 32>& h ) : hash( h ) {}
+
+       bool operator==( const foreign_tx_id& o ) const { return hash == o.hash; }
+       bool operator!=( const foreign_tx_id& o ) const { return hash != o.hash; }
+       bool operator<( const foreign_tx_id& o ) const { return hash < o.hash; }
+    };
+
+    /// Event kind reported by a foreign chain transaction oracle.
+    enum class foreign_tx_kind : uint8_t
+    {
+       lock   = 0,
+       unlock = 1,
+       refund = 2
+    };
+
+    /// Value reported by a foreign chain transaction oracle (an event, not a ratio).
+    struct foreign_tx_value
+    {
+       foreign_chain_id  chain = foreign_chain_id::bitcoin;
+       foreign_tx_id     tx_id;
+       foreign_tx_kind   kind = foreign_tx_kind::lock;
+       int64_t           amount = 0;
+       uint8_t           foreign_asset_id = 0;
+       uint64_t          confirmation_height = 0;
+       uint64_t          confirmation_count = 0;
+
+       foreign_tx_value() = default;
+
+       void validate() const
+       {
+          FC_ASSERT( amount >= 0, "Foreign tx amount must be non-negative" );
+       }
+    };
+
+    bool operator==( const foreign_tx_value& a, const foreign_tx_value& b );
+
+    /**
+     * Whether two foreign transaction records AGREE on the fields the
+     * consumers trust. The confirmation height is NOT one of them: two
+     * observers of the same transaction can legitimately see different
+     * heights. Everything else is: the chain, the transaction id, the event
+     * kind, the amount, and the foreign asset. A quorum that agrees only on
+     * the transaction id would let a producer re-publish an id the honest
+     * quorum attested with a forged amount, and the mint trusts the promoted
+     * record.
+     */
+    inline bool foreign_tx_value_agrees( const foreign_tx_value& a, const foreign_tx_value& b )
+    {
+       return a.chain == b.chain && a.tx_id == b.tx_id && a.kind == b.kind
+              && a.amount == b.amount && a.foreign_asset_id == b.foreign_asset_id;
+    }
+    inline bool operator!=( const foreign_tx_value& a, const foreign_tx_value& b )
+    { return !( a == b ); }
+
+    /**
+     * One producer's entry in an oracle's producer set. A struct, not a bare weight, so that
     * an economic layer (bonds, reward shares) can be added later without a new operation.
     * The extensions field is wire space only in this stage: no bond logic reads it.
     * See ORACLE-DESIGN.md "What the first stage does to keep this possible".
@@ -525,6 +612,41 @@ namespace graphene { namespace protocol {
       void            validate()const;
    };
 
+   /**
+    * @brief Publishes a foreign chain transaction record.
+    * @ingroup operations
+    *
+    * The foreign chain transaction oracle's publish path (H3). A price
+    * oracle publishes a ratio; a transaction oracle publishes an EVENT: that a
+    * specific transaction happened on a foreign chain. The producer is an
+    * attestor of the oracle, and the record carries the chain, the
+    * transaction id, the event kind, the amount in the foreign asset's
+    * smallest units, and the confirmation height.
+    *
+    * The record is promoted through the SAME guard machinery as a price feed
+    * (delay queue, freeze, per-interval rate limit, promotion proof). The
+    * consumption semantics differ: a transaction record is matched by
+    * EQUALITY on the transaction id, never by ratio.
+    *
+    * Spec: docs/superpowers/specs/2026-10-20-h3-bitcoin-accs-foreign-chain-vaults-design.md section 3
+    */
+   struct oracle_foreign_publish_operation : public base_operation
+   {
+      struct fee_params_t { uint64_t fee = GRAPHENE_BLOCKCHAIN_PRECISION / 10; };
+
+      asset            fee;
+      account_id_type  producer;     ///< The attestor publishing the record
+      oracle_id_type   oracle_id;    ///< The foreign chain transaction oracle
+
+      /// The observed event. Exactly one record per publish.
+      foreign_tx_value value;
+
+      extensions_type  extensions;
+
+      account_id_type fee_payer()const { return producer; }
+      void            validate()const;
+   };
+
    /// @return whether @p name is acceptable as an oracle name
    bool is_valid_oracle_name( const string& name );
 
@@ -559,7 +681,11 @@ namespace graphene { namespace protocol {
 FC_REFLECT_ENUM( graphene::protocol::oracle_aggregation_method,
                  (median_of_latest)(median_over_window) )
 FC_REFLECT_ENUM( graphene::protocol::oracle_series_kind,
-                 (mid)(last)(bid)(ask) )
+                 (mid)(last)(bid)(ask)(foreign_tx) )
+FC_REFLECT_ENUM( graphene::protocol::foreign_chain_id,
+                  (bitcoin)(ethereum)(solana) )
+FC_REFLECT_ENUM( graphene::protocol::foreign_tx_kind,
+                  (lock)(unlock)(refund) )
 FC_REFLECT_ENUM( graphene::protocol::oracle_series_rounding,
                  (unspecified)(down)(up) )
 
@@ -568,6 +694,12 @@ FC_REFLECT( graphene::protocol::oracle_series,
 
 FC_REFLECT( graphene::protocol::oracle_value,
             (base_amount)(quote_amount) )
+
+FC_REFLECT( graphene::protocol::foreign_tx_id,
+            (hash) )
+
+FC_REFLECT( graphene::protocol::foreign_tx_value,
+            (chain)(tx_id)(kind)(amount)(foreign_asset_id)(confirmation_height)(confirmation_count) )
 
 FC_REFLECT( graphene::protocol::oracle_producer_entry,
              (weight)(extensions) )
@@ -602,11 +734,16 @@ FC_REFLECT( graphene::protocol::oracle_unfreeze_operation,
             (fee)(unfreezer)(oracle)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_delete_operation,
             (fee)(owner)(oracle_id)(extensions) )
+FC_REFLECT( graphene::protocol::oracle_foreign_publish_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::oracle_foreign_publish_operation,
+            (fee)(producer)(oracle_id)(value)(extensions) )
 FC_REFLECT( graphene::protocol::oracle_publish_operation,
             (fee)(producer)(oracle_id)(values)(extensions) )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_value )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_id )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_value )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_entry )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_producer_reputation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::price_oracle )
@@ -624,3 +761,4 @@ GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_ope
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation )
+GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_foreign_publish_operation )

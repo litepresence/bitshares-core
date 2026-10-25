@@ -372,6 +372,19 @@ price convert_oracle_value_to_price(
                  asset( out_den.convert_to<int64_t>(), backing_asset ) );
 }
 
+void oracle_foreign_publish_operation::validate()const
+{
+   FC_ASSERT( fee.amount >= 0, "Fee should not be negative" );
+   FC_ASSERT( value.amount > 0,
+              "A published foreign transaction record must carry a positive amount" );
+   bool nonzero = false;
+   for( const uint8_t b : value.tx_id.hash )
+      if( b != 0 )
+         nonzero = true;
+   FC_ASSERT( nonzero, "A published foreign transaction record must carry a transaction id" );
+   value.validate();
+}
+
 } } // graphene::protocol
 
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_series )
@@ -393,3 +406,6 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_o
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_unfreeze_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_delete_operation )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_publish_operation )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_id )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::foreign_tx_value )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::protocol::oracle_foreign_publish_operation )

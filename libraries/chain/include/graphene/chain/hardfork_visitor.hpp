@@ -101,6 +101,15 @@ struct hardfork_visitor {
                                            protocol::parity_review_operation,
                                            protocol::stealth_explicit_spend_operation,
                                            protocol::stealth_pool_exchange_operation >;
+   // Reserved F-track ops (tags 110-117): disabled on G (G does not apply F).
+   using reserved_f_ops = fc::typelist::list< protocol::oracle_foreign_publish_operation,
+                                             protocol::accs_declare_gateway_operation,
+                                             protocol::accs_deactivate_gateway_operation,
+                                             protocol::accs_create_offer_operation,
+                                             protocol::accs_cancel_offer_operation,
+                                             protocol::accs_match_offer_operation,
+                                             protocol::accs_fulfill_operation,
+                                             protocol::accs_claim_griefing_operation >;
 
    fc::time_point_sec now;
 
@@ -161,6 +170,9 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<stealth_ops, Op>(), bool>
    visit() { return HARDFORK_STEALTH_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<reserved_f_ops, Op>(), bool>
+   visit() { return false; }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

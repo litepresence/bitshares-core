@@ -143,10 +143,10 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
          o.nav_history.push_back(e);
          if (o.nav_history.size() > 365) o.nav_history.erase(o.nav_history.begin());
       }
-      // update high water mark
-      if (o.high_water_mark == 0 || (fc::uint128_t)op.nav_num * o.high_water_mark > (fc::uint128_t)op.nav_den * 1) {
-         // simplified: update HWM to nav_num/nav_den scaled
-         o.high_water_mark = op.nav_num;
+      // update high water mark: store peak NAV scaled to 1e8
+      fc::uint128_t candidate = (fc::uint128_t)op.nav_num * 100000000ULL / op.nav_den;
+      if (o.high_water_mark == 0 || candidate > o.high_water_mark) {
+         o.high_water_mark = (uint64_t)candidate;
       }
    });
    return result;

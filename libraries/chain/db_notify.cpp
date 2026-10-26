@@ -346,27 +346,27 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // account
    }
-   void operator()( const bsip4_pool_create_operation& op )
+   void operator()( const reciprocity_pool_create_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // creator
    }
-   void operator()( const bsip4_pool_deposit_operation& op )
+   void operator()( const reciprocity_pool_add_liquidity_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // account
    }
-   void operator()( const bsip4_pool_withdraw_operation& op )
+   void operator()( const reciprocity_pool_remove_liquidity_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // account
    }
-   void operator()( const bsip4_pool_swap_operation& op )
+   void operator()( const reciprocity_pool_swap_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // account
    }
-   void operator()( const bsip4_claim_founder_fees_operation& op )
+   void operator()( const reciprocity_claim_founder_royalty_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // account
    }
-   void operator()( const bsip4_claim_promoter_fees_operation& op )
+   void operator()( const reciprocity_claim_promoter_royalty_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // account
    }

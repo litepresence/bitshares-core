@@ -37,6 +37,8 @@
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
+#include <graphene/chain/reciprocity_pool_object.hpp>
+#include <graphene/chain/reciprocity_factory_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -71,7 +73,7 @@
 #include <graphene/chain/witness_evaluator.hpp>
 #include <graphene/chain/worker_evaluator.hpp>
 #include <graphene/chain/htlc_evaluator.hpp>
-#include <graphene/chain/bsip4_evaluator.hpp>
+#include <graphene/chain/reciprocity_evaluator.hpp>
 #include <graphene/chain/custom_authority_evaluator.hpp>
 
 namespace graphene { namespace chain {
@@ -128,12 +130,12 @@ void database::initialize_evaluators()
    register_evaluator<htlc_create_evaluator>();
    register_evaluator<htlc_redeem_evaluator>();
    register_evaluator<htlc_extend_evaluator>();
-   register_evaluator<bsip4_pool_create_evaluator>();
-   register_evaluator<bsip4_pool_deposit_evaluator>();
-   register_evaluator<bsip4_pool_withdraw_evaluator>();
-   register_evaluator<bsip4_pool_swap_evaluator>();
-   register_evaluator<bsip4_claim_founder_fees_evaluator>();
-   register_evaluator<bsip4_claim_promoter_fees_evaluator>();
+   register_evaluator<reciprocity_pool_create_evaluator>();
+   register_evaluator<reciprocity_pool_swap_evaluator>();
+   register_evaluator<reciprocity_pool_add_liquidity_evaluator>();
+   register_evaluator<reciprocity_pool_remove_liquidity_evaluator>();
+   register_evaluator<reciprocity_claim_founder_royalty_evaluator>();
+   register_evaluator<reciprocity_claim_promoter_royalty_evaluator>();
    register_evaluator<custom_authority_create_evaluator>();
    register_evaluator<custom_authority_update_evaluator>();
    register_evaluator<custom_authority_delete_evaluator>();
@@ -182,6 +184,8 @@ void database::initialize_indexes()
    add_index< primary_index< custom_authority_index> >();
    add_index< primary_index<ticket_index> >();
    add_index< primary_index<liquidity_pool_index> >();
+   add_index< primary_index<reciprocity_pool_index> >();
+   add_index< primary_index<reciprocity_factory_index> >();
    add_index< primary_index<samet_fund_index> >();
    add_index< primary_index<credit_offer_index> >();
    add_index< primary_index<credit_deal_index> >();

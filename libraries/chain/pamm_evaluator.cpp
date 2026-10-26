@@ -44,18 +44,33 @@ generic_operation_result pamm_deposit_evaluator::do_apply(const pamm_deposit_ope
 { try {
    database& d = db();
    generic_operation_result result;
-   result.updated_objects.insert(_pool->id);
-   d.modify( *_pool, [&](pamm_pool_object& o){
-      // mint shares at current NAV: 1:1 on first deposit
+   // determine shares to mint first (read-only)
+   share_type shares_to_mint;
+   {
+      const pamm_pool_object& o = *_pool;
       if (o.share_supply == 0) {
-         o.share_supply = (share_type)op.amount.amount.value;
+         shares_to_mint = (share_type)op.amount.amount.value;
       } else {
-         // shares = amount * share_supply / tank_balance
+         FC_ASSERT( o.tank_balance.value > 0, "pool tank empty" );
          fc::uint128_t shares = fc::uint128_t(op.amount.amount.value) * o.share_supply.value / o.tank_balance.value;
-         o.share_supply += (share_type)shares;
+         shares_to_mint = (share_type)shares;
       }
+      FC_ASSERT( shares_to_mint.value > 0, "zero shares minted" );
+   }
+   // move funds
+   d.adjust_balance( op.investor, -op.amount );
+   // issue shares
+   const asset_object& share_asset_obj = _pool->share_asset(d);
+   d.modify( share_asset_obj.dynamic_data(d), [&shares_to_mint](asset_dynamic_data_object& dd){
+      dd.current_supply += shares_to_mint;
+   });
+   d.adjust_balance( op.investor, asset(shares_to_mint, _pool->share_asset) );
+   // update pool
+   d.modify( *_pool, [&](pamm_pool_object& o){
+      o.share_supply += shares_to_mint;
       o.tank_balance += op.amount.amount;
    });
+   result.updated_objects.insert(_pool->id);
    return result;
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -72,14 +87,30 @@ generic_operation_result pamm_withdraw_evaluator::do_apply(const pamm_withdraw_o
 { try {
    database& d = db();
    generic_operation_result result;
-   result.updated_objects.insert(_pool->id);
-   d.modify( *_pool, [&](pamm_pool_object& o){
-      // amount = shares * tank_balance / share_supply
+   share_type amt_to_pay;
+   {
+      const pamm_pool_object& o = *_pool;
+      FC_ASSERT( o.share_supply.value > 0, "no shares outstanding" );
+      FC_ASSERT( op.share_amount.amount <= o.share_supply, "insufficient shares" );
       fc::uint128_t amt = fc::uint128_t(op.share_amount.amount.value) * o.tank_balance.value / o.share_supply.value;
-      o.share_supply -= op.share_amount.amount;
-      o.tank_balance -= (share_type)amt;
-      
+      FC_ASSERT( amt <= (fc::uint128_t)o.tank_balance.value, "payout exceeds tank" );
+      amt_to_pay = (share_type)amt;
+      FC_ASSERT( amt_to_pay.value > 0, "zero payout" );
+   }
+   // burn shares from investor
+   d.adjust_balance( op.investor, -op.share_amount );
+   const asset_object& share_asset_obj = _pool->share_asset(d);
+   d.modify( share_asset_obj.dynamic_data(d), [&op](asset_dynamic_data_object& dd){
+      dd.current_supply -= op.share_amount.amount;
    });
+   // pay investor
+   d.adjust_balance( op.investor, asset(amt_to_pay, _pool->pool_asset) );
+   // update pool
+   d.modify( *_pool, [&](pamm_pool_object& o){
+      o.share_supply -= op.share_amount.amount;
+      o.tank_balance -= amt_to_pay;
+   });
+   result.updated_objects.insert(_pool->id);
    return result;
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 

@@ -83,6 +83,7 @@ namespace graphene { namespace chain {
          asset _account_receives;
          asset _pool_receives_a;
          asset _pool_receives_b;
+         share_type _imbalance_fee = 0;   ///< BSIP-6: imbalance fee on stable-pool deposits
    };
 
    class liquidity_pool_withdraw_evaluator : public evaluator<liquidity_pool_withdraw_evaluator>

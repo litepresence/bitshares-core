@@ -1,4 +1,5 @@
 #include <graphene/chain/pamm_evaluator.hpp>
+#include <algorithm>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork_visitor.hpp>
 
@@ -134,10 +135,10 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
       e.nav_num = op.nav_num;
       e.nav_den = op.nav_den;
       // replace if same day
-      bool replaced = false;
-      for (auto& x : o.nav_history) {
-         if (x.day == e.day) { x = e; replaced = true; break; }
-      }
+      auto it = std::find_if(o.nav_history.begin(), o.nav_history.end(),
+                             [&e](const pamm_pool_object::nav_entry& x) { return x.day == e.day; });
+      bool replaced = (it != o.nav_history.end());
+      if (replaced) *it = e;
       if (!replaced) {
          o.nav_history.push_back(e);
          if (o.nav_history.size() > 365) o.nav_history.erase(o.nav_history.begin());

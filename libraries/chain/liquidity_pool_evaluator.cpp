@@ -34,7 +34,6 @@
 #include <graphene/protocol/liquidity_pool.hpp>
 
 #include <graphene/chain/stableswap.hpp>
-#include <graphene/chain/stableswap.hpp>
 
 namespace graphene { namespace chain {
 
@@ -262,11 +261,11 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
             if( excess_amount > 0 )
             {
                fc::uint128_t swap_fee = excess_amount * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-               _imbalance_fee = swap_fee / 2; // n/(4(n-1)) = 1/2 for n=2
+               _imbalance_fee = static_cast<share_type>(swap_fee / 2); // n/(4(n-1)) = 1/2 for n=2
 
                if( _imbalance_fee > 0 && excess_asset_balance > 0 )
                {
-                  fc::uint128_t fee_shares = _imbalance_fee * _share_asset_dyn_data->current_supply.value / excess_asset_balance;
+                  fc::uint128_t fee_shares = fc::uint128_t(_imbalance_fee.value) * _share_asset_dyn_data->current_supply.value / excess_asset_balance;
                   if( fee_shares > 0 && fc::uint128_t(_account_receives.amount.value) > fee_shares )
                   {
                      _account_receives = asset( static_cast<int64_t>( fc::uint128_t(_account_receives.amount.value) - fee_shares ), _pool->share_asset );
@@ -387,7 +386,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
                static_cast<uint64_t>(_pool->balance_b.value),
                static_cast<uint64_t>(D_prop),
                _pool->amplification );
-            FC_ASSERT( new_balance_a > 0 && new_balance_a < _pool->balance_a.value,
+            FC_ASSERT( new_balance_a > 0 && new_balance_a < (uint64_t)_pool->balance_a.value,
                        "Invalid single-sided withdrawal result" );
 
             uint64_t total_a_paid = _pool->balance_a.value - new_balance_a;
@@ -410,7 +409,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
                static_cast<uint64_t>(_pool->balance_a.value),
                static_cast<uint64_t>(D_prop),
                _pool->amplification );
-            FC_ASSERT( new_balance_b > 0 && new_balance_b < _pool->balance_b.value,
+            FC_ASSERT( new_balance_b > 0 && new_balance_b < (uint64_t)_pool->balance_b.value,
                        "Invalid single-sided withdrawal result" );
 
             uint64_t total_b_paid = _pool->balance_b.value - new_balance_b;
@@ -555,7 +554,7 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
       {
          uint64_t x = (uint64_t)_pool->balance_a.value;
          uint64_t y = (uint64_t)_pool->balance_b.value;
-         fc::uint128 D = compute_stableswap_d( x, y, A );
+         fc::uint128_t D = compute_stableswap_d( x, y, A );
          uint64_t new_x = x + (uint64_t)_pool_receives.amount.value;
          uint64_t new_y = compute_stableswap_y( new_x, (uint64_t)D, A );
          FC_ASSERT( new_y <= y, "Internal error" );
@@ -566,7 +565,7 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
       {
          uint64_t x = (uint64_t)_pool->balance_b.value;
          uint64_t y = (uint64_t)_pool->balance_a.value;
-         fc::uint128 D = compute_stableswap_d( x, y, A );
+         fc::uint128_t D = compute_stableswap_d( x, y, A );
          uint64_t new_x = x + (uint64_t)_pool_receives.amount.value;
          uint64_t new_y = compute_stableswap_y( new_x, (uint64_t)D, A );
          FC_ASSERT( new_y <= y, "Internal error" );

@@ -34,6 +34,9 @@ namespace graphene { namespace protocol {
       fc::optional<flat_set<account_id_type>> whitelist_market_fee_sharing;
       // After BSIP81 activation, taker_fee_percent is the taker fee
       fc::optional<uint16_t>                  taker_fee_percent;
+      // BSIP-5: open order fee in basis points (0..500, default 0) charged on the
+      // received asset inside fill accounting when the asset opts into rewards.
+      fc::optional<uint16_t>                  open_order_fee;
    };
    typedef extension<additional_asset_options> additional_asset_options_t;
 
@@ -658,7 +661,7 @@ FC_REFLECT( graphene::protocol::bitasset_options,
           )
 
 FC_REFLECT( graphene::protocol::additional_asset_options,
-            (reward_percent)(whitelist_market_fee_sharing)(taker_fee_percent) )
+            (reward_percent)(whitelist_market_fee_sharing)(taker_fee_percent)(open_order_fee) )
 
 FC_REFLECT( graphene::protocol::asset_update_operation::ext, (new_precision)(skip_core_exchange_rate) )
 FC_REFLECT( graphene::protocol::asset_publish_feed_operation::ext, (initial_collateral_ratio) )

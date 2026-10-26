@@ -37,6 +37,7 @@
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
+#include <graphene/chain/market_reward_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -128,7 +129,9 @@ void database::initialize_evaluators()
    register_evaluator<htlc_create_evaluator>();
    register_evaluator<htlc_redeem_evaluator>();
    register_evaluator<htlc_extend_evaluator>();
-   register_evaluator<bsip5_claim_rewards_evaluator>();
+   register_evaluator<bsip5_opt_in_evaluator>();
+   register_evaluator<bsip5_payout_evaluator>();
+   register_evaluator<bsip5_claim_rebate_evaluator>();
    register_evaluator<custom_authority_create_evaluator>();
    register_evaluator<custom_authority_update_evaluator>();
    register_evaluator<custom_authority_delete_evaluator>();
@@ -177,6 +180,7 @@ void database::initialize_indexes()
    add_index< primary_index< custom_authority_index> >();
    add_index< primary_index<ticket_index> >();
    add_index< primary_index<liquidity_pool_index> >();
+   add_index< primary_index<market_reward_index> >();
    add_index< primary_index<samet_fund_index> >();
    add_index< primary_index<credit_offer_index> >();
    add_index< primary_index<credit_deal_index> >();

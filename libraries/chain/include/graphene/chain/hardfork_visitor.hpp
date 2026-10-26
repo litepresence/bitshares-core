@@ -68,7 +68,9 @@ struct hardfork_visitor {
                                                 protocol::credit_deal_repay_operation,
                                                 protocol::credit_deal_expired_operation >;
    using credit_deal_update_op = fc::typelist::list< protocol::credit_deal_update_operation >;
-   using bsip5_ops = fc::typelist::list< protocol::bsip5_claim_rewards_operation >;
+   using bsip5_ops = fc::typelist::list< protocol::bsip5_opt_in_operation,
+                                                 protocol::bsip5_payout_operation,
+                                                 protocol::bsip5_claim_rebate_operation >;
 
    fc::time_point_sec now;
 

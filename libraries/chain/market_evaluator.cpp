@@ -131,6 +131,8 @@ object_id_type limit_order_create_evaluator::do_apply(const limit_order_create_o
        obj.deferred_paid_fee = _deferred_paid_fee;
        if( op.extensions.value.on_fill.valid() )
           obj.on_fill = *op.extensions.value.on_fill;
+       // BSIP-5: record placement block for reward time credit.
+       obj.bsip5_placement_block = this->db().head_block_num();
    });
    object_id_type order_id = new_order_object.id; // save this because we may remove the object by filling it
    bool filled;
@@ -455,6 +457,8 @@ void_result limit_order_update_evaluator::do_apply(const limit_order_update_oper
          loo.on_fill= *o.on_fill;
       if( unlink )
          loo.take_profit_order_id.reset();
+      // BSIP-5: amendment resets time credit.
+      loo.bsip5_placement_block = d.head_block_num();
    });
 
    // Perform order matching if necessary

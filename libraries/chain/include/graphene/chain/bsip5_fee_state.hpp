@@ -12,7 +12,7 @@ constexpr uint64_t BSIP5_MIN_T_BLOCKS = 100;
 constexpr uint64_t BSIP5_MAX_T_BLOCKS = 1200;
 constexpr uint64_t BSIP5_PROXIMITY_THRESHOLD_WAD = 900000000000000000ULL; // 0.9 * 1e18
 constexpr uint64_t BSIP5_WAD = 1000000000000000000ULL;
-constexpr uint64_t BSIP5_MAX_PAYOUT_ORDERS = 1000;
+constexpr uint64_t BSIP5_MAX_PAYOUT_ORDERS = 256;
 
 /// Time component: capped at MAX_T, excluded below MIN_T.
 inline uint64_t bsip5_time_component(uint64_t placement_block, uint64_t payout_block) {

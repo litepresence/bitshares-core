@@ -28,6 +28,8 @@
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/market_object.hpp>
+#include <graphene/chain/market_reward_object.hpp>
+#include <graphene/chain/bsip5_fee_state.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 
 #include <fc/uint128.hpp>
@@ -1797,7 +1799,56 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
 
    const auto issuer_fees = pay_market_fees(&seller, receives.asset_id(*this), receives, is_maker);
 
-   auto order_receives = receives - issuer_fees;
+   // BSIP-5: open order fee, charged on the received asset when it opts in.
+   asset bsip5_oo_fee = receives.asset_id(*this).amount(0);
+   if( HARDFORK_BSIP5_PASSED( head_block_time() ) )
+   {
+      const asset_object& recv_asset = receives.asset_id(*this);
+      const uint16_t oo_bps = recv_asset.options.extensions.value.open_order_fee.value_or(0);
+      if( oo_bps > 0 && oo_bps <= 500 )
+      {
+         const uint64_t oo_val = detail::calculate_percent( receives.amount, oo_bps );
+         bsip5_oo_fee = recv_asset.amount( oo_val );
+         if( bsip5_oo_fee.amount > 0 )
+         {
+            // maker rebate 70%, pool 30%
+            const uint64_t rebate_val = detail::calculate_percent( bsip5_oo_fee.amount, 7000 );
+            const asset maker_rebate = recv_asset.amount( rebate_val );
+            const asset pool_share = bsip5_oo_fee - maker_rebate;
+
+            // rebate into maker's vesting balance
+            if( maker_rebate.amount > 0 )
+               deposit_market_fee_vesting_balance( order.seller, maker_rebate );
+
+            // accumulate pool
+            auto& mr_idx = get_index_type<market_reward_index>().indices().get<by_market_asset>();
+            auto mit = mr_idx.find( boost::make_tuple( pays.asset_id, receives.asset_id, receives.asset_id ) );
+            if( mit == mr_idx.end() )
+            {
+               const market_reward_object& mr = create<market_reward_object>([&](market_reward_object& o){
+                  o.base_asset = pays.asset_id;
+                  o.quote_asset = receives.asset_id;
+                  o.reward_asset = receives.asset_id;
+                  o.pool_balance = pool_share.amount;
+                  if( pays.amount > 0 )
+                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount * BSIP5_WAD / pays.amount);
+                  o.reference_window_start_block = head_block_num();
+               });
+               (void)mr;
+            }
+            else
+            {
+               modify( *mit, [&pool_share, &pays, &receives, this](market_reward_object& o){
+                  o.pool_balance += pool_share.amount;
+                  if( pays.amount > 0 )
+                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount * BSIP5_WAD / pays.amount);
+               });
+            }
+         }
+      }
+   }
+
+   auto order_receives = receives - issuer_fees - bsip5_oo_fee;
    pay_order( seller, order_receives, pays );
 
    push_applied_operation( fill_order_operation( order.id, order.seller, pays, receives,

@@ -132,7 +132,9 @@ namespace graphene { namespace protocol {
             /* 75 */ liquidity_pool_update_operation,
             /* 76 */ credit_deal_update_operation,
             /* 77 */ limit_order_update_operation,
-            /* 78 */ bsip5_claim_rewards_operation
+            /* 78 */ bsip5_opt_in_operation,
+            /* 79 */ bsip5_payout_operation,
+            /* 80 */ bsip5_claim_rebate_operation
          >;
 
    /**

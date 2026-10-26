@@ -54,6 +54,10 @@ class limit_order_object : public abstract_object<limit_order_object, protocol_i
       asset            deferred_paid_fee; ///< originally paid fee
       bool             is_settled_debt = false; ///< Whether this order is an individual settlement fund
 
+      /// BSIP-5: block height at which this order entered the book or was last amended.
+      /// A single consensus field per qualifying open order; zero means not yet placed / not opted.
+      uint64_t         bsip5_placement_block = 0;
+
       /// Automatic actions when the limit order is filled or partially filled
       vector< limit_order_auto_action > on_fill;
 

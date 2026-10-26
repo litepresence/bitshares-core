@@ -1,0 +1,5 @@
+// BSIP-5 (Open order rewards) activation gate.
+#ifndef HARDFORK_BSIP5_TIME
+#define HARDFORK_BSIP5_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_BSIP5_PASSED(now) (now >= HARDFORK_BSIP5_TIME)
+#endif

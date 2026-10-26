@@ -25,6 +25,7 @@ list(APPEND SOURCES account.cpp
                     committee_member.cpp
                     custom.cpp
                     market.cpp
+                    bsip5_ops.cpp
                     credit_offer.cpp
                     liquidity_pool.cpp
                     samet_fund.cpp

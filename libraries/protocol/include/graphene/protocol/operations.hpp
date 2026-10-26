@@ -26,6 +26,7 @@
 #include <graphene/protocol/account.hpp>
 #include <graphene/protocol/assert.hpp>
 #include <graphene/protocol/asset_ops.hpp>
+#include <graphene/protocol/bsip5_ops.hpp>
 #include <graphene/protocol/balance.hpp>
 #include <graphene/protocol/committee_member.hpp>
 #include <graphene/protocol/confidential.hpp>
@@ -130,7 +131,8 @@ namespace graphene { namespace protocol {
             /* 74 */ credit_deal_expired_operation,   // VIRTUAL
             /* 75 */ liquidity_pool_update_operation,
             /* 76 */ credit_deal_update_operation,
-            /* 77 */ limit_order_update_operation
+            /* 77 */ limit_order_update_operation,
+            /* 78 */ bsip5_claim_rewards_operation
          >;
 
    /**

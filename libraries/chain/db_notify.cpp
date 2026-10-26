@@ -346,6 +346,10 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // account
    }
+   void operator()( const bsip5_claim_rewards_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // account
+   }
    void operator()( const samet_fund_create_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // owner_account

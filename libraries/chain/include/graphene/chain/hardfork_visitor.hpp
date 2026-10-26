@@ -68,6 +68,7 @@ struct hardfork_visitor {
                                                 protocol::credit_deal_repay_operation,
                                                 protocol::credit_deal_expired_operation >;
    using credit_deal_update_op = fc::typelist::list< protocol::credit_deal_update_operation >;
+   using bsip5_ops = fc::typelist::list< protocol::bsip5_claim_rewards_operation >;
 
    fc::time_point_sec now;
 
@@ -103,6 +104,9 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<liquidity_pool_update_op, Op>(), bool>
    visit() { return HARDFORK_CORE_2604_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<bsip5_ops, Op>(), bool>
+   visit() { return HARDFORK_BSIP5_PASSED(now); }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

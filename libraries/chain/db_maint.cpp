@@ -53,6 +53,7 @@
 #include <graphene/chain/custom_authority_object.hpp>
 
 namespace graphene { namespace chain {
+void distribute_bsip5_rewards(database& db);
 
 template<class Index>
 vector<std::reference_wrapper<const typename Index::object_type>> database::sort_votable_objects(size_t count) const
@@ -1603,8 +1604,6 @@ void database::perform_chain_maintenance( const signed_block& next_block )
    process_budget();
 }
 
-} }
-
 void distribute_bsip5_rewards( database& db )
 {
    if( !HARDFORK_BSIP5_PASSED( db.head_block_time() ) )
@@ -1617,12 +1616,12 @@ void distribute_bsip5_rewards( database& db )
    {
       const auto& idx = db.get_index_type<market_reward_index>().indices();
       for( auto it = idx.begin(); it != idx.end(); ++it )
-         mr_ids.push_back( it->id );
+         mr_ids.push_back( market_reward_id_type( it->id ) );
    }
 
    for( auto mrid : mr_ids )
    {
-      market_reward_object& mr = db.get( mrid );
+      const market_reward_object& mr = db.get( mrid );
       if( mr.pool_balance <= 0 ) continue;
       if( mr.reference_price_wad == 0 ) continue; // cold start: no payout
 
@@ -1638,7 +1637,7 @@ void distribute_bsip5_rewards( database& db )
          if( mkt.first != mr.base_asset || mkt.second != mr.quote_asset ) continue;
          if( lo.bsip5_placement_block == 0 ) continue;
 
-         uint64_t S = (uint64_t)lo.for_sale; // remaining approx; for_sale is remaining
+         uint64_t S = (uint64_t)lo.for_sale.value; // remaining approx; for_sale is remaining
          // remaining quantity more accurately: for_sale - filled? for_sale is amount for sale remaining in BitShares.
          uint64_t T = bsip5_time_component( lo.bsip5_placement_block, payout_block );
          if( T == 0 ) continue;
@@ -1646,11 +1645,11 @@ void distribute_bsip5_rewards( database& db )
          // price of the order in WAD (quote/base)
          uint64_t price_wad = 0;
          if( lo.sell_price.base.amount > 0 )
-            price_wad = (uint64_t)((__uint128_t)lo.sell_price.quote.amount * BSIP5_WAD / lo.sell_price.base.amount);
+            price_wad = (uint64_t)((__uint128_t)lo.sell_price.quote.amount.value * BSIP5_WAD / lo.sell_price.base.amount.value);
          uint64_t pk = bsip5_proximity_weight( price_wad, mr.reference_price_wad );
          if( pk == 0 ) continue;
 
-         cands.push_back( { lo.id, S, T, pk, 0 } );
+         Candidate c; c.id = lo.id; c.S = S; c.T = T; c.pk = pk; c.tsp = 0; cands.push_back( c );
       }
 
       if( cands.empty() ) continue;
@@ -1674,17 +1673,19 @@ void distribute_bsip5_rewards( database& db )
       share_type distributed = 0;
       for( auto& c : cands )
       {
-         share_type earned = (share_type)((__uint128_t)pool * c.tsp / total_tsp);
+         share_type earned = (share_type)((__uint128_t)pool.value * c.tsp / total_tsp);
          if( earned <= 0 ) continue;
          const limit_order_object& lo = db.get( c.id );
-         db.deposit_market_fee_vesting_balance( lo.seller, mr.reward_asset.amount( earned ) );
+         db.deposit_market_fee_vesting_balance( lo.seller, asset( earned, mr.reward_asset ) );
          distributed += earned;
       }
 
-      db.modify( mr, [&distributed](market_reward_object& o){
+      db.modify( mr, [&distributed, payout_block](market_reward_object& o){
          o.pool_balance -= distributed;
-         o.total_distributed += distributed;
+         o.total_distributed += distributed.value;
          o.last_sweep_block = payout_block;
       });
    }
 }
+
+} } // graphene::chain

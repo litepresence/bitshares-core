@@ -1804,15 +1804,15 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
    if( HARDFORK_BSIP5_PASSED( head_block_time() ) )
    {
       const asset_object& recv_asset = receives.asset_id(*this);
-      const uint16_t oo_bps = recv_asset.options.extensions.value.open_order_fee.value_or(0);
+      const uint16_t oo_bps = recv_asset.options.extensions.value.open_order_fee.valid() ? *recv_asset.options.extensions.value.open_order_fee : 0;
       if( oo_bps > 0 && oo_bps <= 500 )
       {
-         const uint64_t oo_val = detail::calculate_percent( receives.amount, oo_bps );
+         const share_type oo_val = detail::calculate_percent( receives.amount, oo_bps );
          bsip5_oo_fee = recv_asset.amount( oo_val );
          if( bsip5_oo_fee.amount > 0 )
          {
             // maker rebate 70%, pool 30%
-            const uint64_t rebate_val = detail::calculate_percent( bsip5_oo_fee.amount, 7000 );
+            const share_type rebate_val = detail::calculate_percent( bsip5_oo_fee.amount, 7000 );
             const asset maker_rebate = recv_asset.amount( rebate_val );
             const asset pool_share = bsip5_oo_fee - maker_rebate;
 
@@ -1831,7 +1831,7 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                   o.reward_asset = receives.asset_id;
                   o.pool_balance = pool_share.amount;
                   if( pays.amount > 0 )
-                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount * BSIP5_WAD / pays.amount);
+                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
                   o.reference_window_start_block = head_block_num();
                });
                (void)mr;
@@ -1841,7 +1841,7 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                modify( *mit, [&pool_share, &pays, &receives, this](market_reward_object& o){
                   o.pool_balance += pool_share.amount;
                   if( pays.amount > 0 )
-                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount * BSIP5_WAD / pays.amount);
+                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
                });
             }
          }

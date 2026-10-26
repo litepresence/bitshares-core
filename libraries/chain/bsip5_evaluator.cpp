@@ -48,9 +48,10 @@ void_result bsip5_payout_evaluator::do_apply(const bsip5_payout_operation& o)
 {
    // Ensure a market_reward_object exists for the leg.
    database& d = db();
-   auto idx = d.get_index_type<market_reward_index>().indices().get<by_market_asset>();
-   auto it = idx.find( boost::make_tuple( o.base_asset, o.quote_asset, o.base_asset ) );
-   if( it == idx.end() )
+   const auto& _indices = d.get_index_type<market_reward_index>().indices();
+   const auto& _by_ma = _indices.get<by_market_asset>();
+   auto it = _by_ma.find( boost::make_tuple( o.base_asset, o.quote_asset, o.base_asset ) );
+   if( it == _by_ma.end() )
    {
       d.create<market_reward_object>([&](market_reward_object& mr) {
          mr.base_asset = o.base_asset;

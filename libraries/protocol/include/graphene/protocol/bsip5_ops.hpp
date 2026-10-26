@@ -2,7 +2,6 @@
 #include <graphene/protocol/base.hpp>
 #include <graphene/protocol/asset.hpp>
 #include <graphene/protocol/authority.hpp>
-#include <graphene/protocol/limit_order.hpp>
 
 namespace graphene { namespace protocol {
 

@@ -444,7 +444,7 @@ void_result limit_order_update_evaluator::do_apply(const limit_order_update_oper
    }
 
    // Update order
-   d.modify(*_order, [&o,this,unlink](limit_order_object& loo) {
+   d.modify(*_order, [&o,this,unlink,&d](limit_order_object& loo) {
       if (o.new_price)
          loo.sell_price = *o.new_price;
       if (o.delta_amount_to_sell)

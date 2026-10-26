@@ -71,6 +71,7 @@
 #include <graphene/chain/witness_evaluator.hpp>
 #include <graphene/chain/worker_evaluator.hpp>
 #include <graphene/chain/htlc_evaluator.hpp>
+#include <graphene/chain/bsip4_evaluator.hpp>
 #include <graphene/chain/custom_authority_evaluator.hpp>
 
 namespace graphene { namespace chain {
@@ -127,6 +128,12 @@ void database::initialize_evaluators()
    register_evaluator<htlc_create_evaluator>();
    register_evaluator<htlc_redeem_evaluator>();
    register_evaluator<htlc_extend_evaluator>();
+   register_evaluator<bsip4_pool_create_evaluator>();
+   register_evaluator<bsip4_pool_deposit_evaluator>();
+   register_evaluator<bsip4_pool_withdraw_evaluator>();
+   register_evaluator<bsip4_pool_swap_evaluator>();
+   register_evaluator<bsip4_claim_founder_fees_evaluator>();
+   register_evaluator<bsip4_claim_promoter_fees_evaluator>();
    register_evaluator<custom_authority_create_evaluator>();
    register_evaluator<custom_authority_update_evaluator>();
    register_evaluator<custom_authority_delete_evaluator>();

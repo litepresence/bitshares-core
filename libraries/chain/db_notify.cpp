@@ -346,6 +346,30 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // account
    }
+   void operator()( const bsip4_pool_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // creator
+   }
+   void operator()( const bsip4_pool_deposit_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // account
+   }
+   void operator()( const bsip4_pool_withdraw_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // account
+   }
+   void operator()( const bsip4_pool_swap_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // account
+   }
+   void operator()( const bsip4_claim_founder_fees_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // account
+   }
+   void operator()( const bsip4_claim_promoter_fees_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // account
+   }
    void operator()( const samet_fund_create_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // owner_account

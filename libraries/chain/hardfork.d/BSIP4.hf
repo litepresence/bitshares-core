@@ -1,0 +1,6 @@
+// BSIP-4 (N-asset liquidity pools) activation gate.
+// Placeholder date; the committee sets the real schedule.
+#ifndef HARDFORK_BSIP4_TIME
+#define HARDFORK_BSIP4_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_BSIP4_PASSED(now) (now >= HARDFORK_BSIP4_TIME)
+#endif

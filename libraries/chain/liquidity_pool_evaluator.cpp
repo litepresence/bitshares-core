@@ -32,6 +32,7 @@
 #include <graphene/chain/is_authorized_asset.hpp>
 
 #include <graphene/protocol/liquidity_pool.hpp>
+#include <graphene/chain/stableswap.hpp>
 
 namespace graphene { namespace chain {
 
@@ -58,6 +59,15 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    FC_ASSERT( _share_asset->dynamic_data(d).current_supply == 0,
               "Current supply of the share asset needs to be zero" );
 
+   if( op.curve_type == 1 )
+   {
+      FC_ASSERT( op.amplification > 0, "Stable pool requires positive amplification" );
+   }
+   else
+   {
+      FC_ASSERT( op.curve_type == 0, "Unknown curve type" );
+   }
+
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
@@ -72,6 +82,8 @@ generic_operation_result liquidity_pool_create_evaluator::do_apply(const liquidi
       obj.share_asset = op.share_asset;
       obj.taker_fee_percent = op.taker_fee_percent;
       obj.withdrawal_fee_percent = op.withdrawal_fee_percent;
+      obj.curve_type = op.curve_type;
+      obj.amplification = op.amplification;
    });
    result.new_objects.insert( new_liquidity_pool_object.id );
 
@@ -261,6 +273,13 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
 
+   if( op.single_asset.valid() )
+   {
+      FC_ASSERT( _pool->curve_type == 1, "Only a stable pool can pay a withdrawal in a single asset" );
+      FC_ASSERT( *op.single_asset == _pool->asset_a || *op.single_asset == _pool->asset_b,
+                 "single_asset must be one of the pool assets" );
+   }
+
    const asset_object& share_asset_obj = _pool->share_asset(d);
 
    FC_ASSERT( is_authorized_asset( d, *fee_paying_account, share_asset_obj ),
@@ -401,23 +420,53 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
    _pool_receives = op.amount_to_sell - _maker_market_fee;
 
    fc::uint128_t delta;
-   if( op.amount_to_sell.asset_id == _pool->asset_a )
+   if( _pool->curve_type == 1 && _pool->amplification > 0 )
    {
-      share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
-      FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
-      _pool_pays_asset = &asset_obj_b;
+      // StableSwap pricing (BSIP-6)
+      uint64_t A = _pool->amplification;
+      if( op.amount_to_sell.asset_id == _pool->asset_a )
+      {
+         uint64_t x = (uint64_t)_pool->balance_a.value;
+         uint64_t y = (uint64_t)_pool->balance_b.value;
+         fc::uint128 D = compute_stableswap_d( x, y, A );
+         uint64_t new_x = x + (uint64_t)_pool_receives.amount.value;
+         uint64_t new_y = compute_stableswap_y( new_x, (uint64_t)D, A );
+         FC_ASSERT( new_y <= y, "Internal error" );
+         delta = fc::uint128_t( y ) - fc::uint128_t( new_y );
+         _pool_pays_asset = &asset_obj_b;
+      }
+      else
+      {
+         uint64_t x = (uint64_t)_pool->balance_b.value;
+         uint64_t y = (uint64_t)_pool->balance_a.value;
+         fc::uint128 D = compute_stableswap_d( x, y, A );
+         uint64_t new_x = x + (uint64_t)_pool_receives.amount.value;
+         uint64_t new_y = compute_stableswap_y( new_x, (uint64_t)D, A );
+         FC_ASSERT( new_y <= y, "Internal error" );
+         delta = fc::uint128_t( y ) - fc::uint128_t( new_y );
+         _pool_pays_asset = &asset_obj_a;
+      }
    }
    else
    {
-      share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
-      FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
-      _pool_pays_asset = &asset_obj_a;
+      if( op.amount_to_sell.asset_id == _pool->asset_a )
+      {
+         share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
+         // round up
+         fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
+         FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
+         delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
+         _pool_pays_asset = &asset_obj_b;
+      }
+      else
+      {
+         share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
+         // round up
+         fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
+         FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
+         delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
+         _pool_pays_asset = &asset_obj_a;
+      }
    }
 
    fc::uint128_t pool_taker_fee = delta * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;

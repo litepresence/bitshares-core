@@ -1,0 +1,5 @@
+// BSIP-6 (StableSwap) activation gate.
+#ifndef HARDFORK_STABLESWAP_TIME
+#define HARDFORK_STABLESWAP_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_STABLESWAP_PASSED(now) (now >= HARDFORK_STABLESWAP_TIME)
+#endif

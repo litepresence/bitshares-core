@@ -61,6 +61,7 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
 
    if( op.curve_type == 1 )
    {
+      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
       FC_ASSERT( op.amplification > 0, "Stable pool requires positive amplification" );
    }
    else
@@ -275,6 +276,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
    if( op.single_asset.valid() )
    {
+      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
       FC_ASSERT( _pool->curve_type == 1, "Only a stable pool can pay a withdrawal in a single asset" );
       FC_ASSERT( *op.single_asset == _pool->asset_a || *op.single_asset == _pool->asset_b,
                  "single_asset must be one of the pool assets" );
@@ -422,6 +424,7 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
    fc::uint128_t delta;
    if( _pool->curve_type == 1 && _pool->amplification > 0 )
    {
+      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
       // StableSwap pricing (BSIP-6)
       uint64_t A = _pool->amplification;
       if( op.amount_to_sell.asset_id == _pool->asset_a )

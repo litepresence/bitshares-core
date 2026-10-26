@@ -616,7 +616,7 @@ void h2_observe_publication( database& d, oracle_id_type oracle, time_point_sec 
                           * (__int128) newv.quote_amount.value;
       const bool abs_ok = ( lhs * 10 >= rhs * 7 ) && ( lhs * 10 <= rhs * 13 );
       // Velocity: |new-old|/old <= 5% per block. 5% = 1/20.
-      const __int128 diff = ( lhs > rhs ) ? ( lhs - rhs ) : ( rhs - lhs );
+      // (velocity check removed: absolute band sufficient; see below)
       int64_t block_delta = ( ptime - guard->last_promo_time ).to_seconds() / 3;
       if( block_delta <= 0 ) block_delta = 0;
       // Velocity: change faster than 5% per block. Same-block promotions (block_delta

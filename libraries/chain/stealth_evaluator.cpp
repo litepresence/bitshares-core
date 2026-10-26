@@ -1096,9 +1096,9 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
          {
             for( int i = 31; i >= 0; --i )
             {
-               int d = (int)a[i] - (int)b[i] - borrow;
-               borrow = ( d < 0 ) ? 1 : 0;
-               t[i] = (unsigned char)( d & 0xFF );
+               int dig = (int)a[i] - (int)b[i] - borrow;
+               borrow = ( dig < 0 ) ? 1 : 0;
+               t[i] = (unsigned char)( dig & 0xFF );
             }
             std::copy( t, t + 32, (char*)e );
          }
@@ -1107,16 +1107,16 @@ void_result turnstile_reproof_evaluator::do_evaluate( const turnstile_reproof_op
             // e = N - (b - a)
             for( int i = 31; i >= 0; --i )
             {
-               int d = (int)b[i] - (int)a[i] - borrow;
-               borrow = ( d < 0 ) ? 1 : 0;
-               t[i] = (unsigned char)( d & 0xFF );
+               int dig = (int)b[i] - (int)a[i] - borrow;
+               borrow = ( dig < 0 ) ? 1 : 0;
+               t[i] = (unsigned char)( dig & 0xFF );
             }
             int c = 0;
             for( int i = 31; i >= 0; --i )
             {
-               int d = (int)N[i] - (int)t[i] - c;
-               c = ( d < 0 ) ? 1 : 0;
-               e[i] = (unsigned char)( d & 0xFF );
+               int dig = (int)N[i] - (int)t[i] - c;
+               c = ( dig < 0 ) ? 1 : 0;
+               e[i] = (unsigned char)( dig & 0xFF );
             }
          }
          std::copy( (char*)e, (char*)e + 32, (char*)e_raw.data() );

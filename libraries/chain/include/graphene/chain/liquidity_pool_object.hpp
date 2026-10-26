@@ -51,6 +51,13 @@ class liquidity_pool_object : public abstract_object<liquidity_pool_object, prot
       asset_id_type   share_asset;                 ///< Type of the share asset aka the LP token
       uint16_t        taker_fee_percent = 0;       ///< Taker fee percent
       uint16_t        withdrawal_fee_percent = 0;  ///< Withdrawal fee percent
+      uint8_t         curve_type = 0;              ///< 0 = constant product, 2 = AB (BSIP-7)
+      uint64_t        ab_weight_num = 0;           ///< AB: weight numerator (w)
+      uint64_t        ab_weight_den = 0;           ///< AB: weight denominator (w)
+      uint64_t        ab_p_low = 0;                ///< AB: lower price bound
+      uint64_t        ab_p_high = 0;               ///< AB: upper price bound
+      uint64_t        ab_xv = 0;                   ///< AB: virtual offset X
+      uint64_t        ab_yv = 0;                   ///< AB: virtual offset Y
       fc::uint128_t   virtual_value = 0;           ///< Virtual value of the pool
 
       void update_virtual_value()
@@ -113,6 +120,13 @@ FC_REFLECT_DERIVED( graphene::chain::liquidity_pool_object, (graphene::db::objec
                     (share_asset)
                     (taker_fee_percent)
                     (withdrawal_fee_percent)
+                    (curve_type)
+                    (ab_weight_num)
+                    (ab_weight_den)
+                    (ab_p_low)
+                    (ab_p_high)
+                    (ab_xv)
+                    (ab_yv)
                     (virtual_value)
                   )
 

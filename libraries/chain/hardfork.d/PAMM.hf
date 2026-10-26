@@ -1,0 +1,5 @@
+// BSIP-8 (PAMM) activation gate.
+#ifndef HARDFORK_PAMM_TIME
+#define HARDFORK_PAMM_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_PAMM_PASSED(now) (now >= HARDFORK_PAMM_TIME)
+#endif

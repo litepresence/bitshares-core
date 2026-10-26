@@ -68,6 +68,10 @@ struct hardfork_visitor {
                                                 protocol::credit_deal_repay_operation,
                                                 protocol::credit_deal_expired_operation >;
    using credit_deal_update_op = fc::typelist::list< protocol::credit_deal_update_operation >;
+   using pamm_ops = fc::typelist::list< protocol::pamm_create_operation,
+                                         protocol::pamm_deposit_operation,
+                                         protocol::pamm_withdraw_operation,
+                                         protocol::pamm_snapshot_operation >;
 
    fc::time_point_sec now;
 
@@ -103,6 +107,9 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<liquidity_pool_update_op, Op>(), bool>
    visit() { return HARDFORK_CORE_2604_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<pamm_ops, Op>(), bool>
+   visit() { return HARDFORK_PAMM_PASSED(now); }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

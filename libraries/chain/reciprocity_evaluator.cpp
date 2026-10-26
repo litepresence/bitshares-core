@@ -581,8 +581,6 @@ generic_exchange_operation_result reciprocity_pool_swap_evaluator::do_apply(
    generic_exchange_operation_result result;
    uint64_t n = _pool->factors;
 
-   constexpr uint128_t BASIS = RECIPROCITY_BASIS;
-
    // Pre-swap state
    vector<share_type> pre_bals( n );
    vector<share_type> genesis( n );

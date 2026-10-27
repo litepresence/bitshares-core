@@ -19,6 +19,41 @@ namespace graphene { namespace chain {
 /// Compute virtual offsets xv, yv from weight w (as num/den) and price bounds.
 /// P_low, P_high are fixed-point prices.
 /// Returns (xv, yv). Returns (0,0) on invalid input.
+// Integer nth-root (floor) via Newton's method. Returns floor(n^(1/root)).
+static uint64_t int_nth_root(__uint128_t n, uint64_t root)
+{
+    if (root == 0) return 0;
+    if (n == 0) return 0;
+    if (root == 1) return (uint64_t)n;
+    // initial guess
+    uint64_t x = 1;
+    while (true) {
+        // compute x^root approximately; if x^root > n, shrink
+        __uint128_t p = 1;
+        bool overflow = false;
+        for (uint64_t i = 0; i < root; i++) {
+            p *= x;
+            if (p > n * 2 + 1) { overflow = true; break; }
+        }
+        if (overflow || p > n) {
+            if (x == 1) break;
+            x--;
+        } else {
+            // try x+1
+            __uint128_t p2 = 1;
+            bool ov2 = false;
+            for (uint64_t i = 0; i < root; i++) {
+                p2 *= (x + 1);
+                if (p2 > n * 2 + 1) { ov2 = true; break; }
+            }
+            if (ov2 || p2 > n)
+                break;
+            x++;
+        }
+    }
+    return x;
+}
+
 inline std::pair<uint64_t, uint64_t> compute_abpool_virtual_offsets(
     uint64_t w_num, uint64_t w_den,
     uint64_t P_low, uint64_t P_high)
@@ -27,14 +62,29 @@ inline std::pair<uint64_t, uint64_t> compute_abpool_virtual_offsets(
         P_low == 0 || P_high == 0 || P_low >= P_high)
         return {0, 0};
 
-    // Scale derived from the price bounds (integer, no roots).
+    // Balancer derivation: yv = xv * (P_low^w * P_high^(1-w)) / a,  a = w/(1-w).
+    // Equivalently (P_low^w_num * P_high^(w_den - w_num))^(1/w_den) / a.
+    // xv chosen as P_high*P_low/(P_high-P_low) (harmonic scale), positive.
     uint64_t diff = P_high - P_low;
     __uint128_t num = (__uint128_t)P_high * P_low;
     uint64_t xv = (uint64_t)(num / diff);
     if (xv == 0) xv = 1;
 
-    // yv = xv * (1-w)/w * P_low  (with (1-w)/w = (w_den - w_num)/w_num)
-    __uint128_t yv_num = (__uint128_t)xv * (w_den - w_num) * P_low;
+    // Compute P_low^w_num * P_high^(w_den - w_num) as __uint128 (best effort; clamp on overflow).
+    __uint128_t prod = 1;
+    for (uint64_t i = 0; i < w_num; i++) {
+        prod *= P_low;
+        if (prod == 0) { prod = 1; break; }
+    }
+    for (uint64_t i = 0; i < (w_den - w_num); i++) {
+        prod *= P_high;
+        if (prod == 0) { prod = 1; break; }
+    }
+    uint64_t geom = int_nth_root(prod, w_den);
+    if (geom == 0) geom = 1;
+
+    // yv = xv * geom / a,  a = w_num/(w_den-w_num)  =>  yv = xv * geom * (w_den-w_num) / w_num
+    __uint128_t yv_num = (__uint128_t)xv * geom * (w_den - w_num);
     uint64_t yv = (uint64_t)(yv_num / w_num);
     if (yv == 0) yv = 1;
 

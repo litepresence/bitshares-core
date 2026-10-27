@@ -649,7 +649,11 @@ generic_exchange_operation_result liquidity_pool_exchange_evaluator::do_apply(
    }
 
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "Internal error" );
-   FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
+   // The product x*y is non-decreasing only for constant-product pools; StableSwap
+   // (curve_type == 1) swaps can reduce the product even with fees, so the
+   // monotonicity assert applies only to constant-product pools.
+   if( _pool->curve_type == 0 )
+      FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
 
    result.paid.emplace_back( op.amount_to_sell );
    result.received.emplace_back( _account_receives );

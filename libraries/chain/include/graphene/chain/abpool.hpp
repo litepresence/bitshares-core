@@ -2,7 +2,6 @@
 #include <graphene/chain/types.hpp>
 #include <graphene/protocol/asset.hpp>
 #include <fc/uint128.hpp>
-#include <cmath>
 
 namespace graphene { namespace chain {
 
@@ -109,17 +108,44 @@ inline uint64_t compute_abpool_dy(
     __uint128_t Xp = X + dx;                    // new virtual input balance
 
     if (X == 0 || Y == 0 || Xp == 0) return 0;
+    if (X >= Xp) return 0;  // no payout if no input added
 
-    // exponent r = w/(1-w) = w_num/(w_den - w_num)
-    long double r = (long double)w_num / (long double)(w_den - w_num);
-    long double ratio = (long double)X / (long double)Xp;  // X / Xp < 1
-    long double factor = std::pow(ratio, (double)r);       // (X/Xp)^r
-    long double Yp_ld = (long double)Y * factor;           // new virtual output balance
+    // Deterministic integer-only computation of (X/Xp)^r, r = w_num/(w_den-w_num).
+    // Fixed-point scale 2^32.
+    const __int128_t SCALE = (__int128_t)1 << 32;
+    uint64_t a = w_num;
+    uint64_t b = w_den - w_num;
+    if (b == 0) return 0;
 
-    // Round Yp up (pool favors pool: pays less).
-    uint64_t Yp = (uint64_t)std::ceil(Yp_ld);
+    // t = (Xp - X) / Xp  in fixed point
+    __uint128_t t_fixed = (__uint128_t)(Xp - X) * (1ULL << 32) / (uint64_t)Xp;
+
+    // r in fixed point
+    __int128_t r_fixed = (__int128_t)a * SCALE / (__int128_t)b;
+
+    // Binomial series: (1-t)^r = sum_{k>=0} C(r,k) * (-t)^k
+    __int128_t factor = SCALE; // k=0
+    __uint128_t t_pow = SCALE; // t^0
+    __int128_t coeff = SCALE;  // C(r,0)=1
+    for (int k = 1; k <= 12; k++) {
+        // coeff = coeff * (r - (k-1)) / k
+        __int128_t rm = r_fixed - (__int128_t)(k - 1) * SCALE;
+        coeff = coeff * rm / ((__int128_t)k * SCALE);
+        // t_pow = t_pow * t / SCALE
+        t_pow = t_pow * t_fixed / (1ULL << 32);
+        __int128_t term = coeff * (__int128_t)t_pow / SCALE;
+        if (k % 2 == 1) term = -term;
+        factor += term;
+        if (factor <= 0) { factor = 1; break; }
+    }
+    if (factor <= 0) factor = 1;
+    if (factor > SCALE) factor = SCALE; // clamp (1-t)^r <= 1
+
+    // Yp = ceil(Y * factor / SCALE)
+    __uint128_t prod = (__uint128_t)Y * (uint64_t)factor;
+    uint64_t Yp = (uint64_t)((prod + (1ULL << 32) - 1) >> 32);
     if (Yp > (uint64_t)Y) Yp = (uint64_t)Y;  // clamp
-    if (Yp < yv) Yp = yv;                     // cannot go below virtual offset
+    if (Yp < yv) Yp = (uint64_t)yv;           // cannot go below virtual offset
 
     if (Yp >= (uint64_t)Y) return 0;           // no payout
 

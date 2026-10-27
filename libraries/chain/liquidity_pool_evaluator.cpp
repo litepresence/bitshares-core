@@ -363,6 +363,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
             _pool_pays_b = asset( 0, _pool->asset_b );
             _fee_a = asset( static_cast<int64_t>( imbalance_fee ), _pool->asset_a );
             _fee_b = asset( 0, _pool->asset_b );
+            _converted_reserve = asset( static_cast<int64_t>( b128 ), _pool->asset_b ); // AB-04
          }
          else
          {
@@ -380,6 +381,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
             _pool_pays_b = asset( static_cast<int64_t>( net_b_paid ), _pool->asset_b );
             _fee_a = asset( 0, _pool->asset_a );
             _fee_b = asset( static_cast<int64_t>( imbalance_fee ), _pool->asset_b );
+            _converted_reserve = asset( static_cast<int64_t>( a128 ), _pool->asset_a ); // AB-04
          }
       }
       else
@@ -421,6 +423,10 @@ generic_exchange_operation_result liquidity_pool_withdraw_evaluator::do_apply(
    d.modify( *_pool, [this]( liquidity_pool_object& lpo ){
       lpo.balance_a -= _pool_pays_a.amount;
       lpo.balance_b -= _pool_pays_b.amount;
+      if( _converted_reserve.asset_id == lpo.asset_a )
+         lpo.balance_a -= _converted_reserve.amount;
+      else if( _converted_reserve.asset_id == lpo.asset_b )
+         lpo.balance_b -= _converted_reserve.amount;
       lpo.update_virtual_value();
    });
 

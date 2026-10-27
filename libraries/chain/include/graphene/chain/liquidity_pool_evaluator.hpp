@@ -100,6 +100,7 @@ namespace graphene { namespace chain {
          asset _pool_pays_b;
          asset _fee_a;
          asset _fee_b;
+         asset _converted_reserve; // AB-04: reserve consumed (swapped) in single-asset withdrawal
    };
 
    class liquidity_pool_exchange_evaluator : public evaluator<liquidity_pool_exchange_evaluator>

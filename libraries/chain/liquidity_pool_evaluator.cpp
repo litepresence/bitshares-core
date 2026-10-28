@@ -64,6 +64,16 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    {
       FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
       FC_ASSERT( op.amplification > 0, "Stable pool requires positive amplification" );
+      // ECONOMIC NOTE: amplification A is unbounded by protocol. Extreme A makes
+      // the StableSwap curve approach a constant-sum (flat) invariant, so a
+      // pool priced far from its peg can be drained at near-peg rates: the
+      // amplification term suppresses price movement until the pool is almost
+      // empty, at which point the curve reverts to constant-product and the
+      // last units are withdrawn at a catastrophic discount. There is no cap
+      // here by design (A is a per-pool governance parameter); operators must
+      // choose A consistent with the assets' expected depeg magnitude, and
+      // auditors/clients should treat very large A as a red flag. Do not add a
+      // hard cap without a governance decision (BSIP-6).
    }
    else
    {
@@ -346,6 +356,12 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
    if( _share_asset_dyn_data->current_supply == op.share_amount.amount )
    {
+      // A full withdrawal drains both pool sides proportionally; paying it out
+      // in a single asset would require swapping the entire opposite side at
+      // the (possibly extreme) terminal price, which is unsafe and not a
+      // supported mode. Reject the combination explicitly.
+      FC_ASSERT( !op.single_asset.valid(),
+                 "single_asset is not supported on a full pool withdrawal" );
       _pool_pays_a = asset( _pool->balance_a, _pool->asset_a );
       _pool_pays_b = asset( _pool->balance_b, _pool->asset_b );
       _fee_a = asset( 0, _pool->asset_a );

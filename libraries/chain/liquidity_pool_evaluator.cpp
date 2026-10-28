@@ -60,19 +60,24 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    FC_ASSERT( _share_asset->dynamic_data(d).current_supply == 0,
               "Current supply of the share asset needs to be zero" );
 
-   if( op.curve_type == 2 )
+   uint8_t _curve_type = 0;
+   if( op.extensions.value.curve_type.valid() )
+      _curve_type = *op.extensions.value.curve_type;
+   if( _curve_type == 2 )
    {
       FC_ASSERT( HARDFORK_AB_POOL_PASSED( d.head_block_time() ), "BSIP-7 hardfork has not passed" );
-      FC_ASSERT( op.ab_weight_num > 0 && op.ab_weight_den > 0,
+      FC_ASSERT( op.extensions.value.ab_weight_num.valid() && *op.extensions.value.ab_weight_num > 0
+                 && op.extensions.value.ab_weight_den.valid() && *op.extensions.value.ab_weight_den > 0,
                  "AB pool requires positive weight" );
-      FC_ASSERT( op.ab_weight_num < op.ab_weight_den,
+      FC_ASSERT( *op.extensions.value.ab_weight_num < *op.extensions.value.ab_weight_den,
                  "AB pool weight must be in (0, 1)" );
-      FC_ASSERT( op.ab_p_low > 0 && op.ab_p_high > op.ab_p_low,
+      FC_ASSERT( op.extensions.value.ab_p_low.valid() && *op.extensions.value.ab_p_low > 0
+                 && op.extensions.value.ab_p_high.valid() && *op.extensions.value.ab_p_high > *op.extensions.value.ab_p_low,
                  "AB pool requires valid price bounds" );
    }
    else
    {
-      FC_ASSERT( op.curve_type == 0, "Unknown curve type" );
+      FC_ASSERT( _curve_type == 0, "Unknown curve type" );
    }
 
    return void_result();
@@ -83,21 +88,28 @@ generic_operation_result liquidity_pool_create_evaluator::do_apply(const liquidi
    database& d = db();
    generic_operation_result result;
 
-   const auto& new_liquidity_pool_object = d.create<liquidity_pool_object>([&op](liquidity_pool_object& obj){
+   uint8_t _ct = 0;
+   if( op.extensions.value.curve_type.valid() ) _ct = *op.extensions.value.curve_type;
+   uint64_t _wn = 0, _wd = 0, _pl = 0, _ph = 0;
+   if( op.extensions.value.ab_weight_num.valid() ) _wn = *op.extensions.value.ab_weight_num;
+   if( op.extensions.value.ab_weight_den.valid() ) _wd = *op.extensions.value.ab_weight_den;
+   if( op.extensions.value.ab_p_low.valid() ) _pl = *op.extensions.value.ab_p_low;
+   if( op.extensions.value.ab_p_high.valid() ) _ph = *op.extensions.value.ab_p_high;
+
+   const auto& new_liquidity_pool_object = d.create<liquidity_pool_object>([&op,_ct,_wn,_wd,_pl,_ph](liquidity_pool_object& obj){
       obj.asset_a = op.asset_a;
       obj.asset_b = op.asset_b;
       obj.share_asset = op.share_asset;
       obj.taker_fee_percent = op.taker_fee_percent;
       obj.withdrawal_fee_percent = op.withdrawal_fee_percent;
-      obj.curve_type = op.curve_type;
-      obj.ab_weight_num = op.ab_weight_num;
-      obj.ab_weight_den = op.ab_weight_den;
-      obj.ab_p_low = op.ab_p_low;
-      obj.ab_p_high = op.ab_p_high;
-      if( op.curve_type == 2 )
+      obj.curve_type = _ct;
+      obj.ab_weight_num = _wn;
+      obj.ab_weight_den = _wd;
+      obj.ab_p_low = _pl;
+      obj.ab_p_high = _ph;
+      if( _ct == 2 )
       {
-         auto vo = compute_abpool_virtual_offsets( op.ab_weight_num, op.ab_weight_den,
-                                                  op.ab_p_low, op.ab_p_high );
+         auto vo = compute_abpool_virtual_offsets( _wn, _wd, _pl, _ph );
          obj.ab_xv = vo.first;
          obj.ab_yv = vo.second;
       }

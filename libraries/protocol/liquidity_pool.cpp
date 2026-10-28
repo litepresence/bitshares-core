@@ -35,6 +35,9 @@ void liquidity_pool_create_operation::validate()const
               "Share asset can not be the same as one of the assets in the pool" );
    FC_ASSERT( taker_fee_percent <= GRAPHENE_100_PERCENT, "Taker fee percent should not exceed 100%" );
    FC_ASSERT( withdrawal_fee_percent <= GRAPHENE_100_PERCENT, "Withdrawal fee percent should not exceed 100%" );
+   FC_ASSERT( curve_type == 0 || curve_type == 1, "curve_type must be 0 (constant product) or 1 (stable)" );
+   if( curve_type == 1 )
+      FC_ASSERT( amplification > 0, "Stable (curve_type==1) pool requires amplification > 0" );
 }
 
 void liquidity_pool_delete_operation::validate()const

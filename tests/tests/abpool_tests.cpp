@@ -1,6 +1,10 @@
 #include <graphene/chain/abpool.hpp>
 #include <graphene/chain/types.hpp>
 
+#include "../common/database_fixture.hpp"
+#include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/liquidity_pool_object.hpp>
+
 #include <boost/test/unit_test.hpp>
 
 using namespace graphene::chain;
@@ -98,6 +102,65 @@ BOOST_AUTO_TEST_CASE( validate_curve_type )
    op.extensions.value.ab_p_low = 10000;
    op.extensions.value.ab_p_high = 1000;
    BOOST_CHECK_THROW( op.validate(), fc::exception );
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+using namespace graphene::chain::test;
+
+BOOST_FIXTURE_TEST_SUITE( abpool_smoke_tests, database_fixture )
+
+BOOST_AUTO_TEST_CASE( abpool_create_deposit_withdraw )
+{
+   try {
+      generate_blocks( HARDFORK_AB_POOL_TIME );
+      set_expiration( db, trx );
+
+      ACTORS((sam));
+
+      const asset_object& core = asset_id_type()(db);
+      const asset_object& usd = create_user_issued_asset( "MYUSD", sam, charge_market_fee );
+      const asset_object& lpa = create_user_issued_asset( "LPATEST", sam, charge_market_fee );
+
+      asset_id_type core_id = core.get_id();
+      asset_id_type usd_id = usd.get_id();
+      asset_id_type lpa_id = lpa.get_id();
+
+      int64_t init_amount = 10000000 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      fund( sam, asset(init_amount) );
+      issue_uia( sam, usd.amount(init_amount) );
+
+      liquidity_pool_create_operation op =
+         make_liquidity_pool_create_op( sam_id, core.get_id(), usd.get_id(), lpa.get_id(), 0, 0 );
+      op.extensions.value.curve_type = 2;
+      op.extensions.value.ab_weight_num = 2;
+      op.extensions.value.ab_weight_den = 5;
+      op.extensions.value.ab_p_low = 1000;
+      op.extensions.value.ab_p_high = 10000;
+
+      trx.operations.clear();
+      trx.operations.push_back( op );
+      for( auto& o : trx.operations ) db.current_fee_schedule().set_fee(o);
+      trx.validate();
+      set_expiration( db, trx );
+      processed_transaction ptx = PUSH_TX(db, trx, ~0);
+      trx.operations.clear();
+      verify_asset_supplies(db);
+
+      const liquidity_pool_object& lpo =
+         db.get<liquidity_pool_object>( *ptx.operation_results.front().get<generic_operation_result>().new_objects.begin() );
+      liquidity_pool_id_type lp_id = lpo.get_id();
+
+      BOOST_CHECK( lpo.curve_type == 2 );
+
+      deposit_to_liquidity_pool( sam_id, lp_id, asset( 1000, core_id ), asset( 1200, usd_id ) );
+
+      withdraw_from_liquidity_pool( sam_id, lp_id, asset( 100, lpa_id ) );
+
+   } catch (fc::exception& e) {
+      edump((e.to_detail_string()));
+      throw;
+   }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -132,10 +132,10 @@ namespace graphene { namespace protocol {
             /* 75 */ liquidity_pool_update_operation,
             /* 76 */ credit_deal_update_operation,
             /* 77 */ limit_order_update_operation,
-            /* 78 */ pamm_create_operation,
-            /* 79 */ pamm_deposit_operation,
-            /* 80 */ pamm_withdraw_operation,
-            /* 81 */ pamm_snapshot_operation
+            /* 133 */ pamm_create_operation,
+            /* 134 */ pamm_deposit_operation,
+            /* 135 */ pamm_withdraw_operation,
+            /* 136 */ pamm_snapshot_operation
          >;
 
    /**

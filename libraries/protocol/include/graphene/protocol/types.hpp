@@ -383,8 +383,8 @@ GRAPHENE_DEFINE_IDS(protocol, protocol_ids, /*protocol objects are not prefixed*
                     /* 1.20.x */ (samet_fund)
                     /* 1.21.x */ (credit_offer)
                     /* 1.22.x */ (credit_deal)
-                    /* 1.23.x */ (reciprocity_pool)
-                    /* 1.24.x */ (reciprocity_factory)
+                    /* 1.43.x */ (reciprocity_pool)
+                    /* 1.44.x */ (reciprocity_factory)
                    )
 
 FC_REFLECT(graphene::protocol::public_key_type, (key_data))

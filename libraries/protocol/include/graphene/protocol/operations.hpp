@@ -132,12 +132,12 @@ namespace graphene { namespace protocol {
             /* 75 */ liquidity_pool_update_operation,
             /* 76 */ credit_deal_update_operation,
             /* 77 */ limit_order_update_operation,
-            /* 78 */ reciprocity_pool_create_operation,
-            /* 79 */ reciprocity_pool_add_liquidity_operation,
-            /* 80 */ reciprocity_pool_remove_liquidity_operation,
-            /* 81 */ reciprocity_pool_swap_operation,
-            /* 82 */ reciprocity_claim_founder_royalty_operation,
-            /* 83 */ reciprocity_claim_promoter_royalty_operation
+            /* 124 */ reciprocity_pool_create_operation,
+            /* 125 */ reciprocity_pool_add_liquidity_operation,
+            /* 126 */ reciprocity_pool_remove_liquidity_operation,
+            /* 127 */ reciprocity_pool_swap_operation,
+            /* 128 */ reciprocity_claim_founder_royalty_operation,
+            /* 129 */ reciprocity_claim_promoter_royalty_operation
          >;
 
    /**

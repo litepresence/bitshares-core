@@ -1636,6 +1636,8 @@ void distribute_bsip5_rewards( database& db )
          auto mkt = lo.get_market();
          if( mkt.first != mr.base_asset || mkt.second != mr.quote_asset ) continue;
          if( lo.bsip5_placement_block == 0 ) continue;
+         // Skip orders that have already expired (OOR-08).
+         if( lo.expiration <= db.head_block_time() ) continue;
 
          uint64_t S = (uint64_t)lo.for_sale.value; // remaining approx; for_sale is remaining
          // remaining quantity more accurately: for_sale - filled? for_sale is amount for sale remaining in BitShares.

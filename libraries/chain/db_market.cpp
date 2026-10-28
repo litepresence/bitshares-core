@@ -1832,7 +1832,6 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                   o.pool_balance = pool_share.amount;
                   if( pays.amount > 0 )
                      o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
-                  o.reference_window_start_block = head_block_num();
                });
                (void)mr;
             }

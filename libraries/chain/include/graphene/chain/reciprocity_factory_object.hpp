@@ -39,14 +39,10 @@ class reciprocity_factory_object : public abstract_object<reciprocity_factory_ob
       flat_map<asset_id_type, share_type> promoter_fees;  ///< Promoter fee accumulators
 };
 
-struct by_genesis_enforced;
-
 typedef multi_index_container<
    reciprocity_factory_object,
    indexed_by<
-      ordered_unique< tag<by_id>, member< object, object_id_type, &object::id > >,
-      ordered_unique< tag<by_genesis_enforced>,
-                      member< reciprocity_factory_object, bool, &reciprocity_factory_object::genesis_enforced > >
+      ordered_unique< tag<by_id>, member< object, object_id_type, &object::id > >
    >
  > reciprocity_factory_multi_index_type;
 

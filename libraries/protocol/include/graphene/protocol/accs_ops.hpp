@@ -34,7 +34,7 @@ namespace graphene { namespace protocol {
    constexpr uint32_t GRAPHENE_ACCS_MIN_OFFER_LIFETIME = 100;
    /// ACCS SLA: 86400 blocks (~3 days at 3s/block).
    constexpr uint32_t GRAPHENE_ACCS_SLA_BLOCKS = 86400;
-   /// ACCS min griefing bond: $83.75 in USD cents (base asset units at committed rate).
+   /// ACCS min griefing bond: $83.75 in USD cents, denominated in the core asset (BTS) so its value is independent of swap completion.
    constexpr uint64_t GRAPHENE_ACCS_MIN_GRIEFING_BOND_USD_CENTS = 8375;
    /// ACCS offer cleanup age: 100800 blocks (~3.5 days).
    constexpr uint32_t GRAPHENE_ACCS_OFFER_CLEANUP_AGE = 100800;
@@ -172,8 +172,9 @@ namespace graphene { namespace protocol {
     * @ingroup operations
     *
     * Base asset released to Bob, griefing bond returned to Bob. Requires F1
-    * oracle equality match (tx_id, amount, foreign_asset_id, recipient,
-    * event_kind, confirmations).
+    * oracle equality match (tx_id, amount, chain, kind, foreign_asset_id,
+    * confirmations). No recipient field is compared: the foreign payment's
+    * destination is not verifiable in consensus (permanent attestor ceiling).
     */
    struct accs_fulfill_operation : public base_operation
    {

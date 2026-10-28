@@ -34,6 +34,7 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
+#include <graphene/chain/accs_object.hpp>
 #include <graphene/chain/oracle_object.hpp>
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
@@ -950,6 +951,27 @@ class database_api
             const optional<uint32_t>& limit = optional<uint32_t>(),
             const optional<credit_offer_id_type>& start_id = optional<credit_offer_id_type>() )const;
 
+      ////////////////////////////
+      // ACCS (foreign-chain settlement) //
+      ////////////////////////////
+
+      vector<accs_gateway_object> list_accs_gateways(
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<accs_gateway_id_type>& start_id = optional<accs_gateway_id_type>() )const;
+
+      vector<accs_orderbook_object> list_accs_orderbooks(
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<accs_orderbook_id_type>& start_id = optional<accs_orderbook_id_type>() )const;
+
+      vector<accs_offer_object> list_accs_offers(
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<accs_offer_id_type>& start_id = optional<accs_offer_id_type>() )const;
+
+      vector<accs_offer_object> get_accs_offers_by_seller(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<accs_offer_id_type>& start_id = optional<accs_offer_id_type>() )const;
+
       /////////////
       // Oracles //
       /////////////
@@ -1630,6 +1652,12 @@ FC_API(graphene::app::database_api,
    (list_samet_funds)
    (get_samet_funds_by_owner)
    (get_samet_funds_by_asset)
+
+   // ACCS (foreign-chain settlement)
+   (list_accs_gateways)
+   (list_accs_orderbooks)
+   (list_accs_offers)
+   (get_accs_offers_by_seller)
 
    // Credit offers and credit deals
    (list_credit_offers)

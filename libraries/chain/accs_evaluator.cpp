@@ -80,9 +80,11 @@ void_result accs_declare_gateway_evaluator::do_evaluate( const accs_declare_gate
    FC_ASSERT( !oracle->options.producers.empty(),
               "Bound oracle has no producers" );
 
-   // Guard-delay must fit inside the SLA window (F1F2-I04).
+   // Guard-delay must fit inside the SLA window (F1F2-I04). Both sides in
+   // seconds: guard_delay is seconds, SLA window is blocks * block time.
    const uint32_t guard_delay = d.get_global_properties().parameters.get_oracle_guard_delay_sec();
-   FC_ASSERT( guard_delay < GRAPHENE_ACCS_SLA_BLOCKS * 3u,
+   const uint32_t block_interval = d.get_global_properties().parameters.block_interval;
+   FC_ASSERT( guard_delay < GRAPHENE_ACCS_SLA_BLOCKS * block_interval,
               "Oracle guard delay exceeds the ACCS SLA window" );
 
    return void_result();
@@ -229,7 +231,8 @@ void process_accs_maintenance( database& d )
             if( it2 != o.matched_offers.end() ) o.matched_offers.erase( it2 );
          } );
       }
-      d.remove( *offer );
+      // Retain the terminal offer object for audit; it has already been
+      // removed from open_offers/matched_offers above.
    }
 }
 

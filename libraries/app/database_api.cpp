@@ -2049,6 +2049,67 @@ vector<samet_fund_object> database_api::get_samet_funds_by_asset(
 
 //////////////////////////////////////////////////////////////////////
 //                                                                  //
+// ACCS (foreign-chain settlement)                                  //
+//                                                                  //
+//////////////////////////////////////////////////////////////////////
+
+vector<accs_gateway_object> database_api::list_accs_gateways(
+            const optional<uint32_t>& limit,
+            const optional<accs_gateway_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<accs_gateway_index>().indices().get<by_id>();
+   return my->get_objects_by_x< accs_gateway_object,
+                                accs_gateway_id_type
+                               >( &application_options::api_limit_get_credit_offers,
+                                  idx, limit, start_id );
+}
+
+vector<accs_orderbook_object> database_api::list_accs_orderbooks(
+            const optional<uint32_t>& limit,
+            const optional<accs_orderbook_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<accs_orderbook_index>().indices().get<by_id>();
+   return my->get_objects_by_x< accs_orderbook_object,
+                                accs_orderbook_id_type
+                               >( &application_options::api_limit_get_credit_offers,
+                                  idx, limit, start_id );
+}
+
+vector<accs_offer_object> database_api::list_accs_offers(
+            const optional<uint32_t>& limit,
+            const optional<accs_offer_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<accs_offer_index>().indices().get<by_id>();
+   return my->get_objects_by_x< accs_offer_object,
+                                accs_offer_id_type
+                               >( &application_options::api_limit_get_credit_offers,
+                                  idx, limit, start_id );
+}
+
+vector<accs_offer_object> database_api::get_accs_offers_by_seller(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<accs_offer_id_type>& start_id )const
+{
+   account_id_type seller = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<accs_offer_index>().indices().get<by_id>();
+   const auto configured_limit = my->_app_options->api_limit_get_credit_offers;
+   uint64_t lim = limit.valid() ? *limit : configured_limit;
+   FC_ASSERT( lim <= configured_limit, "limit can not be greater than configured limit" );
+   vector<accs_offer_object> results;
+   accs_offer_id_type start = start_id.valid() ? *start_id : accs_offer_id_type();
+   for( const auto& o : idx )
+   {
+      if( o.id < object_id_type( start ) ) continue;
+      if( o.seller != seller ) continue;
+      results.push_back( o );
+      if( results.size() >= lim ) break;
+   }
+   return results;
+}
+
+//////////////////////////////////////////////////////////////////////
+//                                                                  //
 // Credit offers and credit deals                                   //
 //                                                                  //
 //////////////////////////////////////////////////////////////////////

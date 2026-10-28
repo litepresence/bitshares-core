@@ -88,19 +88,40 @@ inline uint64_t compute_stableswap_y(uint64_t new_x, uint64_t D, uint64_t A)
    auto eval_f = [&](const fc::uint128_t y) -> fc::uint128_t
    {
       if (y == 0) return 0;
-      const fc::uint128_t lhs = (fc::uint128_t)4 * a * (nx + y) + d;
-      const fc::uint128_t dd = d * d;                      // d < 2^64, dd < 2^128
-      const fc::uint128_t denom = (fc::uint128_t)4 * nx * y;
-      if (denom == 0) return 0;
-      // d^3/(4*nx*y) = (dd/(4*nx)) * d / y, exact by floor-division associativity
-      const fc::uint128_t d3 = (dd / ((fc::uint128_t)4 * nx)) * d / y;
-      const fc::uint128_t rhs = (fc::uint128_t)4 * a * d + d3;
+      // Overflow-safe evaluation (SS-08): saturate each term on overflow.
+      const fc::uint128_t UMAX = ~fc::uint128_t(0);
+      const fc::uint128_t dd = d * d;                    // d < 2^64, dd < 2^128
+      // lhs = 4*a*(nx + y) + d
+      fc::uint128_t lhs; bool lhs_ov = false;
+      fc::uint128_t sum = nx + y;
+      if (a != 0 && sum > UMAX / a) lhs_ov = true;
+      fc::uint128_t t = lhs_ov ? 0 : a * sum;
+      if (!lhs_ov && t > UMAX / 4) lhs_ov = true;
+      fc::uint128_t lhs4 = lhs_ov ? 0 : (fc::uint128_t)4 * t;
+      if (!lhs_ov && lhs4 > UMAX - d) lhs_ov = true;
+      lhs = lhs_ov ? UMAX : (lhs4 + d);
+      // d3 = d^3/(4*nx*y) = (dd/(4*nx)) * d / y, saturated
+      fc::uint128_t d3 = 0; bool d3_ov = false;
+      const fc::uint128_t denom1 = (fc::uint128_t)4 * nx;
+      fc::uint128_t term1 = dd / denom1;
+      if (term1 != 0 && d != 0 && term1 > UMAX / d) d3_ov = true;
+      if (!d3_ov) { fc::uint128_t prod = term1 * d; d3 = prod / y; }
+      else { d3 = UMAX; }
+      // rhs = 4*a*d + d3
+      fc::uint128_t rhs; bool rhs_ov = false;
+      fc::uint128_t rhs4ad = 0;
+      if (a != 0 && d != 0 && a > UMAX / ((fc::uint128_t)4 * d)) rhs_ov = true;
+      if (!rhs_ov) rhs4ad = (fc::uint128_t)4 * a * d;
+      if (!rhs_ov && rhs4ad > UMAX - d3) rhs_ov = true;
+      rhs = rhs_ov ? UMAX : (rhs4ad + d3);
       return (lhs > rhs) ? (lhs - rhs) : 0;              // 0 means f(y) <= 0
    };
 
-   // Binary search: smallest y in [1, D] with f(y) > 0 (= ceil(y_exact)).
+   // Binary search over full uint64 balance range (SS-08): for heavily
+   // imbalanced pools (extreme new_x) the solution may lie outside [1, D].
+   if (eval_f(((fc::uint128_t)1 << 64) - 1) == 0) return 0; // no solution in range
    fc::uint128_t lo = 1;
-   fc::uint128_t hi = d;                                  // y cannot exceed D
+   fc::uint128_t hi = ((fc::uint128_t)1 << 64) - 1;      // y is a uint64 balance
    while (lo < hi)
    {
       const fc::uint128_t mid = (lo + hi) / 2;

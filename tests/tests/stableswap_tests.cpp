@@ -87,4 +87,48 @@ BOOST_AUTO_TEST_CASE( no_divide_before_multiply )
    BOOST_CHECK(D < (fc::uint128_t)1 << 64);
 }
 
+BOOST_AUTO_TEST_CASE( imbalanced_pool_swap )
+{
+   // Imbalanced pool: x << y. Ensure no overflow and monotonic payouts.
+   uint64_t A = 100;
+   uint64_t x = 1000, y = 1000000;
+   auto D = compute_stableswap_d(x, y, A);
+   BOOST_REQUIRE(D > 0);
+   uint64_t prev_dy = 0;
+   for (uint64_t dx : {100, 500, 1000, 5000}) {
+      auto dy = compute_stableswap_dy(x, y, D, A, dx);
+      BOOST_CHECK(dy > 0);
+      BOOST_CHECK(dy >= prev_dy);
+      prev_dy = dy;
+      uint64_t new_x = x + dx;
+      auto new_y = compute_stableswap_y(new_x, (uint64_t)D, A);
+      BOOST_CHECK(new_y < y);
+   }
+}
+
+BOOST_AUTO_TEST_CASE( extreme_new_x_no_overflow )
+{
+   // Extreme new_x (very small and very large) must not overflow eval_f.
+   uint64_t A = 100;
+   // small new_x
+   {
+      uint64_t x = 1, y = 1000000;
+      auto D = compute_stableswap_d(x, y, A);
+      if (D > 0) {
+         auto ny = compute_stableswap_y(1, (uint64_t)D, A);
+         // result must be a valid uint64 (no crash); 0 allowed if no solution
+         BOOST_CHECK(ny <= 1000000 || ny == 0);
+      }
+   }
+   // large new_x
+   {
+      uint64_t x = 1000000, y = 1000;
+      auto D = compute_stableswap_d(x, y, A);
+      BOOST_REQUIRE(D > 0);
+      uint64_t new_x = x + 500000;
+      auto ny = compute_stableswap_y(new_x, (uint64_t)D, A);
+      BOOST_CHECK(ny <= y);
+   }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

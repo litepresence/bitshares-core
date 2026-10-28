@@ -35,6 +35,26 @@ void liquidity_pool_create_operation::validate()const
               "Share asset can not be the same as one of the assets in the pool" );
    FC_ASSERT( taker_fee_percent <= GRAPHENE_100_PERCENT, "Taker fee percent should not exceed 100%" );
    FC_ASSERT( withdrawal_fee_percent <= GRAPHENE_100_PERCENT, "Withdrawal fee percent should not exceed 100%" );
+
+   // BSIP-7 AB pool parameter validation (mirrors do_evaluate).
+   if( extensions.value.curve_type.valid() )
+   {
+      uint8_t _curve_type = *extensions.value.curve_type;
+      FC_ASSERT( _curve_type == 0 || _curve_type == 2, "Unknown curve type" );
+      if( _curve_type == 2 )
+      {
+         FC_ASSERT( extensions.value.ab_weight_num.valid() && *extensions.value.ab_weight_num > 0,
+                    "AB pool requires positive weight numerator" );
+         FC_ASSERT( extensions.value.ab_weight_den.valid() && *extensions.value.ab_weight_den > 0,
+                    "AB pool requires positive weight denominator" );
+         FC_ASSERT( *extensions.value.ab_weight_num < *extensions.value.ab_weight_den,
+                    "AB pool weight must be in (0, 1)" );
+         FC_ASSERT( extensions.value.ab_p_low.valid() && *extensions.value.ab_p_low > 0,
+                    "AB pool requires a positive lower price bound" );
+         FC_ASSERT( extensions.value.ab_p_high.valid() && *extensions.value.ab_p_high > *extensions.value.ab_p_low,
+                    "AB pool requires P_low < P_high" );
+      }
+   }
 }
 
 void liquidity_pool_delete_operation::validate()const

@@ -62,3 +62,42 @@ BOOST_AUTO_TEST_CASE( dy_zero_on_invalid )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+#include <graphene/protocol/liquidity_pool.hpp>
+
+BOOST_AUTO_TEST_SUITE( abpool_validate_tests )
+
+BOOST_AUTO_TEST_CASE( validate_curve_type )
+{
+   using namespace graphene::protocol;
+   liquidity_pool_create_operation op;
+   op.asset_a = asset_id_type(1);
+   op.asset_b = asset_id_type(2);
+   op.share_asset = asset_id_type(3);
+   // default curve_type unset -> valid
+   BOOST_CHECK_NO_THROW( op.validate() );
+
+   op.extensions.value.curve_type = 3;
+   BOOST_CHECK_THROW( op.validate(), fc::exception );
+
+   op.extensions.value.curve_type = 2;
+   // missing AB params -> invalid
+   BOOST_CHECK_THROW( op.validate(), fc::exception );
+
+   op.extensions.value.ab_weight_num = 2;
+   op.extensions.value.ab_weight_den = 5;
+   op.extensions.value.ab_p_low = 1000;
+   op.extensions.value.ab_p_high = 10000;
+   BOOST_CHECK_NO_THROW( op.validate() );
+
+   // weight not in (0,1)
+   op.extensions.value.ab_weight_num = 5;
+   BOOST_CHECK_THROW( op.validate(), fc::exception );
+   op.extensions.value.ab_weight_num = 2;
+
+   // bounds invalid
+   op.extensions.value.ab_p_low = 10000;
+   op.extensions.value.ab_p_high = 1000;
+   BOOST_CHECK_THROW( op.validate(), fc::exception );
+}
+
+BOOST_AUTO_TEST_SUITE_END()

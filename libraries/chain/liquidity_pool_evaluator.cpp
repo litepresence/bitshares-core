@@ -236,6 +236,7 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
       // For n=2 this is exactly half the swap fee. The fee reduces shares minted to the depositor.
       if( _pool->curve_type == 1 && _pool->balance_a > 0 && _pool->balance_b > 0 )
       {
+         FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
          fc::uint128_t ratio_a = (fc::uint128_t)op.amount_a.amount.value * _pool->balance_b.value;
          fc::uint128_t ratio_b = (fc::uint128_t)op.amount_b.amount.value * _pool->balance_a.value;
 
@@ -261,7 +262,7 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
             if( excess_amount > 0 )
             {
                fc::uint128_t swap_fee = excess_amount * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-               _imbalance_fee = static_cast<share_type>(swap_fee / 2); // n/(4(n-1)) = 1/2 for n=2
+               _imbalance_fee = static_cast<share_type>((swap_fee + 1) / 2); // round up, favor pool
 
                if( _imbalance_fee > 0 && excess_asset_balance > 0 )
                {
@@ -393,7 +394,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
             uint64_t swap_portion = total_a_paid - static_cast<uint64_t>(a128);
 
             fc::uint128_t swap_fee = (fc::uint128_t)swap_portion * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-            fc::uint128_t imbalance_fee = swap_fee / 2; // n/(4(n-1)) = 1/2 for n=2
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2; // round up, favor pool
 
             uint64_t net_a_paid = total_a_paid - static_cast<uint64_t>(imbalance_fee);
 
@@ -416,7 +417,7 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
             uint64_t swap_portion = total_b_paid - static_cast<uint64_t>(b128);
 
             fc::uint128_t swap_fee = (fc::uint128_t)swap_portion * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-            fc::uint128_t imbalance_fee = swap_fee / 2; // n/(4(n-1)) = 1/2 for n=2
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2; // round up, favor pool
 
             uint64_t net_b_paid = total_b_paid - static_cast<uint64_t>(imbalance_fee);
 

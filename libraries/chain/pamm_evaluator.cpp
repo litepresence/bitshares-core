@@ -1,5 +1,6 @@
 #include <graphene/chain/pamm_evaluator.hpp>
 #include <algorithm>
+#include <limits>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/hardfork_visitor.hpp>
 
@@ -13,6 +14,7 @@ void_result pamm_create_evaluator::do_evaluate(const pamm_create_operation& op)
    op.pool_asset(d);
    op.share_asset(d);
    FC_ASSERT( op.fee_rate_bps <= 10000, "fee rate too high" );
+   FC_ASSERT( op.delay_seconds > 0, "delay seconds must be positive" );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -81,6 +83,7 @@ void_result pamm_withdraw_evaluator::do_evaluate(const pamm_withdraw_operation& 
    FC_ASSERT( HARDFORK_PAMM_PASSED( d.head_block_time() ), "BSIP-8 hardfork has not passed" );
    _pool = &op.pool(d);
    FC_ASSERT( op.share_amount.amount > 0, "share amount must be positive" );
+   FC_ASSERT( op.share_amount.asset_id == _pool->share_asset, "share asset mismatch" );
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
 
@@ -134,17 +137,24 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
       e.day = (uint32_t)(d.head_block_time().sec_since_epoch() / 86400);
       e.nav_num = op.nav_num;
       e.nav_den = op.nav_den;
-      // replace if same day
+      // monotonic day index: reject out-of-order snapshots
+      if (!o.nav_history.empty()) {
+         FC_ASSERT( e.day >= o.nav_history.back().day, "day index must be monotonic" );
+      }
+      // version same-day entry instead of silently overwriting
       auto it = std::find_if(o.nav_history.begin(), o.nav_history.end(),
                              [&e](const pamm_pool_object::nav_entry& x) { return x.day == e.day; });
-      bool replaced = (it != o.nav_history.end());
-      if (replaced) *it = e;
-      if (!replaced) {
+      if (it != o.nav_history.end()) {
+         *it = e; // version in place
+      } else {
          o.nav_history.push_back(e);
          if (o.nav_history.size() > 365) o.nav_history.erase(o.nav_history.begin());
       }
-      // update high water mark: store peak NAV scaled to 1e8
+      // update high water mark: store peak NAV scaled to 1e8 (saturate to avoid truncation/overflow)
       fc::uint128_t candidate = (fc::uint128_t)op.nav_num * 100000000ULL / op.nav_den;
+      if (candidate > (fc::uint128_t)std::numeric_limits<uint64_t>::max()) {
+         candidate = (fc::uint128_t)std::numeric_limits<uint64_t>::max();
+      }
       if (o.high_water_mark == 0 || candidate > o.high_water_mark) {
          o.high_water_mark = (uint64_t)candidate;
       }

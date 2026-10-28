@@ -7,6 +7,7 @@ void pamm_create_operation::validate()const
 {
    FC_ASSERT( fee.amount >= 0 );
    FC_ASSERT( fee_rate_bps <= 10000 );
+   FC_ASSERT( delay_seconds > 0, "delay_seconds must be positive" );
 }
 
 void pamm_deposit_operation::validate()const

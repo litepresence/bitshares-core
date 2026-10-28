@@ -86,7 +86,7 @@ namespace graphene { namespace protocol {
 
 } } // graphene::protocol
 
-// FC_REFLECT below uses uint64_t pool placeholder; real impl would use pamm_pool_id_type.
+// FC_REFLECT definitions for pamm operations (pool fields use pamm_pool_id_type).
 FC_REFLECT( graphene::protocol::pamm_create_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::pamm_deposit_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::pamm_withdraw_operation::fee_params_t, (fee) )

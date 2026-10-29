@@ -1,5 +1,8 @@
 #include <graphene/chain/stableswap.hpp>
 #include <graphene/chain/types.hpp>
+#include <graphene/protocol/liquidity_pool.hpp>
+
+#include <fc/io/raw.hpp>
 
 #include <boost/test/unit_test.hpp>
 
@@ -129,6 +132,79 @@ BOOST_AUTO_TEST_CASE( extreme_new_x_no_overflow )
       auto ny = compute_stableswap_y(new_x, (uint64_t)D, A);
       BOOST_CHECK(ny <= y);
    }
+}
+
+// Rounding grind: repeated small swaps must not drain the pool
+// (each swap rounds toward the pool, so the pool never loses value).
+BOOST_AUTO_TEST_CASE( rounding_grind_pool_never_drains )
+{
+   uint64_t A = 100;
+   uint64_t x = 1000000, y = 1000000;
+   auto D = compute_stableswap_d(x, y, A);
+   BOOST_REQUIRE(D > 0);
+
+   uint64_t total_dx = 0, total_dy = 0;
+   for (int i = 0; i < 100; i++) {
+      auto dy = compute_stableswap_dy(x + total_dx, y - total_dy, D, A, 1000);
+      if (dy == 0) break;
+      total_dx += 1000;
+      total_dy += dy;
+   }
+   // Pool received 100000 total, paid out total_dy. dy per swap is at most dx
+   // (constant-product-like behavior) and rounds toward pool, so total_dy
+   // should not exceed total_dx for a balanced pool.
+   BOOST_CHECK(total_dy <= total_dx);
+}
+
+// SS-15: wire-format pinning — liquidity_pool_create_operation with stable
+// curve extension must round-trip through raw serialization, and legacy
+// constant-product ops (no extension) must still deserialize.
+BOOST_AUTO_TEST_CASE( liquidity_pool_create_wire_roundtrip ){
+   using namespace graphene::protocol;
+
+   // Stable pool with extension: extensions is flat_set<static_variant<void_t, liquidity_pool_curve_extension>>
+   liquidity_pool_create_operation stable_op;
+   stable_op.fee = asset(50 * GRAPHENE_BLOCKCHAIN_PRECISION);
+   stable_op.account = account_id_type(1);
+   stable_op.asset_a = asset_id_type(2);
+   stable_op.asset_b = asset_id_type(3);
+   stable_op.share_asset = asset_id_type(4);
+   stable_op.taker_fee_percent = 10;
+   stable_op.withdrawal_fee_percent = 5;
+
+   liquidity_pool_curve_extension ext{1, 100};
+   stable_op.extensions.insert(fc::static_variant<void_t, liquidity_pool_curve_extension>(ext));
+
+   auto packed = fc::raw::pack(stable_op);
+   liquidity_pool_create_operation unpacked = fc::raw::unpack<liquidity_pool_create_operation>(packed);
+
+   BOOST_CHECK_EQUAL(unpacked.extensions.size(), 1);
+   auto it = unpacked.extensions.begin();
+   BOOST_REQUIRE(it != unpacked.extensions.end());
+   BOOST_CHECK(it->which() == 1);
+   const auto& ce = it->get< liquidity_pool_curve_extension >();
+   BOOST_CHECK(ce.curve_type == 1);
+   BOOST_CHECK(ce.amplification == 100);
+   BOOST_CHECK(stable_op.taker_fee_percent == 10);
+   BOOST_CHECK(stable_op.withdrawal_fee_percent == 5);
+
+   // Legacy constant-product pool without extension
+   liquidity_pool_create_operation legacy_op;
+   legacy_op.fee = asset(50 * GRAPHENE_BLOCKCHAIN_PRECISION);
+   legacy_op.account = account_id_type(1);
+   legacy_op.asset_a = asset_id_type(2);
+   legacy_op.asset_b = asset_id_type(3);
+   legacy_op.share_asset = asset_id_type(4);
+   legacy_op.taker_fee_percent = 10;
+   legacy_op.withdrawal_fee_percent = 5;
+   // no extensions set -> defaults to curve_type=0
+
+   auto packed_legacy = fc::raw::pack(legacy_op);
+   liquidity_pool_create_operation unpacked_legacy = fc::raw::unpack<liquidity_pool_create_operation>(packed_legacy);
+
+   BOOST_CHECK(unpacked_legacy.extensions.empty());
+   BOOST_CHECK(unpacked_legacy.taker_fee_percent == 10);
+   BOOST_CHECK(unpacked_legacy.withdrawal_fee_percent == 5);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -300,7 +300,10 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
    FC_ASSERT( op.share_amount.asset_id == _pool->share_asset, "Share asset type mismatch" );
 
-   FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
+   if( _pool->curve_type == 2 )
+      FC_ASSERT( _pool->balance_a > 0 || _pool->balance_b > 0, "AB pool has not been initialized" );
+   else
+      FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
 
    if( op.single_asset.valid() )
    {
@@ -353,8 +356,8 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
          fc::uint128_t balance_a_after = _pool->balance_a.value - a128;
          fc::uint128_t balance_b_after = _pool->balance_b.value - b128;
-         FC_ASSERT( balance_a_after > 0 && balance_b_after > 0,
-                    "Single-sided withdrawal would empty a pool side" );
+         FC_ASSERT( balance_a_after > 0 || balance_b_after > 0,
+                    "Single-sided AB withdrawal would empty the pool entirely" );
 
          if( *op.single_asset == _pool->asset_a )
          {
@@ -365,11 +368,11 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
             // dy is payout in A from swapping b128 of B
             uint64_t total_a_paid = (uint64_t)a128 + dy;
 
-            // half swap fee (n/(4(n-1)) = 1/2)
+            // half swap fee (n/(4(n-1)) = 1/2), rounded up so the pool never under-collects
             fc::uint128_t swap_fee = (fc::uint128_t)dy * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-            fc::uint128_t imbalance_fee = swap_fee / 2;
-            uint64_t net_a_paid = total_a_paid - (uint64_t)imbalance_fee;
-            if( net_a_paid > total_a_paid ) net_a_paid = 0;
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2;
+            FC_ASSERT( imbalance_fee <= total_a_paid, "AB pool: imbalance fee exceeds amount paid" );
+            uint64_t net_a_paid = (uint64_t)( total_a_paid - imbalance_fee );
 
             _pool_pays_a = asset( static_cast<int64_t>( net_a_paid ), _pool->asset_a );
             _pool_pays_b = asset( 0, _pool->asset_b );
@@ -385,9 +388,9 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
             uint64_t total_b_paid = (uint64_t)b128 + dy;
 
             fc::uint128_t swap_fee = (fc::uint128_t)dy * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
-            fc::uint128_t imbalance_fee = swap_fee / 2;
-            uint64_t net_b_paid = total_b_paid - (uint64_t)imbalance_fee;
-            if( net_b_paid > total_b_paid ) net_b_paid = 0;
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2;
+            FC_ASSERT( imbalance_fee <= total_b_paid, "AB pool: imbalance fee exceeds amount paid" );
+            uint64_t net_b_paid = (uint64_t)( total_b_paid - imbalance_fee );
 
             _pool_pays_a = asset( 0, _pool->asset_a );
             _pool_pays_b = asset( static_cast<int64_t>( net_b_paid ), _pool->asset_b );
@@ -531,6 +534,17 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
          uint64_t dy = compute_abpool_dy( x - xv, y - yv, xv, yv, A, B, dx );
          FC_ASSERT( dy > 0, "AB pool: insufficient liquidity" );
          FC_ASSERT( dy <= _pool->balance_b.value, "AB pool: payout exceeds balance" );
+         // AB-06a: post-swap price must remain within [ab_p_low, ab_p_high]
+         // p = (w_num / (w_den - w_num)) * Y_new / X_new, X_new = x + dx, Y_new = y - dy
+         __uint128_t X_new = (__uint128_t)x + dx;
+         __uint128_t Y_new = (__uint128_t)y - dy;
+         __uint128_t w_num_128 = A;
+         __uint128_t w_den_minus_w_num = (__uint128_t)B - A;
+         __uint128_t low_bound  = (__uint128_t)_pool->ab_p_low  * w_den_minus_w_num * X_new;
+         __uint128_t high_bound = (__uint128_t)_pool->ab_p_high * w_den_minus_w_num * X_new;
+         __uint128_t price_num  = w_num_128 * Y_new;
+         FC_ASSERT( low_bound <= price_num,  "AB pool: post-swap price below ab_p_low"  );
+         FC_ASSERT( price_num <= high_bound, "AB pool: post-swap price above ab_p_high" );
          delta = dy;
          _pool_pays_asset = &asset_obj_b;
       }
@@ -542,6 +556,17 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
          uint64_t dy = compute_abpool_dy( x - yv, y - xv, yv, xv, B - A, B, dx );
          FC_ASSERT( dy > 0, "AB pool: insufficient liquidity" );
          FC_ASSERT( dy <= _pool->balance_a.value, "AB pool: payout exceeds balance" );
+         // AB-06a: post-swap price must remain within [ab_p_low, ab_p_high]
+         // p = (w_num / (w_den - w_num)) * Y_new / X_new, X_new = x + dx, Y_new = y - dy
+         __uint128_t X_new = (__uint128_t)x + dx;
+         __uint128_t Y_new = (__uint128_t)y - dy;
+         __uint128_t w_num_128 = B - A;
+         __uint128_t w_den_minus_w_num = (__uint128_t)A;
+         __uint128_t low_bound  = (__uint128_t)_pool->ab_p_low  * w_den_minus_w_num * X_new;
+         __uint128_t high_bound = (__uint128_t)_pool->ab_p_high * w_den_minus_w_num * X_new;
+         __uint128_t price_num  = w_num_128 * Y_new;
+         FC_ASSERT( low_bound <= price_num,  "AB pool: post-swap price below ab_p_low"  );
+         FC_ASSERT( price_num <= high_bound, "AB pool: post-swap price above ab_p_high" );
          delta = dy;
          _pool_pays_asset = &asset_obj_a;
       }

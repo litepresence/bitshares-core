@@ -212,11 +212,7 @@ constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTES_REQUIRED = 3;
 constexpr uint32_t GRAPHENE_STEALTH_FREEZE_VOTE_EXPIRY_SEC = 86400;
 
 /// Consensus strings. J1/J2 are the real domain tags used in the CLSAG
-/// challenge (see stealth_proof.cpp). The BP generators instead use TWO
-/// DIFFERENT literals there ("BitShares-G1-BP-G-secp256k1-v1" / "-H-…"); the
-/// GRAPHENE_STEALTH_BP_SEED define below is UNUSED — AGI-06: delete it or
-/// consolidate the literals (the 64+64 golden pins catch a wrong choice).
-#define GRAPHENE_STEALTH_BP_SEED "BitShares-G1-BP-secp256k1-v1"
+/// challenge (see stealth_proof.cpp).
 #define GRAPHENE_STEALTH_J1_SEED "BitShares-G1-J1-secp256k1-v1"
 #define GRAPHENE_STEALTH_J2_SEED "BitShares-G1-J2-secp256k1-v1"
 

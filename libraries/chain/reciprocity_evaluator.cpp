@@ -22,6 +22,11 @@ namespace graphene { namespace chain {
 using uint128_t = fc::uint128_t;
 using int128_t = fc::int128_t;
 
+// Out-of-line definitions of the P4-02 consensus bounds (static constexpr
+// members are odr-used by the FC_ASSERT comparisons in this evaluator).
+constexpr uint64_t reciprocity_factory_object::MAX_POOLS;
+constexpr uint64_t reciprocity_factory_object::MAX_KNOWN_TOKENS;
+
 static uint128_t r_safe_mul( uint128_t a, uint128_t b )
 {
    if( a == 0 || b == 0 ) return 0;
@@ -421,6 +426,15 @@ void_result reciprocity_pool_create_evaluator::do_evaluate( const reciprocity_po
     FC_ASSERT( !factory_idx.empty(), "No factory exists" );
     _factory = &(*factory_idx.begin());
 
+    // P4-02: enforce pool creation ceiling before any state mutation.
+    // Defends against unbounded state bloat and denial of service via
+    // unrestricted pool creation.
+    // Invariant: factory->pool_count < MAX_POOLS at creation time.
+    // Spec: docs/superpowers/specs/2026-10-25-bsip4-n-asset-pools-design.md §8
+    FC_ASSERT( _factory->pool_count < reciprocity_factory_object::MAX_POOLS,
+               "Pool creation ceiling reached: max ${n} pools",
+               ("n", reciprocity_factory_object::MAX_POOLS) );
+
     // Validate weights
    FC_ASSERT( op.weights.size() > 0, "Weights must not be empty" );
    for( const auto& w : op.weights )
@@ -508,10 +522,28 @@ generic_operation_result reciprocity_pool_create_evaluator::do_apply( const reci
    });
 
    // Register pool tokens as known in factory
+   // P4-02: bounded mutation of the factory registry. Defends against
+   // unbounded growth of the known-token set.
+   // Invariant: known_tokens.size() <= MAX_KNOWN_TOKENS; pool registry
+   // vectors stay within MAX_POOLS (ceiling checked in do_evaluate).
+   // Spec: docs/superpowers/specs/2026-10-25-bsip4-n-asset-pools-design.md §8
    d.modify( *_factory, [&op, &n]( reciprocity_factory_object& rfo ) {
+      FC_ASSERT( rfo.pool_count < reciprocity_factory_object::MAX_POOLS,
+                 "Pool creation ceiling reached: max ${n} pools",
+                 ("n", reciprocity_factory_object::MAX_POOLS) );
       rfo.pool_count++;
       rfo.pool_tokens.push_back( op.assets );
-      // Register all pool tokens as known
+      // Register all pool tokens as known, bounded by MAX_KNOWN_TOKENS
+      size_t new_tokens = 0;
+      for( const auto& asset_id : op.assets ) {
+         if( std::find( rfo.known_tokens.begin(), rfo.known_tokens.end(), asset_id )
+             == rfo.known_tokens.end() ) {
+            new_tokens++;
+         }
+      }
+      FC_ASSERT( rfo.known_tokens.size() + new_tokens <= reciprocity_factory_object::MAX_KNOWN_TOKENS,
+                 "Known-token registry ceiling reached: max ${n} tokens",
+                 ("n", reciprocity_factory_object::MAX_KNOWN_TOKENS) );
       for( const auto& asset_id : op.assets ) {
          if( std::find( rfo.known_tokens.begin(), rfo.known_tokens.end(), asset_id )
              == rfo.known_tokens.end() ) {

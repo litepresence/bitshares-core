@@ -19,20 +19,29 @@ class reciprocity_factory_object : public abstract_object<reciprocity_factory_ob
       account_id_type         committee_account;   ///< Founder fees go here (1.2.0)
 
       // Pool registry
-      uint64_t                pool_count = 0;      ///< Total pools created
+      // P4-02 (Important, CODE): reciprocity_factory_object carried unbounded
+      // growth vectors with no pool-count ceiling. Defends against unbounded
+      // state bloat and denial of service through unrestricted pool creation.
+      // Invariant: pool_count <= MAX_POOLS; pool_addresses, pool_token_counts
+      // and pool_tokens each hold at most MAX_POOLS entries; known_tokens and
+      // is_known each hold at most MAX_KNOWN_TOKENS entries.
+      // Spec: docs/superpowers/specs/2026-10-25-bsip4-n-asset-pools-design.md §8
+      static constexpr uint64_t MAX_POOLS = 1024;      ///< Consensus bound: maximum pools
+      static constexpr uint64_t MAX_KNOWN_TOKENS = 8192; ///< Consensus bound: maximum distinct known tokens
+      uint64_t                pool_count = 0;      ///< Total pools created (<= MAX_POOLS)
       bool                    genesis_enforced = true; ///< Require genesis tokens for first pool
       asset_id_type           genesis_1;           ///< First genesis token (BTS)
       asset_id_type           genesis_2;           ///< Second genesis token (CNY)
       asset_id_type           genesis_3;           ///< Third genesis token (EUR)
 
-      // Known token registry (append-only)
-      vector<asset_id_type>   known_tokens;        ///< All tokens that have appeared in pools
-      flat_map<asset_id_type, bool> is_known;      ///< O(1) lookup: is this token known?
+      // Known token registry (append-only, capped at MAX_KNOWN_TOKENS)
+      vector<asset_id_type>   known_tokens;        ///< All tokens that have appeared in pools (<= MAX_KNOWN_TOKENS)
+      flat_map<asset_id_type, bool> is_known;      ///< O(1) lookup: is this token known? (<= MAX_KNOWN_TOKENS)
 
-      // Pool registry
-      vector<reciprocity_pool_id_type> pool_addresses;  ///< Pool object IDs
-      vector<uint8_t>         pool_token_counts;   ///< Per-pool token count
-      vector<vector<asset_id_type>> pool_tokens;   ///< Per-pool token lists
+      // Pool registry (each vector holds <= MAX_POOLS entries)
+      vector<reciprocity_pool_id_type> pool_addresses;  ///< Pool object IDs (<= MAX_POOLS)
+      vector<uint8_t>         pool_token_counts;   ///< Per-pool token count (<= MAX_POOLS)
+      vector<vector<asset_id_type>> pool_tokens;   ///< Per-pool token lists (<= MAX_POOLS)
 
       // Fee accumulators (per token, aggregated across all pools)
       flat_map<asset_id_type, share_type> founder_fees; ///< Founder fee accumulators

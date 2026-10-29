@@ -73,7 +73,6 @@ struct hardfork_visitor {
                                            protocol::oracle_update_operation,
                                            protocol::oracle_delete_operation,
                                            protocol::oracle_publish_operation,
-                                           protocol::oracle_foreign_publish_operation,
                                            protocol::reference_asset_create_operation >;
    using h2_primitives_ops = fc::typelist::list< protocol::vault_challenge_operation,
                                                      protocol::oracle_dispute_operation,
@@ -82,14 +81,7 @@ struct hardfork_visitor {
    using h2_gateway_ops = fc::typelist::list< protocol::vault_register_operation,
                                               protocol::vault_bond_lock_operation,
                                               protocol::vault_bond_release_operation,
-                                              protocol::vault_rotate_operation,
-                                              protocol::accs_declare_gateway_operation,
-                                              protocol::accs_deactivate_gateway_operation,
-                                              protocol::accs_create_offer_operation,
-                                              protocol::accs_cancel_offer_operation,
-                                              protocol::accs_match_offer_operation,
-                                              protocol::accs_fulfill_operation,
-                                              protocol::accs_claim_griefing_operation >;
+                                              protocol::vault_rotate_operation >;
    using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
                                             protocol::oracle_bond_release_operation,
                                             protocol::vault_resolve_operation,
@@ -111,6 +103,15 @@ struct hardfork_visitor {
                                               protocol::parity_review_operation,
                                               protocol::stealth_explicit_spend_operation,
                                               protocol::stealth_pool_exchange_operation >;
+   // Reserved F-track stubs (tags 110-117): disabled on H (H does not apply F).
+   using reserved_f_ops = fc::typelist::list< protocol::oracle_foreign_publish_operation,
+                                              protocol::accs_declare_gateway_operation,
+                                              protocol::accs_deactivate_gateway_operation,
+                                              protocol::accs_create_offer_operation,
+                                              protocol::accs_cancel_offer_operation,
+                                              protocol::accs_match_offer_operation,
+                                              protocol::accs_fulfill_operation,
+                                              protocol::accs_claim_griefing_operation >;
 
    fc::time_point_sec now;
 
@@ -171,6 +172,9 @@ struct hardfork_visitor {
     template<typename Op>
     std::enable_if_t<fc::typelist::contains<reserved_g_ops, Op>(), bool>
     visit() { return false; }
+     template<typename Op>
+     std::enable_if_t<fc::typelist::contains<reserved_f_ops, Op>(), bool>
+     visit() { return false; } // H track does not run F ops (oracle_foreign_publish, accs)
    /// @}
 
    /// typelist::runtime::dispatch adaptor

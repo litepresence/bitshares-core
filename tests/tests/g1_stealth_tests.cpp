@@ -15583,4 +15583,254 @@ BOOST_AUTO_TEST_CASE( sup_r10_cumulative_counters )
    }
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// ViewKey two-key leg (spend_auth) tests — BSIP-2 construction addendum.
+// These test stealth_prove_spend_auth / stealth_verify_spend_auth as a
+// prover/verifier pair: valid proofs verify, invalid proofs reject, and the
+// ring hides which member is real. The prover is test-only here (wallets own
+// production proving); consensus never signs.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_SUITE( spend_auth_tests )
+
+static std::vector<graphene::protocol::public_key_type>
+make_owner_keys( size_t n, std::vector<fc::sha256>& scalars_out )
+{
+   // Each pub key's discrete log is its matching private key scalar, so
+   // owner_scalar == private_key.get_secret() for the real member. The wallet
+   // computes owner_scalar = spend_priv + child (mod n); here we just use the
+   // raw secret directly since pub = scalar * G.
+   scalars_out.clear();
+   std::vector<graphene::protocol::public_key_type> pubs;
+   pubs.reserve( n );
+   for( size_t i = 0; i < n; ++i )
+   {
+      auto k = fc::ecc::private_key::generate();
+      scalars_out.push_back( k.get_secret() );
+      pubs.push_back( graphene::protocol::public_key_type( k.get_public_key() ) );
+   }
+   return pubs;
+}
+
+BOOST_AUTO_TEST_CASE( spend_auth_valid_prover_verifier_pair )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 16;
+   const size_t s = 7;  // real member index
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+
+   // Message: any 32 bytes (in production this comes from stealth_ring_message).
+   fc::sha256 msg = fc::sha256::hash( "spend-auth-test-message" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   // Prove with the real member's owner scalar (= private key scalar).
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+      version, owner_keys, s, scalars[s], msg32, spend_auth, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+
+   // Wire format: I(33) || c0(32) || r_0..r_{n-1}(32 each).
+   BOOST_CHECK_EQUAL( spend_auth.size(), 33 + 32 + 32 * n );
+
+   // Verify.
+   err.clear();
+   BOOST_CHECK( graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_different_ring_sizes )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   fc::sha256 msg = fc::sha256::hash( "ring-size-test" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   for( size_t n = 2; n <= 32; ++n )
+   {
+      std::vector<fc::sha256> scalars;
+      auto owner_keys = make_owner_keys( n, scalars );
+      size_t s = n / 2;
+
+      std::vector<char> spend_auth;
+      std::string err;
+      BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+         version, owner_keys, s, scalars[s], msg32, spend_auth, err ) );
+      BOOST_CHECK_EQUAL( err, "" );
+      BOOST_CHECK_EQUAL( spend_auth.size(), 33 + 32 + 32 * n );
+
+      err.clear();
+      BOOST_CHECK( graphene::chain::stealth_verify_spend_auth(
+         version, owner_keys, spend_auth, msg32, err ) );
+      BOOST_CHECK_EQUAL( err, "" );
+   }
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_tampered_key_image_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+   const size_t s = 3;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg = fc::sha256::hash( "tamper-image" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+      version, owner_keys, s, scalars[s], msg32, spend_auth, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+
+   // Tamper the key image (first byte).
+   spend_auth[0] ^= 0x01;
+   err.clear();
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32, err ) );
+   BOOST_CHECK( !err.empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_tampered_response_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+   const size_t s = 3;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg = fc::sha256::hash( "tamper-response" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+      version, owner_keys, s, scalars[s], msg32, spend_auth, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+
+   // Tamper the last response (last 32 bytes).
+   spend_auth[spend_auth.size() - 1] ^= 0x01;
+   err.clear();
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32, err ) );
+   BOOST_CHECK( !err.empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_wrong_message_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+   const size_t s = 3;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg1 = fc::sha256::hash( "message-one" );
+   fc::sha256 msg2 = fc::sha256::hash( "message-two" );
+   std::string msg32_1( (const char*)msg1.data(), 32 );
+   std::string msg32_2( (const char*)msg2.data(), 32 );
+
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+      version, owner_keys, s, scalars[s], msg32_1, spend_auth, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+
+   // Same proof under a different message must reject.
+   err.clear();
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32_2, err ) );
+   BOOST_CHECK( !err.empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_wrong_owner_keys_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+   const size_t s = 3;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg = fc::sha256::hash( "wrong-owner-keys" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+      version, owner_keys, s, scalars[s], msg32, spend_auth, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+
+   // Build a different owner-key set (replace one decoy member).
+   std::vector<fc::sha256> scalars2;
+   auto owner_keys2 = make_owner_keys( n, scalars2 );
+   owner_keys2[s] = owner_keys[s]; // keep real member's key, change a decoy
+   err.clear();
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys2, spend_auth, msg32, err ) );
+   BOOST_CHECK( !err.empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_empty_proof_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg = fc::sha256::hash( "empty-proof" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   std::vector<char> spend_auth; // empty
+   std::string err;
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32, err ) );
+   BOOST_CHECK( !err.empty() );
+   BOOST_CHECK_EQUAL( err, "spend_auth size mismatch" );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_wrong_size_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg = fc::sha256::hash( "wrong-size" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   // Too-short proof: 33 + 32 bytes only (missing all responses).
+   std::vector<char> spend_auth( 33 + 32, 0 );
+   std::string err;
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32, err ) );
+   BOOST_CHECK_EQUAL( err, "spend_auth size mismatch" );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_CASE( spend_auth_zero_c0_rejected )
+{ try {
+   const uint8_t version = GRAPHENE_STEALTH_PROOF_V3;
+   const size_t n = 8;
+   const size_t s = 3;
+
+   std::vector<fc::sha256> scalars;
+   auto owner_keys = make_owner_keys( n, scalars );
+   fc::sha256 msg = fc::sha256::hash( "zero-c0" );
+   std::string msg32( (const char*)msg.data(), 32 );
+
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( graphene::chain::stealth_prove_spend_auth(
+      version, owner_keys, s, scalars[s], msg32, spend_auth, err ) );
+   BOOST_CHECK_EQUAL( err, "" );
+
+   // Zero out c0 (bytes 33..64).
+   std::fill( spend_auth.begin() + 33, spend_auth.begin() + 65, 0 );
+   err.clear();
+   BOOST_CHECK( !graphene::chain::stealth_verify_spend_auth(
+      version, owner_keys, spend_auth, msg32, err ) );
+   BOOST_CHECK( !err.empty() );
+} FC_CAPTURE_AND_RETHROW() }
+
+BOOST_AUTO_TEST_SUITE_END()
+
 BOOST_AUTO_TEST_SUITE_END()

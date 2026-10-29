@@ -1292,6 +1292,201 @@ bool stealth_prove_value_pin( const fc::ecc::commitment_type& P,
    return true;
 }
 
+bool stealth_prove_spend_auth( uint8_t version,
+   const std::vector<protocol::public_key_type>& owner_keys,
+   size_t real_index,
+   const fc::sha256& owner_scalar,
+   const std::string& msg32,
+   std::vector<char>& spend_auth,
+   std::string& err )
+{
+   using protocol::GRAPHENE_STEALTH_PROOF_V1;
+   using protocol::GRAPHENE_STEALTH_PROOF_V2;
+   using protocol::GRAPHENE_STEALTH_PROOF_V3;
+
+   const size_t n = owner_keys.size();
+   if( n < 2 || n > 32 )
+   { err = "owner key count out of bounds"; return false; }
+   if( real_index >= n )
+   { err = "real index out of range"; return false; }
+   if( msg32.size() != 32 )
+   { err = "message must be 32 bytes"; return false; }
+   // WPC-02: refuse before any RAND_bytes draw if the CSPRNG is unseeded.
+   if( !stealth_prover_entropy_ready() )
+   { err = "prover RNG unseeded (entropy gate, WPC-02)"; return false; }
+
+   prover_ctx pc;
+   if( !pc.ok )
+   { err = "prover EC init failed"; return false; }
+
+   EC_GROUP* g = pc.g;
+   BN_CTX* ctx = pc.bctx;
+   const BIGNUM* order = pc.order;
+
+   // Version-domain J1 base (same accessor the verifier uses — no divergence).
+   std::vector<unsigned char> J1b = stealth_J1_point( version );
+   own_pt J1( open_point( g, J1b.data(), 33 ) );
+   if( !J1 )
+   { err = "J1 base is not a valid point"; return false; }
+
+   // G base (shared with the value leg and all ring verifiers).
+   std::vector<unsigned char> gbytes = stealth_G_point();
+   own_pt Gpt( EC_POINT_new( g ) );
+   if( !Gpt ||
+       EC_POINT_oct2point( g, Gpt.get(), gbytes.data(), gbytes.size(), nullptr ) != 1 )
+   { err = "G base is not a valid point"; return false; }
+
+   // Parse owner keys into points (fail-closed on any bad/identity member).
+   std::vector<own_pt> K( n );
+   for( size_t i = 0; i < n; ++i )
+   {
+      K[i].reset( open_point( g,
+         (const unsigned char*)owner_keys[i].key_data.data(), 33 ) );
+      if( !K[i] )
+      { err = "owner key is not a valid point"; return false; }
+      if( EC_POINT_is_at_infinity( g, K[i].get() ) )
+      { err = "owner key must not be identity"; return false; }
+   }
+
+   // Owner scalar = discrete log of the real member's owner key.
+   own_bn x_s( new_bn() );
+   BN_bin2bn( (const unsigned char*)owner_scalar.data(), 32, x_s.get() );
+   BN_mod( x_s.get(), x_s.get(), order, ctx );
+
+   // Fresh nonce k and initial challenge c0 (both nonzero).
+   own_bn k( new_bn() );
+   own_bn c0( new_bn() );
+   if( !rand_scalar_nonzero( k.get(), order, ctx ) ||
+       !rand_scalar_nonzero( c0.get(), order, ctx ) )
+   { err = "prover RNG failed"; return false; }
+
+   // Key image I = x_s * J1 (version-domain; one per spend, nullifier-checked).
+   own_pt I( EC_POINT_new( g ) );
+   if( EC_POINT_mul( g, I.get(), nullptr, J1.get(), x_s.get(), ctx ) != 1 )
+   { err = "image ec fail"; return false; }
+
+   std::vector<unsigned char> I33( 33, 0 );
+   if( !compress_point( g, I.get(), I33 ) )
+   { err = "compress fail"; return false; }
+
+   // Challenges c[i] and responses r[i], one per member.
+   std::vector<own_bn> c( n ), r( n );
+   for( size_t i = 0; i < n; ++i )
+   {
+      c[i] = new_bn();
+      r[i] = new_bn();
+      if( !c[i] || !r[i] )
+      { err = "bn alloc fail"; return false; }
+   }
+   BN_copy( c[real_index].get(), c0.get() ); // c[s] = c0, overwritten by walk
+
+   // Temporary EC points.
+   own_pt L( EC_POINT_new( g ) );
+   own_pt R( EC_POINT_new( g ) );
+   own_pt T( EC_POINT_new( g ) );
+
+   // Domain string, byte-identical to the verifier:
+   // "BitShares-G1-SpendAuth-v1" || version_byte.
+   std::string domain = "BitShares-G1-SpendAuth-v1";
+   domain.push_back( (char)version );
+
+   // Hash helper: c_next = SHA256(domain || msg32 || L33 || R33) mod n.
+   auto spend_auth_challenge = [&]( const std::vector<unsigned char>& Lc,
+                                    const std::vector<unsigned char>& Rc,
+                                    BIGNUM* cnext_out ) -> bool
+   {
+      unsigned char h[32];
+      SHA256_CTX sh;
+      SHA256_Init( &sh );
+      SHA256_Update( &sh, domain.data(), domain.size() );
+      SHA256_Update( &sh, msg32.data(), 32 );
+      SHA256_Update( &sh, Lc.data(), 33 );
+      SHA256_Update( &sh, Rc.data(), 33 );
+      SHA256_Final( h, &sh );
+      BIGNUM* cnext = BN_bin2bn( h, 32, nullptr );
+      if( !cnext ) return false;
+      BN_mod( cnext_out, cnext, order, ctx );
+      BN_clear_free( cnext );
+      stealth_cleanse_secret( h, 32 );
+      return true;
+   };
+
+   std::vector<unsigned char> Lc( 33, 0 ), Rc( 33, 0 );
+
+   // --- Ring walk: start at the real member ---
+   // Commitment uses k alone (c[s] applied at close): L_s = k*G, R_s = k*J1.
+   if( EC_POINT_mul( g, L.get(), k.get(), nullptr, nullptr, ctx ) != 1 ||
+       EC_POINT_mul( g, R.get(), nullptr, J1.get(), k.get(), ctx ) != 1 )
+   { err = "commit ec fail"; return false; }
+   if( !compress_point( g, L.get(), Lc ) || !compress_point( g, R.get(), Rc ) )
+   { err = "compress fail"; return false; }
+   // c[s+1] = H(domain || msg32 || L_s || R_s).
+   if( !spend_auth_challenge( Lc, Rc, c[(real_index + 1) % n].get() ) )
+   { err = "challenge fail"; return false; }
+
+   // --- Simulate every non-real member, walking forward from s+1 ---
+   size_t i = (real_index + 1) % n;
+   size_t guard = 0;
+   while( i != real_index && guard++ <= n )
+   {
+      // Fresh random response for this (simulated) member.
+      if( !rand_scalar( r[i].get(), order, ctx ) )
+      { err = "simulation RNG fail"; return false; }
+
+      // L_i = r_i * G + c_i * K_i ; R_i = r_i * J1 + c_i * I.
+      if( EC_POINT_mul( g, L.get(), r[i].get(), nullptr, nullptr, ctx ) != 1 ||
+          EC_POINT_mul( g, T.get(), nullptr, K[i].get(), c[i].get(), ctx ) != 1 ||
+          EC_POINT_add( g, L.get(), L.get(), T.get(), ctx ) != 1 ||
+          EC_POINT_mul( g, R.get(), nullptr, J1.get(), r[i].get(), ctx ) != 1 ||
+          EC_POINT_mul( g, T.get(), nullptr, I.get(), c[i].get(), ctx ) != 1 ||
+          EC_POINT_add( g, R.get(), R.get(), T.get(), ctx ) != 1 )
+      { err = "simulation ec fail"; return false; }
+
+      if( !compress_point( g, L.get(), Lc ) || !compress_point( g, R.get(), Rc ) )
+      { err = "simulation compress fail"; return false; }
+
+      // c[i+1] = H(domain || msg32 || L_i || R_i) (wraps to c[s] at i = s-1).
+      if( !spend_auth_challenge( Lc, Rc, c[(i + 1) % n].get() ) )
+      { err = "simulation challenge fail"; return false; }
+
+      i = (i + 1) % n;
+   }
+   if( i != real_index )
+   { err = "ring walk did not close"; return false; }
+
+   // --- Close at the real member: r[s] = k - c[s] * x_s ---
+   {
+      own_bn t( new_bn() );
+      BN_mod_mul( t.get(), c[real_index].get(), x_s.get(), order, ctx );
+      BN_mod_sub( r[real_index].get(), k.get(), t.get(), order, ctx );
+   }
+
+   // --- Assemble output: I(33) || c0(32) || r_0(32) || ... || r_{n-1}(32) ---
+   spend_auth.clear();
+   spend_auth.reserve( 33 + 32 + 32 * n );
+   spend_auth.insert( spend_auth.end(), I33.begin(), I33.end() );
+
+   unsigned char c0buf[32];
+   BN_bn2binpad( c[0].get(), c0buf, 32 );
+   spend_auth.insert( spend_auth.end(), (char*)c0buf, (char*)c0buf + 32 );
+   stealth_cleanse_secret( c0buf, 32 );
+
+   unsigned char rbuf[32];
+   for( size_t i = 0; i < n; ++i )
+   {
+      BN_bn2binpad( r[i].get(), rbuf, 32 );
+      spend_auth.insert( spend_auth.end(), (char*)rbuf, (char*)rbuf + 32 );
+   }
+   stealth_cleanse_secret( rbuf, 32 );
+
+#ifdef GRAPHENE_CTGRIND
+   // WPC-05: spend_auth is wire data — public at the prover's exit.
+   GRAPHENE_CTGRIND_PUBLIC( spend_auth.data(), spend_auth.size() );
+#endif
+   err.clear();
+   return true;
+}
+
 std::vector<unsigned char> stealth_prover_test_last_cleansed()
 {
    return t_last_cleansed;

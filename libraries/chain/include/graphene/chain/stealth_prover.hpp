@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <graphene/protocol/stealth.hpp>
+
 #include <fc/crypto/elliptic.hpp>
 #include <fc/crypto/sha256.hpp>
 
@@ -254,6 +256,29 @@ bool stealth_prove_value_pin( const fc::ecc::commitment_type& P,
    int64_t amount_to_sell, uint64_t pool_id,
    const fc::sha256& blind_P,
    std::vector<char>& T_out, std::string& s_out, std::string& err );
+
+/**
+ * ViewKey two-key leg prover (BSIP-2, construction addendum).
+ * Produces a CLSAG ring signature over the ring members' owner keys,
+ * proving knowledge of the real member's spend scalar without naming it.
+ * Matches stealth_verify_spend_auth byte-for-byte:
+ *   spend_auth = I(33) || c0(32) || r_0..r_{n-1}(32 each)
+ *   I = x_s * J1 (key image under version's J1 base)
+ *   L_i = r_i * G + c_i * K_i, R_i = r_i * J1 + c_i * I
+ *   c_{i+1} = SHA256("BitShares-G1-SpendAuth-v1" || version || msg32 || L_i || R_i) mod n
+ *   r_s = k - c_s * x_s (closes the ring at the real member)
+ * Domain-separated from the value leg by its own challenge transcript
+ * ("BitShares-G1-SpendAuth-v1") and its own key image (under J1, not J1/J2).
+ * Fail-closed: returns false on any RNG/EC failure, never produces a partial proof.
+ * Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 3 step 6
+ */
+bool stealth_prove_spend_auth( uint8_t version,
+   const std::vector<protocol::public_key_type>& owner_keys,
+   size_t real_index,
+   const fc::sha256& spend_priv,   // real member's spend key scalar
+   const std::string& msg32,
+   std::vector<char>& spend_auth,   // output: I(33) || c0(32) || r_0..r_{n-1}(32 each)
+   std::string& err );
 
 /**
  * Test hook: post-cleanse image of the most recent secret buffer cleansed

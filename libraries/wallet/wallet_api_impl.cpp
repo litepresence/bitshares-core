@@ -374,10 +374,16 @@ namespace graphene { namespace wallet { namespace detail {
          fc::copy( src_path, dest_path );
          disable_umask_protection();
       }
-      catch(...)
+      catch( const fc::exception& e )
       {
          disable_umask_protection();
-         throw;
+         // A wallet backup is non-critical: the wallet itself was already
+         // saved successfully. Filesystems such as virtiofs/overlayfs can
+         // reject boost::filesystem::copy (EXDEV) even when same-dir copy
+         // would work; never let a backup failure fail the primary op.
+         elog( "wallet backup copy to ${dest} failed: ${e}",
+               ("dest", dest_path)("e", e.to_detail_string()) );
+         return false;
       }
       return true;
    }

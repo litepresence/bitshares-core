@@ -124,9 +124,20 @@ fc::sha256 nullifier_key( const std::vector<char>& image33 )
 // each linkage refuses the op before the alt leg runs.
 uint8_t stealth_alt_proof_version( uint8_t proof_version )
 {
-   return ( proof_version == protocol::GRAPHENE_STEALTH_PROOF_V1 )
-          ? protocol::GRAPHENE_STEALTH_PROOF_V2
-          : protocol::GRAPHENE_STEALTH_PROOF_V1;
+   switch( proof_version )
+   {
+      case protocol::GRAPHENE_STEALTH_PROOF_V1:
+         return protocol::GRAPHENE_STEALTH_PROOF_V2;
+      case protocol::GRAPHENE_STEALTH_PROOF_V2:
+         return protocol::GRAPHENE_STEALTH_PROOF_V1;
+      case protocol::GRAPHENE_STEALTH_PROOF_V3:
+         return protocol::GRAPHENE_STEALTH_PROOF_V1;
+      default:
+         // Unknown proof versions are refused by the op-version assert
+         // above each linkage before this function is reached; this branch
+         // is belt-and-braces fail-closed, never a widening.
+         return protocol::GRAPHENE_STEALTH_PROOF_V1;
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -635,9 +646,10 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
    FC_ASSERT( !o.inputs.empty() && o.inputs.size() <= 8, "Input count out of bounds" );
    FC_ASSERT( !o.outputs.empty() && o.outputs.size() <= 8, "Output count out of bounds" );
 
-   // V1 spends are spend-only-via-turnstile past sunset; only V2 rings survive.
+   // V1 spends are spend-only-via-turnstile past sunset; only V2/V3 rings survive.
    if( d.head_block_time() >= stealth_v1_sunset_time( d ) )
-      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+                 o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
                  "V1 stealth spends are frozen past sunset (use turnstile re-proof)" );
 
    // Pool floor: ring spends need decoys; thin-pool rings mark the spender.

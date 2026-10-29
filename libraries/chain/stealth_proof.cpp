@@ -284,14 +284,15 @@ std::vector<unsigned char> H_bytes()
 
 const std::vector<std::vector<unsigned char>>& J_cache()
 {
-   // [J1v1, J2v1, J1v2, J2v2]
+   // [J1v1, J2v1, J1v2, J2v2, J1v3, J2v3]
    static std::vector<std::vector<unsigned char>> cache;
    static std::once_flag f;
    std::call_once( f, []() {
-      const char* seeds[4] = { GRAPHENE_STEALTH_J1_SEED, GRAPHENE_STEALTH_J2_SEED,
+      const char* seeds[6] = { GRAPHENE_STEALTH_J1_SEED, GRAPHENE_STEALTH_J2_SEED,
+                               GRAPHENE_STEALTH_J1_SEED, GRAPHENE_STEALTH_J2_SEED,
                                GRAPHENE_STEALTH_J1_SEED, GRAPHENE_STEALTH_J2_SEED };
-      uint8_t vers[4] = { 1, 1, 2, 2 };
-      for( int k = 0; k < 4; ++k )
+      uint8_t vers[6] = { 1, 1, 2, 2, 3, 3 };
+      for( int k = 0; k < 6; ++k )
          cache.push_back( hash_to_point( seeds[k], { vers[k] } ) );
    } );
    return cache;
@@ -335,6 +336,8 @@ struct gen_points {
    EC_POINT* J2v1 = nullptr;
    EC_POINT* J1v2 = nullptr;
    EC_POINT* J2v2 = nullptr;
+   EC_POINT* J1v3 = nullptr;
+   EC_POINT* J2v3 = nullptr;
    std::vector<EC_POINT*> BPG;
    std::vector<EC_POINT*> BPH;
 };
@@ -359,6 +362,8 @@ const gen_points& gen_points_cache()
       c.J2v1 = decode_or_null( J[1] );
       c.J1v2 = decode_or_null( J[2] );
       c.J2v2 = decode_or_null( J[3] );
+      c.J1v3 = decode_or_null( J[4] );
+      c.J2v3 = decode_or_null( J[5] );
       const auto& Gv = BPG_cache();
       const auto& Hv = BPH_cache();
       for( size_t i = 0; i < STEALTH_BP_N; ++i )
@@ -392,6 +397,7 @@ std::vector<unsigned char> stealth_J1_point( uint8_t version )
    const auto& c = J_cache();
    if( version == 1 ) return c[0];
    if( version == 2 ) return c[2];
+   if( version == 3 ) return c[4];
    return {};
 }
 
@@ -400,6 +406,7 @@ std::vector<unsigned char> stealth_J2_point( uint8_t version )
    const auto& c = J_cache();
    if( version == 1 ) return c[1];
    if( version == 2 ) return c[3];
+   if( version == 3 ) return c[5];
    return {};
 }
 
@@ -577,8 +584,8 @@ bool stealth_verify_ring( uint8_t version,
    if( J1b.empty() || J2b.empty() || Hb.empty() ) { err = "generators unavailable"; return false; }
    // Fixed generators come from the decoded-point cache (timing only).
    const gen_points& GP = gen_points_cache();
-   const EC_POINT* J1p = ( version == 1 ) ? GP.J1v1 : GP.J1v2;
-   const EC_POINT* J2p = ( version == 1 ) ? GP.J2v1 : GP.J2v2;
+   const EC_POINT* J1p = ( version == 1 ) ? GP.J1v1 : ( version == 2 ) ? GP.J1v2 : GP.J1v3;
+   const EC_POINT* J2p = ( version == 1 ) ? GP.J2v1 : ( version == 2 ) ? GP.J2v2 : GP.J2v3;
    if( !J1p || !J2p || !GP.H ) { err = "generators unavailable"; return false; }
    pt J1( secp_group() ), J2( secp_group() ), H( secp_group() );
    if( !EC_POINT_copy( J1.p, J1p ) || !EC_POINT_copy( J2.p, J2p ) ||

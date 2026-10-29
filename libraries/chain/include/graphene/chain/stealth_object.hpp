@@ -191,14 +191,18 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// post-STEALTH maintenance), so pre-fork history reconciles by
       /// construction. flat_map is ORDERED (consensus law).
       flat_map<asset_id_type, share_type> blinded_supply_shadow;
-      /// Per-asset count of UNSPENT blinded balances carrying post-fork
+      /// Per-asset count of LIVE blinded balances carrying post-fork
       /// creation metadata (decoy candidates; age is ruled per-ring by the
       /// decoy policy, not here). Maintained on insert/spend by the blind
       /// evaluators, post-STEALTH only — this is the O(1) backing of
-      /// stealth_pool_depth (no per-evaluate full-pool scan). Every
-      /// !spent -> spent ring transition decrements it (decoys are
-      /// one-time-use, spent outputs are excluded from future rings), so it
-      /// always equals the fresh set — never the retained-spent set.
+      /// stealth_pool_depth (no per-evaluate full-pool scan). Under
+      /// nullifier migration the counter has live-set semantics: every
+      /// indexed metadata-bearing balance counts, including nullified ones
+      /// (they stay decoy-eligible, so the set grows with usage). Ring
+      /// spends add outputs and remove nothing; explicit spends (op41/op108)
+      /// decrement. Historical field name `unspent_blind_count` retained
+      /// (object reflection + API surface); the misnomer is documented,
+      /// not renamed.
       /// Grandfathered (pre-fork, metadata absent) balances never count.
       /// Zero entries are removed; flat_map is ORDERED.
       flat_map<asset_id_type, uint32_t> unspent_blind_count;

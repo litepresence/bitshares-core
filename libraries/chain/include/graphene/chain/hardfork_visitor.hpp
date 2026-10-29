@@ -147,26 +147,16 @@ struct hardfork_visitor {
    visit() { return HARDFORK_CORE_2604_PASSED(now); }
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<oracle_ops, Op>(), bool>
-   visit() { return HARDFORK_ORACLE_PASSED(now); }
+   visit() { return false; } // G track does not run oracle ops (H/F track only)
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<h2_primitives_ops, Op>(), bool>
-   visit() { return HARDFORK_H2_BONDS_PASSED(now)
-                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
-                                        HARDFORK_H2_GATEWAY_TIME,
-                                        HARDFORK_H2_PRICE_TIME ); }
+   visit() { return false; } // G track does not run H2 primitives ops
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<h2_gateway_ops, Op>(), bool>
-   visit() { return HARDFORK_H2_GATEWAY_PASSED(now)
-                    && HARDFORK_H2_BONDS_PASSED(now)
-                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
-                                        HARDFORK_H2_GATEWAY_TIME,
-                                        HARDFORK_H2_PRICE_TIME ); }
+   visit() { return false; } // G track does not run H2 gateway ops
     template<typename Op>
     std::enable_if_t<fc::typelist::contains<h2_price_ops, Op>(), bool>
-    visit() { return HARDFORK_H2_PRICE_PASSED(now)
-                     && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
-                                         HARDFORK_H2_GATEWAY_TIME,
-                                         HARDFORK_H2_PRICE_TIME ); }
+    visit() { return false; } // G track does not run H2 price ops
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<stealth_ops, Op>(), bool>
    visit() { return HARDFORK_STEALTH_PASSED(now); }

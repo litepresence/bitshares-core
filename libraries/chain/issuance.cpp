@@ -297,52 +297,6 @@ share_type h2_offset_shortfall_bts( share_type bts_raw, share_type supply_face,
 
 namespace {
 
-/// Rebalance helper: anchor when unanchored, shift one band step when the
-/// consumed price moved beyond half a tick. At most one step per call
-/// (bounded churn: a price gap never avalanches the partition in one
-/// conversion). Shift quantum floors (dust stays in the source band,
-/// favoring the protocol); the anchor still advances on dust (the price
-/// basis moves once observed, the partition catches up). Totals conserved
-/// exactly (equal amounts move on both legs is NOT required: each leg moves
-/// its own floored quantum, and both stay within their own sums).
-void h2_issue_maybe_rebalance( reserve_object& r,
-                               const protocol::oracle_value& price,
-                               uint32_t head_block )
-{
-   h2_issue_ensure_bands( r.band_bts );
-   h2_issue_ensure_bands( r.band_stable );
-   if( r.band_anchor.base_amount <= share_type( 0 )
-       || r.band_anchor.quote_amount <= share_type( 0 ) )
-   {
-      r.band_anchor = price; // first anchoring: no shift, never a move
-      r.band_block = head_block;
-      return;
-   }
-   if( !h2_issue_price_moved( r.band_anchor, price ) )
-      return; // inside half a tick: no churn
-   const bool up = h2_issue_price_up( r.band_anchor, price );
-   // Source: fullest BTS band (tie: lowest index -- deterministic).
-   uint32_t src = 0;
-   for( uint32_t i = 1; i < GRAPHENE_H2_ISSUE_N_BANDS; ++i )
-      if( r.band_bts[i] > r.band_bts[src] )
-         src = i;
-   const int64_t q_bts = r.band_bts[src].value / int64_t( GRAPHENE_H2_ISSUE_N_BANDS );
-   const int64_t q_face = r.band_stable[src].value / int64_t( GRAPHENE_H2_ISSUE_N_BANDS );
-   uint32_t dst = src;
-   if( up && src + 1 < GRAPHENE_H2_ISSUE_N_BANDS )
-      dst = src + 1;
-   else if( !up && src > 0 )
-      dst = src - 1;
-   if( dst != src && ( q_bts > 0 || q_face > 0 ) )
-   {
-      r.band_bts[src] -= share_type( q_bts );
-      r.band_bts[dst] += share_type( q_bts );
-      r.band_stable[src] -= share_type( q_face );
-      r.band_stable[dst] += share_type( q_face );
-   }
-   r.band_anchor = price;
-   r.band_block = head_block;
-}
 
 /// Queued value in BTS at @p price: sum of ceil(face*base/quote) per
 /// request (256-bit, saturating at max supply for the SUM only -- callers
@@ -455,6 +409,55 @@ size_t h2_issue_pending_unmatured( const database& d, const reserve_object& rese
 }
 
 } // namespace
+
+/// Rebalance helper: anchor when unanchored, shift one band step when the
+/// consumed price moved beyond half a tick. At most one step per call
+/// (bounded churn: a price gap never avalanches the partition in one
+/// conversion). Shift quantum floors (dust stays in the source band,
+/// favoring the protocol); the anchor still advances on dust (the price
+/// basis moves once observed, the partition catches up). Totals conserved
+/// exactly (equal amounts move on both legs is NOT required: each leg moves
+/// its own floored quantum, and both stay within their own sums).
+/// Public linkage (moved out of the anonymous namespace verbatim for the
+/// LL-11 band-partition test-honesty suite): identical body, no behavior change.
+void h2_issue_maybe_rebalance( reserve_object& r,
+                               const protocol::oracle_value& price,
+                               uint32_t head_block )
+{
+   h2_issue_ensure_bands( r.band_bts );
+   h2_issue_ensure_bands( r.band_stable );
+   if( r.band_anchor.base_amount <= share_type( 0 )
+       || r.band_anchor.quote_amount <= share_type( 0 ) )
+   {
+      r.band_anchor = price; // first anchoring: no shift, never a move
+      r.band_block = head_block;
+      return;
+   }
+   if( !h2_issue_price_moved( r.band_anchor, price ) )
+      return; // inside half a tick: no churn
+   const bool up = h2_issue_price_up( r.band_anchor, price );
+   // Source: fullest BTS band (tie: lowest index -- deterministic).
+   uint32_t src = 0;
+   for( uint32_t i = 1; i < GRAPHENE_H2_ISSUE_N_BANDS; ++i )
+      if( r.band_bts[i] > r.band_bts[src] )
+         src = i;
+   const int64_t q_bts = r.band_bts[src].value / int64_t( GRAPHENE_H2_ISSUE_N_BANDS );
+   const int64_t q_face = r.band_stable[src].value / int64_t( GRAPHENE_H2_ISSUE_N_BANDS );
+   uint32_t dst = src;
+   if( up && src + 1 < GRAPHENE_H2_ISSUE_N_BANDS )
+      dst = src + 1;
+   else if( !up && src > 0 )
+      dst = src - 1;
+   if( dst != src && ( q_bts > 0 || q_face > 0 ) )
+   {
+      r.band_bts[src] -= share_type( q_bts );
+      r.band_bts[dst] += share_type( q_bts );
+      r.band_stable[src] -= share_type( q_face );
+      r.band_stable[dst] += share_type( q_face );
+   }
+   r.band_anchor = price;
+   r.band_block = head_block;
+}
 
 /// Tripwire depth qualifier, same rule as the H2d sweep (h2_windows_valid
 /// precedent, duplicated read-only: both windows non-empty, both at depth,

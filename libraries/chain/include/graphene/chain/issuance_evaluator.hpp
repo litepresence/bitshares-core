@@ -259,6 +259,18 @@ namespace graphene { namespace chain {
      */
     void h2_issue_verify_bands( const reserve_object& r );
 
+    /**
+     * Soft-band rebalance helper: anchor when unanchored, shift one band step
+     * when the consumed price moved beyond half a tick. At most one step per
+     * call (bounded churn). Called at the end of each mint and redeem apply.
+     * Declared here (moved out of issuance.cpp's anonymous namespace verbatim)
+     * so the LL-11 test-honesty suite can drive it directly for the both-zero
+     * skip test; identical body, no behavior change.
+     */
+    void h2_issue_maybe_rebalance( reserve_object& r,
+                                   const protocol::oracle_value& price,
+                                   uint32_t head_block );
+
 /// R17-A: externally-linkable partition spend, previously file-local.
 /// Spends @p amount from @p bands center-outward (order 3,4,2,5,1,6,0) and
 /// leaves sum(bands) equal to the caller's new totals; conservation across

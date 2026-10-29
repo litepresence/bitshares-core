@@ -1817,4 +1817,154 @@ BOOST_AUTO_TEST_CASE( r11r3_third_party_fxr_pin_refused )
    BOOST_CHECK( h2i_find_reserve( *this, d.pair )->fxr_asset == d.fxr );
 } FC_LOG_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// LL-11 (Item 20): band-partition test-honesty tests. Drive the band helpers
+// directly so the both-zero skip, dust-forfeit settle, and bands_spend
+// remainder assert are exercised as fail-closed invariants, not "by construction".
+// ---------------------------------------------------------------------------
+
+/// (a) both-zero skip: when the fullest band holds < 7 on BOTH legs, the
+/// rebalance quantum is 0/7 = 0 on both legs and no dust moves. A price move
+/// beyond half a tick would shift if quanta were non-zero; here they are zero.
+BOOST_AUTO_TEST_CASE( ll11_both_zero_skip_no_shift )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "LL11Z", "LL11ZF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // Mint creates a reserve with bands in the active issuance band.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 700000 ), share_type( 1000 ) );
+   const reserve_object* r0 = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r0 != nullptr );
+   BOOST_REQUIRE_EQUAL( r0->band_bts.size(), 7u );
+   BOOST_REQUIRE_EQUAL( r0->band_stable.size(), 7u );
+
+   // Park < 7 units in a single band on both legs (source band 3).
+   // Deliberately do NOT touch bts_balance/stable_supply: the fixture
+   // invariant counts reserve bts_balance in total_balances
+   // (database_fixture.cpp:747-751), so zeroing it would break supply
+   // accounting. h2_issue_maybe_rebalance only reads the band partition,
+   // not the totals, so this is safe for the quantum-0 skip test.
+   db.modify( *r0, []( reserve_object& r ) {
+      r.band_bts.assign( 7, share_type( 0 ) );
+      r.band_stable.assign( 7, share_type( 0 ) );
+      r.band_bts[3] = share_type( 6 );
+      r.band_stable[3] = share_type( 1 );
+      r.band_anchor = oracle_value( 100, 1 );
+   });
+
+   const vector<share_type> before_bts = r0->band_bts;
+   const vector<share_type> before_face = r0->band_stable;
+
+   // A price move beyond half a tick would shift if quanta were non-zero.
+   BOOST_CHECK( h2_issue_price_moved( oracle_value( 100, 1 ), oracle_value( 110, 1 ) ) );
+
+   // Rebalance with both-zero quanta: q_bts = 6/7 = 0, q_face = 1/7 = 0.
+   h2_issue_maybe_rebalance( *const_cast<reserve_object*>(r0),
+                             oracle_value( 110, 1 ),
+                             db.head_block_time().sec_since_epoch() );
+
+   // Bands must be byte-identical: no dust moved.
+   const reserve_object* r1 = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( r1 != nullptr );
+   for( uint32_t i = 0; i < 7; ++i )
+   {
+      BOOST_CHECK( r1->band_bts[i] == before_bts[i] );
+      BOOST_CHECK( r1->band_stable[i] == before_face[i] );
+   }
+   // Band partition holds the dust we placed (we did not re-partition the
+   // whole reserve, only exercised the quantum logic).
+   BOOST_CHECK( h2i_band_sum( r1->band_bts ) == share_type( 6 ) );
+   BOOST_CHECK( h2i_band_sum( r1->band_stable ) == share_type( 1 ) );
+} FC_LOG_AND_RETHROW() }
+
+/// (b) post-request price collapse settle with net == 0: face is burned at
+/// request time; when the price collapses so haircut_pay == pro_rata == 0,
+/// net is 0, the payout block is skipped (dust-forfeit), the queue is still
+/// consumed, and face is not resurrected.
+BOOST_AUTO_TEST_CASE( ll11_price_collapse_settle_net_zero )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 30000000000LL ) );
+   fund( bob, asset( 30000000000000LL ) );
+
+   const h2i_door d = h2i_open_door(
+         *this, alice, alice_private_key, bob, bob_private_key,
+         "LL11C", "LL11CF", H2I_VAULT_RAW, H2I_VAULT_USD_CENTS );
+
+   // Book: D=700000/M=1000, alice holds 1000 face.
+   h2i_mint( *this, alice_id, alice_private_key, d,
+             share_type( 700000 ), share_type( 1000 ) );
+   generate_block();
+
+   // Alice queues a 200-face exit: face burned at request time.
+   h2i_exit_request( *this, alice_id, alice_private_key, d, share_type( 200 ) );
+   generate_block();
+   const reserve_object* rq = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( rq != nullptr );
+   BOOST_REQUIRE_EQUAL( rq->exit_queue.size(), 1u );
+
+   const share_type alice_bts_before = db.get_balance( alice_id, asset_id_type() ).amount;
+
+   // Cross to just before the next maintenance interval, then publish the
+   // collapsed price so it is live at sweep time. h2_issue_maintenance reads
+   // the price with h2_price_liveness::live (h2_economics.cpp:784-787), which
+   // requires (now - consumed_value_time) < value_lifetime_sec (86400s).
+   // Publishing well before maintenance would leave the price stale at sweep,
+   // freezing the vault without clearing the queue.
+   const fc::time_point_sec maint_time = db.get_dynamic_global_properties().next_maintenance_time;
+   while( db.head_block_time() < maint_time - 10 )
+      generate_block();
+
+   // Collapse the bonded price so face->BTS is 0 (gross = 0 => haircut_pay = 0),
+   // forcing net = min(0, pro_rata) = 0 -> dust-forfeit, no payout.
+   h2i_publish( *this, d.oracle, bob_id, bob_private_key, 1, 1000000 );
+   BOOST_REQUIRE( h2_read_pair_price( db, d.vault( db ), 0, db.head_block_time() ).valid() );
+
+   // Cross the maintenance interval: h2_issue_maintenance settles the queue
+   // with a live price (published ~10s ago, within value_lifetime_sec).
+   generate_blocks( maint_time );
+   generate_block();
+
+   // Queue consumed, no BTS payout (net == 0 dust-forfeit), face not resurrected.
+   const reserve_object* rs = h2i_find_reserve( *this, d.pair );
+   BOOST_REQUIRE( rs != nullptr );
+   BOOST_CHECK( rs->exit_queue.empty() );
+   BOOST_CHECK( db.get_balance( alice_id, asset_id_type() ).amount == alice_bts_before );
+   BOOST_CHECK( d.pair( db ).dynamic_asset_data_id( db ).current_supply
+                == share_type( 800 ) ); // 1000 minted - 200 burned at request
+} FC_LOG_AND_RETHROW() }
+
+/// (c) bands_spend remainder FC_ASSERT: spending more than the partitioned
+/// total throws FC_ASSERT("Band spend exceeds the partitioned total") before
+/// any partial write can escape (when called inside d.modify, the undo
+/// session rolls back; called directly, bands are zeroed by the time the
+/// assert fires).
+BOOST_AUTO_TEST_CASE( ll11_bands_spend_remainder_refused )
+{ try {
+   vector<share_type> bands( 7, share_type( 100 ) ); // sum = 700
+   const share_type total = h2i_band_sum( bands );
+
+   BOOST_CHECK_THROW(
+      h2_issue_bands_spend( bands, share_type( 701 ) ), // > 700
+      fc::exception );
+
+   // All bands spent down to zero before the assert fired.
+   BOOST_CHECK( h2i_band_sum( bands ) == share_type( 0 ) );
+   BOOST_CHECK( total == share_type( 700 ) );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

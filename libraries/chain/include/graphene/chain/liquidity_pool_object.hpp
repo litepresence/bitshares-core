@@ -51,9 +51,9 @@ class liquidity_pool_object : public abstract_object<liquidity_pool_object, prot
       asset_id_type   share_asset;                 ///< Type of the share asset aka the LP token
       uint16_t        taker_fee_percent = 0;       ///< Taker fee percent
       uint16_t        withdrawal_fee_percent = 0;  ///< Withdrawal fee percent
+      fc::uint128_t   virtual_value = 0;           ///< Virtual value of the pool
       uint8_t         curve_type = 0;              ///< 0 = constant product, 1 = stable (BSIP-6)
       uint64_t        amplification = 0;           ///< A for stable pools (BSIP-6)
-      fc::uint128_t   virtual_value = 0;           ///< Virtual value of the pool
 
       void update_virtual_value()
       {
@@ -115,9 +115,9 @@ FC_REFLECT_DERIVED( graphene::chain::liquidity_pool_object, (graphene::db::objec
                     (share_asset)
                     (taker_fee_percent)
                     (withdrawal_fee_percent)
+                    (virtual_value)
                     (curve_type)
                     (amplification)
-                    (virtual_value)
                   )
 
 GRAPHENE_DECLARE_EXTERNAL_SERIALIZATION( graphene::chain::liquidity_pool_object )

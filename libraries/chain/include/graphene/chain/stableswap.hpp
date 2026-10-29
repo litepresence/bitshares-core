@@ -31,8 +31,11 @@ namespace graphene { namespace chain {
 inline fc::uint128_t compute_stableswap_d(uint64_t x, uint64_t y, uint64_t A)
 {
    if (x == 0 || y == 0) return 0;
+   // SS-05: stable math requires A >= 1. Prevents Ann-1 underflow
+   // (Ann = A*4 >= 4 => Ann-1 >= 3, no wrap).
+   if (A == 0) return 0;
 
-   const fc::uint128_t Ann = (fc::uint128_t)A * 4;        // A * n^n, n = 2
+   const fc::uint128_t Ann = (fc::uint128_t)A * 4;        // A * n^n, n = 2; Ann >= 4 since A >= 1
    const fc::uint128_t S   = (fc::uint128_t)x + (fc::uint128_t)y;
    if (S == 0) return 0;
 
@@ -42,20 +45,31 @@ inline fc::uint128_t compute_stableswap_d(uint64_t x, uint64_t y, uint64_t A)
       const fc::uint128_t D_prev = D;
 
       // D_P = D^3 / (4 * x * y)
-      // Curve's get_D algorithm: (D*D / (2*x)) * D / (2*y).
-      // D*D < 2^128 (D < 2^64 since balances are int64), so D*D/(2*x) fits.
-      // Intermediate (D*D/(2*x)) * D < 2^191 in theory but D_P ≈ D < 2^64
-      // in practice; the final division by (2*y) brings it back in range.
-      // Safe for all realistic BitShares pool sizes.
-      const fc::uint128_t D_P = (D * D / ((fc::uint128_t)2 * x)) * D / ((fc::uint128_t)2 * y);
+      // SS-04: factorized identically to compute_stableswap_y's d3 term:
+      //   (D*D/(4*x)) * D / y   [same shape as dd/(4*nx) * d / y]
+      // so both functions compute D^3/(4*x*y) bit-for-bit with identical
+      // intermediate rounding. D < 2^64 so D*D < 2^128 and D*D/(4*x) fits.
+      const fc::uint128_t D_P = (D * D / ((fc::uint128_t)4 * x)) * D / y;
 
       // Newton step:
       //   f(D)   = Ann*S + D - Ann*D - D_P
       //   f'(D)  = 1 - Ann - 3*D_P/D
-      //   D_new  = D - f(D)/f'(D)
-      //          = D * (2*D_P + Ann*S) / ((Ann-1)*D + 3*D_P)
-      const fc::uint128_t num = D * (2 * D_P + Ann * S);
-      const fc::uint128_t den = (Ann - 1) * D + 3 * D_P;
+      //   D_new  = D * (2*D_P + Ann*S) / ((Ann-1)*D + 3*D_P)
+      //
+      // SS-05: overflow-safe numerator/denominator with saturation.
+      // Ann*S can exceed uint128 for extreme A (Ann up to ~2^66, S up to ~2^64).
+      const fc::uint128_t UMAX = ~fc::uint128_t(0);
+      fc::uint128_t ann_s; bool ann_s_ov = (S > UMAX / Ann);
+      ann_s = ann_s_ov ? UMAX : Ann * S;
+      fc::uint128_t num_inner = (fc::uint128_t)2 * D_P + ann_s;
+      if (num_inner > UMAX) num_inner = UMAX;
+      fc::uint128_t num; bool num_ov = (D != 0 && num_inner > UMAX / D);
+      num = num_ov ? UMAX : D * num_inner;
+
+      fc::uint128_t ann_m1_d; bool ann_m1_d_ov = (D > UMAX / (Ann - 1));
+      ann_m1_d = ann_m1_d_ov ? UMAX : (Ann - 1) * D;
+      fc::uint128_t den = ann_m1_d + (fc::uint128_t)3 * D_P;
+      if (den > UMAX) den = UMAX;
       if (den == 0) return 0;
 
       const fc::uint128_t D_new = num / den;

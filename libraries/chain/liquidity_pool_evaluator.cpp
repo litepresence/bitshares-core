@@ -60,10 +60,26 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    FC_ASSERT( _share_asset->dynamic_data(d).current_supply == 0,
               "Current supply of the share asset needs to be zero" );
 
-   if( op.curve_type == 1 )
+   // BSIP-6: curve_type/amplification are carried in extensions (liquidity_pool_curve_extension).
+   // Absent extension => legacy constant-product pool (curve_type=0, amplification=0).
+   // future_extensions = static_variant<void_t, liquidity_pool_curve_extension>, so
+   // which()==1 selects liquidity_pool_curve_extension.
+   uint8_t curve_type = 0;
+   uint64_t amplification = 0;
+   for( const auto& e : op.extensions )
+   {
+      if( e.which() == 1 )
+      {
+         const auto& ce = e.get< graphene::protocol::liquidity_pool_curve_extension >();
+         curve_type = ce.curve_type;
+         amplification = ce.amplification;
+      }
+   }
+
+   if( curve_type == 1 )
    {
       FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
-      FC_ASSERT( op.amplification > 0, "Stable pool requires positive amplification" );
+      FC_ASSERT( amplification > 0, "Stable pool requires positive amplification" );
       // ECONOMIC NOTE: amplification A is unbounded by protocol. Extreme A makes
       // the StableSwap curve approach a constant-sum (flat) invariant, so a
       // pool priced far from its peg can be drained at near-peg rates: the
@@ -77,7 +93,7 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    }
    else
    {
-      FC_ASSERT( op.curve_type == 0, "Unknown curve type" );
+      FC_ASSERT( curve_type == 0, "Unknown curve type" );
    }
 
    return void_result();
@@ -94,8 +110,22 @@ generic_operation_result liquidity_pool_create_evaluator::do_apply(const liquidi
       obj.share_asset = op.share_asset;
       obj.taker_fee_percent = op.taker_fee_percent;
       obj.withdrawal_fee_percent = op.withdrawal_fee_percent;
-      obj.curve_type = op.curve_type;
-      obj.amplification = op.amplification;
+      // BSIP-6: read curve_type/amplification from extensions
+      // future_extensions = static_variant<void_t, liquidity_pool_curve_extension>, so
+      // which()==1 selects liquidity_pool_curve_extension.
+      uint8_t obj_curve_type = 0;
+      uint64_t obj_amplification = 0;
+      for( const auto& e : op.extensions )
+      {
+         if( e.which() == 1 )
+         {
+            const auto& ce = e.get< graphene::protocol::liquidity_pool_curve_extension >();
+            obj_curve_type = ce.curve_type;
+            obj_amplification = ce.amplification;
+         }
+      }
+      obj.curve_type = obj_curve_type;
+      obj.amplification = obj_amplification;
    });
    result.new_objects.insert( new_liquidity_pool_object.id );
 
@@ -407,11 +437,15 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
                        "Invalid single-sided withdrawal result" );
 
             uint64_t total_a_paid = _pool->balance_a.value - new_balance_a;
+            FC_ASSERT( total_a_paid >= static_cast<uint64_t>(a128),
+                       "Single-sided withdrawal: total A paid is less than proportional share" );
             uint64_t swap_portion = total_a_paid - static_cast<uint64_t>(a128);
 
             fc::uint128_t swap_fee = (fc::uint128_t)swap_portion * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
             fc::uint128_t imbalance_fee = (swap_fee + 1) / 2; // round up, favor pool
 
+            FC_ASSERT( imbalance_fee <= fc::uint128_t(total_a_paid),
+                       "Single-sided withdrawal: imbalance fee exceeds total A paid" );
             uint64_t net_a_paid = total_a_paid - static_cast<uint64_t>(imbalance_fee);
 
             _pool_pays_a = asset( static_cast<int64_t>( net_a_paid ), _pool->asset_a );
@@ -430,11 +464,15 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
                        "Invalid single-sided withdrawal result" );
 
             uint64_t total_b_paid = _pool->balance_b.value - new_balance_b;
+            FC_ASSERT( total_b_paid >= static_cast<uint64_t>(b128),
+                       "Single-sided withdrawal: total B paid is less than proportional share" );
             uint64_t swap_portion = total_b_paid - static_cast<uint64_t>(b128);
 
             fc::uint128_t swap_fee = (fc::uint128_t)swap_portion * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
             fc::uint128_t imbalance_fee = (swap_fee + 1) / 2; // round up, favor pool
 
+            FC_ASSERT( imbalance_fee <= fc::uint128_t(total_b_paid),
+                       "Single-sided withdrawal: imbalance fee exceeds total B paid" );
             uint64_t net_b_paid = total_b_paid - static_cast<uint64_t>(imbalance_fee);
 
             _pool_pays_a = asset( 0, _pool->asset_a );

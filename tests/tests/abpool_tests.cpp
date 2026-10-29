@@ -1,5 +1,8 @@
 #include <graphene/chain/abpool.hpp>
 #include <graphene/chain/types.hpp>
+#include <graphene/protocol/liquidity_pool.hpp>
+
+#include <fc/io/raw.hpp>
 
 #include "../common/database_fixture.hpp"
 #include <graphene/chain/hardfork.hpp>
@@ -63,6 +66,44 @@ BOOST_AUTO_TEST_CASE( dy_zero_on_invalid )
 {
    BOOST_CHECK(compute_abpool_dy(1000, 1000, 10, 10, 0, 5, 100) == 0);
    BOOST_CHECK(compute_abpool_dy(1000, 1000, 10, 10, 2, 5, 0) == 0);
+}
+
+// AB-07: wire-format pinning — liquidity_pool_create_operation with AB
+// curve extension must round-trip through raw serialization.
+BOOST_AUTO_TEST_CASE( liquidity_pool_create_wire_roundtrip )
+{
+   using namespace graphene::protocol;
+
+   liquidity_pool_create_operation op;
+   op.fee = asset(50 * GRAPHENE_BLOCKCHAIN_PRECISION);
+   op.account = account_id_type(1);
+   op.asset_a = asset_id_type(2);
+   op.asset_b = asset_id_type(3);
+   op.share_asset = asset_id_type(4);
+   op.taker_fee_percent = 10;
+   op.withdrawal_fee_percent = 5;
+
+   op.extensions.value.curve_type = 2;
+   op.extensions.value.ab_weight_num = 2;
+   op.extensions.value.ab_weight_den = 5;
+   op.extensions.value.ab_p_low = 1000;
+   op.extensions.value.ab_p_high = 10000;
+
+   auto packed = fc::raw::pack(op);
+   liquidity_pool_create_operation unpacked = fc::raw::unpack<liquidity_pool_create_operation>(packed);
+
+   BOOST_CHECK(unpacked.extensions.value.curve_type.valid());
+   BOOST_CHECK(*unpacked.extensions.value.curve_type == 2);
+   BOOST_CHECK(unpacked.extensions.value.ab_weight_num.valid());
+   BOOST_CHECK(*unpacked.extensions.value.ab_weight_num == 2);
+   BOOST_CHECK(unpacked.extensions.value.ab_weight_den.valid());
+   BOOST_CHECK(*unpacked.extensions.value.ab_weight_den == 5);
+   BOOST_CHECK(unpacked.extensions.value.ab_p_low.valid());
+   BOOST_CHECK(*unpacked.extensions.value.ab_p_low == 1000);
+   BOOST_CHECK(unpacked.extensions.value.ab_p_high.valid());
+   BOOST_CHECK(*unpacked.extensions.value.ab_p_high == 10000);
+   BOOST_CHECK(unpacked.taker_fee_percent == 10);
+   BOOST_CHECK(unpacked.withdrawal_fee_percent == 5);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

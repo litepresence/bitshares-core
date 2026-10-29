@@ -370,6 +370,206 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // account
    }
+   void operator()( const reserved_bsip4_slot_78_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 78
+   }
+
+   void operator()( const reserved_bsip4_slot_79_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 79
+   }
+
+   void operator()( const reserved_bsip4_slot_80_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 80
+   }
+
+   void operator()( const reserved_bsip4_slot_81_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 81
+   }
+
+   void operator()( const reserved_bsip4_slot_82_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 82
+   }
+
+   void operator()( const reserved_bsip4_slot_83_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 83
+   }
+
+   void operator()( const reserved_bsip4_slot_84_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 84
+   }
+
+   void operator()( const reserved_bsip4_slot_85_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 85
+   }
+
+   void operator()( const reserved_bsip4_slot_86_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 86
+   }
+
+   void operator()( const reserved_bsip4_slot_87_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 87
+   }
+
+   void operator()( const reserved_bsip4_slot_88_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 88
+   }
+
+   void operator()( const reserved_bsip4_slot_89_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 89
+   }
+
+   void operator()( const reserved_bsip4_slot_90_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 90
+   }
+
+   void operator()( const reserved_bsip4_slot_91_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 91
+   }
+
+   void operator()( const reserved_bsip4_slot_92_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 92
+   }
+
+   void operator()( const reserved_bsip4_slot_93_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 93
+   }
+
+   void operator()( const reserved_bsip4_slot_94_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 94
+   }
+
+   void operator()( const reserved_bsip4_slot_95_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 95
+   }
+
+   void operator()( const reserved_bsip4_slot_96_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 96
+   }
+
+   void operator()( const reserved_bsip4_slot_97_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 97
+   }
+
+   void operator()( const reserved_bsip4_slot_98_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 98
+   }
+
+   void operator()( const reserved_bsip4_slot_99_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 99
+   }
+
+   void operator()( const reserved_bsip4_slot_100_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 100
+   }
+
+   void operator()( const reserved_bsip4_slot_101_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 101
+   }
+
+   void operator()( const reserved_bsip4_slot_102_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 102
+   }
+
+   void operator()( const reserved_bsip4_slot_103_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 103
+   }
+
+   void operator()( const reserved_bsip4_slot_104_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 104
+   }
+
+   void operator()( const reserved_bsip4_slot_105_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 105
+   }
+
+   void operator()( const reserved_bsip4_slot_106_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 106
+   }
+
+   void operator()( const reserved_bsip4_slot_107_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 107
+   }
+
+   void operator()( const reserved_bsip4_slot_108_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 108
+   }
+
+   void operator()( const reserved_bsip4_slot_109_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 109
+   }
+
+   void operator()( const reserved_bsip4_slot_110_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 110
+   }
+
+   void operator()( const reserved_bsip4_slot_111_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 111
+   }
+
+   void operator()( const reserved_bsip4_slot_112_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 112
+   }
+
+   void operator()( const reserved_bsip4_slot_113_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 113
+   }
+
+   void operator()( const reserved_bsip4_slot_114_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 114
+   }
+
+   void operator()( const reserved_bsip4_slot_115_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 115
+   }
+
+   void operator()( const reserved_bsip4_slot_116_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 116
+   }
+
+   void operator()( const reserved_bsip4_slot_117_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // reserved slot 117
+   }
+
    void operator()( const samet_fund_create_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // owner_account

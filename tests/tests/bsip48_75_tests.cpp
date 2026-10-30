@@ -28,6 +28,7 @@
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
+#include <graphene/chain/reciprocity_evaluator.hpp>
 
 #include <boost/test/unit_test.hpp>
 
@@ -1872,6 +1873,124 @@ BOOST_AUTO_TEST_CASE( asset_owner_update_mcr_mssr )
       BOOST_CHECK_EQUAL( db.get_balance( seller_id, core_id ).amount.value, init_amount + 105 + 115 );
 
       generate_block();
+
+   } catch (fc::exception& e) {
+      edump((e.to_detail_string()));
+      throw;
+   }
+}
+
+/// P4-06 (Important, CODE): r_konstant_weighted_log overflow guard on int128
+/// intermediates. Call r_compute_konstant with adversarial balance ratios
+/// (max balance, min genesis) and verify no overflow and a sane bounded result.
+BOOST_AUTO_TEST_CASE( p406_konstant_overflow_adversarial_ratios )
+{
+   try {
+      // MAX int64 balance against tiny genesis → worst-case r ratio
+      const share_type max_balance( GRAPHENE_MAX_SHARE_SUPPLY / 2 );
+      const share_type tiny_genesis( 1 );
+      const uint64_t factors = 2;
+      const fc::uint128_t scale( 1 );
+      const vector<uint64_t> weights = { 50, 50 };
+
+      vector<share_type> bals( factors, max_balance );
+      vector<share_type> gens( factors, tiny_genesis );
+
+      // Should not throw (overflow guarded), result bounded
+      fc::uint128_t k = r_compute_konstant( bals, gens, factors, scale, weights );
+      BOOST_CHECK( k > 0 );
+      BOOST_CHECK( k <= fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ) );
+
+      // Mixed: one max balance, one tiny balance
+      bals[0] = max_balance;
+      bals[1] = share_type( 1 );
+      gens[0] = share_type( 1 );
+      gens[1] = max_balance;
+      k = r_compute_konstant( bals, gens, factors, scale, weights );
+      BOOST_CHECK( k > 0 );
+      BOOST_CHECK( k <= fc::uint128_t( GRAPHENE_MAX_SHARE_SUPPLY ) );
+
+   } catch (fc::exception& e) {
+      edump((e.to_detail_string()));
+      throw;
+   }
+}
+
+/// P4-07 (Important, CODE): explicit BSIP-4 hardfork gate in do_evaluate.
+/// reciprocity_pool_create_evaluator refuses before HARDFORK_BSIP4_TIME,
+/// accepts after.
+BOOST_AUTO_TEST_CASE( p407_pool_create_hardfork_gate )
+{
+   try {
+      generate_blocks( HARDFORK_CORE_1270_TIME );
+      generate_block();
+      set_expiration( db, trx );
+
+      // Verify we're before BSIP-4 hardfork
+      BOOST_CHECK( !HARDFORK_BSIP4_PASSED( db.head_block_time() ) );
+
+      ACTORS( (sam) );
+      auto init_amount = 10000000 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      fund( sam, asset( init_amount ) );
+
+      // Create two UIA assets for the pool
+      auto create_asset = [&]( const string& symbol ) -> asset_id_type {
+         asset_create_operation acop;
+         acop.issuer = sam_id;
+         acop.symbol = symbol;
+         acop.precision = 2;
+         acop.common_options.core_exchange_rate = price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) );
+         acop.common_options.max_supply = GRAPHENE_MAX_SHARE_SUPPLY;
+         acop.common_options.market_fee_percent = 100;
+         acop.common_options.flags = ~(ASSET_ISSUER_PERMISSION_ENABLE_BITS_MASK ^ DEFAULT_UIA_ASSET_ISSUER_PERMISSION);
+         acop.common_options.issuer_permissions = DEFAULT_UIA_ASSET_ISSUER_PERMISSION;
+         trx.operations.clear();
+         trx.operations.push_back( acop );
+         sign( trx, sam_private_key );
+         PUSH_TX( db, trx, ~0 );
+         return asset_id_type( db.get_index_type<asset_index>().indices().get<by_symbol>().find( symbol )->id );
+      };
+      asset_id_type asset_a = create_asset( "P407A" );
+      asset_id_type asset_b = create_asset( "P407B" );
+
+      // Build a pool_create operation
+      reciprocity_pool_create_operation pop;
+      pop.account = sam_id;
+      pop.assets = { asset_a, asset_b };
+      pop.share_asset = asset_id_type();
+      pop.factory = reciprocity_factory_id_type();
+      pop.weights = { 1, 1 };
+      pop.extensions = extensions_type();
+
+      // Before BSIP-4 hardfork: pool_create must refuse
+      signed_transaction pre_tx;
+      pre_tx.operations.push_back( pop );
+      pre_tx.set_expiration( db.head_block_time() + fc::seconds( 600 ) );
+      db.current_fee_schedule().set_fee( pre_tx.operations.front() );
+      pre_tx.sign( sam_private_key, db.get_chain_id() );
+      BOOST_CHECK_THROW( PUSH_TX( db, pre_tx, ~0 ), fc::exception );
+
+      // Advance past BSIP-4 hardfork
+      generate_blocks( fc::time_point_sec( HARDFORK_BSIP4_TIME.sec_since_epoch() + 1 ), true );
+      generate_block();
+      set_expiration( db, trx );
+      BOOST_CHECK( HARDFORK_BSIP4_PASSED( db.head_block_time() ) );
+
+      // After BSIP-4 hardfork: pool_create must not be rejected by the hardfork gate.
+      // Other validations (factory existence, share asset, genesis tokens) may still
+      // reject the operation, but the hardfork-specific error must not appear.
+      signed_transaction post_tx;
+      post_tx.operations.push_back( pop );
+      post_tx.set_expiration( db.head_block_time() + fc::seconds( 600 ) );
+      db.current_fee_schedule().set_fee( post_tx.operations.front() );
+      post_tx.sign( sam_private_key, db.get_chain_id() );
+      bool hardfork_gate_blocked = false;
+      try {
+         PUSH_TX( db, post_tx, ~0 );
+      } catch (const fc::exception& e) {
+         hardfork_gate_blocked = (e.to_detail_string().find( "Not allowed until the BSIP-4 hardfork" ) != string::npos);
+      }
+      BOOST_CHECK( !hardfork_gate_blocked );
 
    } catch (fc::exception& e) {
       edump((e.to_detail_string()));

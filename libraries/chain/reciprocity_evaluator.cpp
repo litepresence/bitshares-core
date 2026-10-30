@@ -7,6 +7,7 @@
 
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/exceptions.hpp>
+#include <graphene/chain/hardfork.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
 
 #include <graphene/protocol/reciprocity_operations.hpp>
@@ -93,9 +94,25 @@ static uint128_t r_konstant_weighted_log(
         if (gens[i] == 0 || bals[i] == 0) continue;
         uint128_t r = r_safe_mul(uint128_t(bals[i]), uint128_t(BASIS)) / gens[i];
         if (r == 0) continue;
-        int128_t ln = 2 * ((int128_t)r - (int128_t)BASIS) * (int128_t)BASIS / ((int128_t)r + (int128_t)BASIS);
+        // P4-06 (Important, CODE): overflow guard on the int128 intermediates.
+        // Proven bound: bals[i] <= INT64_MAX (~2^63) and BASIS = 10^4, so
+        //   r = bals*BASIS/gens <= (2^63-1)*10^4 < 2^77, comfortably inside int128.
+        // Each ln term is a Padé[1/1] log approximation: ln ≈ BASIS*2*(x-1)/(x+1)
+        // with x = r/BASIS > 0, hence |ln| < 2*BASIS = 20000. With at most
+        // MAX_TOKENS (= 8) terms and weights summing to <= RECIPROCITY_MAX_SUM_WEIGHTS
+        // (= 100, all positive), |sum_ln| <= 8 * 100 * 20000 = 1.6*10^7, which
+        // fits in int128 and even int64. These assertions document the bound;
+        // they are enforced by the create/swap/liquidity evaluators upstream.
+        FC_ASSERT( r <= (uint128_t(1) << 120), "r exceeds proven int128 bound" );
+        int128_t r_i128 = static_cast<int128_t>( r );
+        int128_t ln = 2 * (r_i128 - (int128_t)BASIS) * (int128_t)BASIS / ((int128_t)r + (int128_t)BASIS);
+        FC_ASSERT( ln >= -int128_t( 2 * BASIS ) && ln <= int128_t( 2 * BASIS ),
+                   "ln term outside proven bound [-2*BASIS, 2*BASIS]" );
         if( has_weights && weights[i] > 0 ) {
-            sum_ln += (int128_t)weights[i] * ln;
+            int128_t wln = static_cast<int128_t>( weights[i] ) * ln;
+            FC_ASSERT( wln >= -(int128_t(1) << 62) && wln <= (int128_t(1) << 62),
+                       "weighted ln term exceeds proven bound" );
+            sum_ln += wln;
             sum_w += weights[i];
         } else {
             sum_ln += ln;
@@ -104,7 +121,11 @@ static uint128_t r_konstant_weighted_log(
     }
     uint64_t denom = has_weights ? sum_w : n;
     if (denom == 0) return scale;
-    int64_t avg = (int64_t)(sum_ln / (int128_t)denom);
+    int128_t avg128 = sum_ln / (int128_t)denom;
+    // |avg| <= 2*BASIS since each |ln| <= 2*BASIS and an average preserves the bound
+    FC_ASSERT( avg128 >= -int128_t( 2 * BASIS ) && avg128 <= int128_t( 2 * BASIS ),
+               "average ln outside proven bound" );
+    int64_t avg = static_cast<int64_t>( avg128 );
     int128_t pade_num = 2 * (int128_t)BASIS + avg;
     int128_t pade_den = 2 * (int128_t)BASIS - avg;
     if (pade_den <= 0) return scale;
@@ -116,9 +137,12 @@ uint128_t r_compute_konstant( const vector<share_type>& balances,
                                      const vector<share_type>& genesis,
                                      uint64_t factors,
                                      uint128_t scale,
-                                     uint128_t precision,
                                      const vector<uint64_t>& weights )
 {
+   // P4-06: the former `precision` parameter (fixed-point scale) was unused —
+   // the konstant math operates at RECIPROCITY_BASIS precision and the scale is
+   // passed in explicitly. Parameter removed; fixed-point precision scaling is
+   // reserved for a future, explicitly-versioned change.
    vector<uint64_t> bals( factors ), gens( factors );
    for( uint64_t i = 0; i < factors; i++ ) {
       bals[i] = static_cast<uint64_t>( std::max<int64_t>( 0, balances[i].value ) );
@@ -398,6 +422,15 @@ void_result reciprocity_pool_create_evaluator::do_evaluate( const reciprocity_po
 { try {
    FC_ASSERT( op.account != account_id_type(), "Invalid account address" );
    const database& d = db();
+   // P4-07 (Important, CODE): explicit BSIP-4 hardfork gate in do_evaluate, in
+   // addition to the visitor-only gating in hardfork_visitor.hpp (§6). Defense
+   // in depth: every BSIP-4 operation refuses to evaluate before the flag has
+   // passed, matching the established liquidity-pool pattern.
+   // Decision: explicit assert chosen over visitor-only (recorded in the task
+   // report and ACTIVATION-CHECKLIST); visitor gating remains as the primary
+   // operation-validity gate.
+   FC_ASSERT( HARDFORK_BSIP4_PASSED(d.head_block_time()),
+              "Not allowed until the BSIP-4 hardfork" );
 
    // Validate asset count
    FC_ASSERT( op.assets.size() >= 2 && op.assets.size() <= MAX_TOKENS,
@@ -563,6 +596,9 @@ void_result reciprocity_pool_swap_evaluator::do_evaluate( const reciprocity_pool
 { try {
    FC_ASSERT( op.account != account_id_type(), "Unauthorized account" );
    const database& d = db();
+   // P4-07: explicit BSIP-4 hardfork gate (see create evaluator for rationale).
+   FC_ASSERT( HARDFORK_BSIP4_PASSED(d.head_block_time()),
+              "Not allowed until the BSIP-4 hardfork" );
    _pool = &op.pool(d);
    uint64_t n = _pool->factors;
 
@@ -630,7 +666,6 @@ generic_exchange_operation_result reciprocity_pool_swap_evaluator::do_apply(
 
      share_type shares_in = op.shares_in;
      uint128_t pre_k = r_compute_konstant( pre_bals, genesis, n, _pool->scale,
-                                           GRAPHENE_BLOCKCHAIN_PRECISION,
                                            _pool->weights );
      FC_ASSERT( _pool->scale > 0, "Compute limit exceeded" );
      FC_ASSERT( pre_k > 0 || _pool->supply == 0, "Invalid K consultation" );
@@ -641,7 +676,6 @@ generic_exchange_operation_result reciprocity_pool_swap_evaluator::do_apply(
       post_bals[i] = share_type( pre_bals[i].value + tokens_in[i].value - tokens_out[i].value );
 
    uint128_t post_k = r_compute_konstant( post_bals, genesis, n, _pool->scale,
-                                          GRAPHENE_BLOCKCHAIN_PRECISION,
                                           _pool->weights );
 
       // Aequitas — governed spread (governance applied inside)
@@ -690,7 +724,6 @@ generic_exchange_operation_result reciprocity_pool_swap_evaluator::do_apply(
     }
 
    uint128_t tithed_k = r_compute_konstant( tithed_bals, genesis, n, _pool->scale,
-                                            GRAPHENE_BLOCKCHAIN_PRECISION,
                                             _pool->weights );
 
      // Reciprocity (base: sharesIn + tithedK - preK)
@@ -709,7 +742,6 @@ generic_exchange_operation_result reciprocity_pool_swap_evaluator::do_apply(
    for( uint64_t i = 0; i < n; i++ )
       stake_post_bals[i] = share_type( pre_bals[i].value + tokens_in[i].value );
     uint128_t post_k_stake = r_compute_konstant( stake_post_bals, genesis, n, _pool->scale,
-                                                 GRAPHENE_BLOCKCHAIN_PRECISION,
                                                  _pool->weights );
 
       // Cache immutable pool fields before modify (tokens/lp_token never change)
@@ -858,6 +890,9 @@ void_result reciprocity_pool_add_liquidity_evaluator::do_evaluate(
       const reciprocity_pool_add_liquidity_operation& op )
 { try {
    const database& d = db();
+   // P4-07: explicit BSIP-4 hardfork gate (see create evaluator for rationale).
+   FC_ASSERT( HARDFORK_BSIP4_PASSED(d.head_block_time()),
+              "Not allowed until the BSIP-4 hardfork" );
    _pool = &op.pool(d);
    uint64_t n = _pool->factors;
 
@@ -884,8 +919,8 @@ void_result reciprocity_pool_add_liquidity_evaluator::do_evaluate(
          init_bals[i] = op.amounts[i].amount;
 
       uint128_t scale = r_compute_scale( init_bals );
-      uint128_t k = r_compute_konstant( init_bals, init_bals, n, scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                        _pool->weights );
+      uint128_t k = r_compute_konstant( init_bals, init_bals, n, scale,
+                                         _pool->weights );
 
       FC_ASSERT( k <= uint128_t( share_asset_obj.options.max_supply.value ),
                  "Initial deposit exceeds max supply" );
@@ -899,14 +934,12 @@ void_result reciprocity_pool_add_liquidity_evaluator::do_evaluate(
       for( uint64_t i = 0; i < n; i++ )
          cur_bals[i] = _pool->balances[i];
       uint128_t pre_k = r_compute_konstant( cur_bals, _pool->genesis, n,
-                                            _pool->scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                            _pool->weights );
+                                            _pool->scale, _pool->weights );
       vector<share_type> post_bals( n );
       for( uint64_t i = 0; i < n; i++ )
          post_bals[i] = share_type( cur_bals[i].value + op.amounts[i].amount.value );
       uint128_t post_k = r_compute_konstant( post_bals, _pool->genesis, n,
-                                             _pool->scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                             _pool->weights );
+                                             _pool->scale, _pool->weights );
       uint128_t new_shares = post_k > pre_k ? post_k - pre_k : 0;
       FC_ASSERT( new_shares > 0, "Aborting due to zero outcome" );
 
@@ -948,7 +981,6 @@ generic_exchange_operation_result reciprocity_pool_add_liquidity_evaluator::do_a
           rpo.scale = scale;
 
           uint128_t k = r_compute_konstant( rpo.balances, rpo.genesis, n, scale,
-                                            GRAPHENE_BLOCKCHAIN_PRECISION,
                                             rpo.weights );
            rpo.supply   = share_type( static_cast<int64_t>( k ) );
              rpo.initialized = true;
@@ -980,13 +1012,11 @@ generic_exchange_operation_result reciprocity_pool_add_liquidity_evaluator::do_a
            for( uint64_t i = 0; i < n; i++ )
               cur_bals[i] = rpo.balances[i];
            uint128_t pre_k = r_compute_konstant( cur_bals, rpo.genesis, n,
-                                                 rpo.scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                                 rpo.weights );
+                                                 rpo.scale, rpo.weights );
            for( uint64_t i = 0; i < n; i++ )
                rpo.balances[i] += _pool_receives[i].amount;
             uint128_t new_k = r_compute_konstant( rpo.balances, rpo.genesis, n,
-                                                  rpo.scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                                  rpo.weights );
+                                                  rpo.scale, rpo.weights );
            share_type delta_supply = share_type( static_cast<int64_t>(
                  new_k > pre_k ? new_k - pre_k : 0 ) );
 
@@ -1026,6 +1056,9 @@ void_result reciprocity_pool_remove_liquidity_evaluator::do_evaluate(
       const reciprocity_pool_remove_liquidity_operation& op )
 { try {
    const database& d = db();
+   // P4-07: explicit BSIP-4 hardfork gate (see create evaluator for rationale).
+   FC_ASSERT( HARDFORK_BSIP4_PASSED(d.head_block_time()),
+              "Not allowed until the BSIP-4 hardfork" );
    _pool = &op.pool(d);
    uint64_t n = _pool->factors;
 
@@ -1086,14 +1119,12 @@ generic_exchange_operation_result reciprocity_pool_remove_liquidity_evaluator::d
 
       d.modify( *_pool, [this, n, &d, &op]( reciprocity_pool_object& rpo ){
        uint128_t pre_k = r_compute_konstant( rpo.balances, rpo.genesis, n,
-                                             rpo.scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                             rpo.weights );
+                                             rpo.scale, rpo.weights );
         for( uint64_t i = 0; i < n; i++ )
            rpo.balances[i] -= _pool_pays[i].amount;
 
       uint128_t new_k = r_compute_konstant( rpo.balances, rpo.genesis, n,
-                                            rpo.scale, GRAPHENE_BLOCKCHAIN_PRECISION,
-                                            rpo.weights );
+                                            rpo.scale, rpo.weights );
 
       rpo.supply -= op.share_amount.amount;
 
@@ -1142,6 +1173,9 @@ void_result reciprocity_claim_founder_royalty_evaluator::do_evaluate(
       const reciprocity_claim_founder_royalty_operation& op )
 { try {
    const database& d = db();
+   // P4-07: explicit BSIP-4 hardfork gate (see create evaluator for rationale).
+   FC_ASSERT( HARDFORK_BSIP4_PASSED(d.head_block_time()),
+              "Not allowed until the BSIP-4 hardfork" );
     FC_ASSERT( op.account == GRAPHENE_COMMITTEE_ACCOUNT, "Only committee can claim founder fees" );
 
     // Find factory (singleton)
@@ -1182,6 +1216,9 @@ void_result reciprocity_claim_promoter_royalty_evaluator::do_evaluate(
       const reciprocity_claim_promoter_royalty_operation& op )
 { try {
    const database& d = db();
+   // P4-07: explicit BSIP-4 hardfork gate (see create evaluator for rationale).
+   FC_ASSERT( HARDFORK_BSIP4_PASSED(d.head_block_time()),
+              "Not allowed until the BSIP-4 hardfork" );
     const auto& token_obj = op.token(d);
     FC_ASSERT( token_obj.issuer == op.account, "Only token issuer can claim promoter fees" );
 

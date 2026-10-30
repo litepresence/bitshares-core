@@ -15,7 +15,6 @@ namespace graphene { namespace chain {
                                  const vector<share_type>& genesis,
                                  uint64_t factors,
                                  fc::uint128_t scale,
-                                 fc::uint128_t precision,
                                  const vector<uint64_t>& weights = {} );
 
 

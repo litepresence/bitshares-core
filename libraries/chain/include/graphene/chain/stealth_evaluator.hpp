@@ -474,6 +474,12 @@ uint32_t stealth_work_for_stealth_transfer( const protocol::stealth_transfer_ope
 /// Work-model units for n range-proven blind outputs (R9B): deposits,
 /// blind transfers, turnstile outputs. Pure, saturated.
 uint32_t stealth_work_for_range_proofs( uint32_t n_outputs );
+/// Work-model units for the op39 A4 full-window dominance scan
+/// (stealth_window_dominant, stealth_evaluator.cpp:1393-1407): O(W)
+/// integer map build over up to GRAPHENE_STEALTH_DEPOSITOR_WINDOW events,
+/// charged alongside range-proof work in op39 do_evaluate/do_apply so the
+/// per-block blind work budget (F-01/R9B) accounts for it. Pure, constant.
+uint32_t stealth_work_for_window_scan();
 /// Work-model units consumed by one op108 explicit spend (R9B): conservation
 /// kernel + per-input recovery proofs + per-output range proofs. Pure,
 /// saturated. Called from do_evaluate (gate) and do_apply (accounting).

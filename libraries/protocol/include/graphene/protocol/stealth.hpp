@@ -116,6 +116,13 @@ constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_KERNEL = 2048;
 /// conservative over-count (fail-closed direction for the budget).
 /// Proposal per the header rule: auditors may raise, never lower.
 constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_POOL_MATH = 2048;
+/// Depositor-window dominance scan cost (op39 A4 full-window scan,
+/// stealth_window_dominant in stealth_evaluator.cpp): O(W) integer map
+/// build over up to GRAPHENE_STEALTH_DEPOSITOR_WINDOW events, no EC ops.
+/// Charged alongside range-proof work in op39 do_evaluate/do_apply so the
+/// per-block blind work budget (F-01/R9B) accounts for it. Small integer
+/// value — map insertions are far cheaper than EC scalar mults.
+constexpr uint32_t GRAPHENE_STEALTH_WORK_US_PER_WINDOW_SCAN = 512;
 
 /// Decoy eligibility: outputs younger than this are ineligible as decoys
 /// (Sybil-poisoning cost: an attacker must park outputs for a full day

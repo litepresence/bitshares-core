@@ -384,6 +384,17 @@ uint32_t stealth_work_for_range_proofs( uint32_t n_outputs )
    return (uint32_t)w;
 }
 
+/// A4 full-window dominance scan work (stealth_window_dominant,
+/// stealth_evaluator.cpp:1393-1407): O(W) integer map build over up to
+/// GRAPHENE_STEALTH_DEPOSITOR_WINDOW depositor events. No EC ops — pure
+/// integer/map cost. Charged alongside range-proof work in op39 so the
+/// per-block blind work budget (F-01/R9B) accounts for it.
+/// Spec: docs/superpowers/specs/2026-10-09-nullifier-double-spend-design.md §3.2a
+uint32_t stealth_work_for_window_scan()
+{
+   return GRAPHENE_STEALTH_WORK_US_PER_WINDOW_SCAN;
+}
+
 uint32_t stealth_work_for_explicit_spend( const protocol::stealth_explicit_spend_operation& o )
 {
    // 64-bit accumulation with saturation, mirroring

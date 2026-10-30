@@ -4880,6 +4880,8 @@ BOOST_AUTO_TEST_CASE( r9b_work_budget_arithmetic )
    BOOST_CHECK( 56u * stealth_work_for_range_proofs( 2 )
                 + stealth_work_for_stealth_transfer( small )
                 > GRAPHENE_STEALTH_MAX_BLIND_WORK_US_PER_BLOCK );
+   // R9C-02: A4 full-window scan work charge (stealth_evaluator.cpp:393-396)
+   BOOST_REQUIRE_EQUAL( stealth_work_for_window_scan(), 512u );
 } FC_CAPTURE_AND_RETHROW() }
 
 BOOST_AUTO_TEST_CASE( parity_pool_routing_and_float )

@@ -29,6 +29,7 @@
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/reciprocity_evaluator.hpp>
+#include <graphene/chain/reciprocity_factory_object.hpp>
 
 #include <boost/test/unit_test.hpp>
 
@@ -1942,7 +1943,7 @@ BOOST_AUTO_TEST_CASE( p407_pool_create_hardfork_gate )
          acop.common_options.core_exchange_rate = price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) );
          acop.common_options.max_supply = GRAPHENE_MAX_SHARE_SUPPLY;
          acop.common_options.market_fee_percent = 100;
-         acop.common_options.flags = ~(ASSET_ISSUER_PERMISSION_ENABLE_BITS_MASK ^ DEFAULT_UIA_ASSET_ISSUER_PERMISSION);
+         acop.common_options.flags = DEFAULT_UIA_ASSET_ISSUER_PERMISSION;
          acop.common_options.issuer_permissions = DEFAULT_UIA_ASSET_ISSUER_PERMISSION;
          trx.operations.clear();
          trx.operations.push_back( acop );
@@ -1991,6 +1992,95 @@ BOOST_AUTO_TEST_CASE( p407_pool_create_hardfork_gate )
          hardfork_gate_blocked = (e.to_detail_string().find( "Not allowed until the BSIP-4 hardfork" ) != string::npos);
       }
       BOOST_CHECK( !hardfork_gate_blocked );
+
+   } catch (fc::exception& e) {
+      edump((e.to_detail_string()));
+      throw;
+   }
+}
+
+/// P4-08 (Important, CODE): per-account pool cap — one account cannot create
+/// more than MAX_POOLS_PER_ACCOUNT pools, preventing exhaustion of the global
+/// MAX_POOLS ceiling by a single creator.
+BOOST_AUTO_TEST_CASE( p408_per_account_pool_cap )
+{
+   try {
+      generate_blocks( HARDFORK_CORE_1270_TIME );
+      generate_block();
+      set_expiration( db, trx );
+
+      // Advance past BSIP-4 hardfork
+      generate_blocks( fc::time_point_sec( HARDFORK_BSIP4_TIME.sec_since_epoch() + 1 ), true );
+      generate_block();
+      set_expiration( db, trx );
+      BOOST_CHECK( HARDFORK_BSIP4_PASSED( db.head_block_time() ) );
+
+      ACTORS( (sam) );
+      auto init_amount = 10000000 * GRAPHENE_BLOCKCHAIN_PRECISION;
+      fund( sam, asset( init_amount ) );
+
+      // Helper: create a fresh UIA share asset owned by sam
+      auto create_share_asset = [&]( const string& symbol ) -> asset_id_type {
+         asset_create_operation acop;
+         acop.issuer = sam_id;
+         acop.symbol = symbol;
+         acop.precision = 2;
+         acop.common_options.core_exchange_rate = price( asset( 1, asset_id_type( 1 ) ), asset( 1 ) );
+         acop.common_options.max_supply = GRAPHENE_MAX_SHARE_SUPPLY;
+         acop.common_options.market_fee_percent = 0;
+         acop.common_options.flags = DEFAULT_UIA_ASSET_ISSUER_PERMISSION;
+         acop.common_options.issuer_permissions = DEFAULT_UIA_ASSET_ISSUER_PERMISSION;
+         trx.operations.clear();
+         trx.operations.push_back( acop );
+         sign( trx, sam_private_key );
+         PUSH_TX( db, trx, ~0 );
+         return asset_id_type( db.get_index_type<asset_index>().indices().get<by_symbol>().find( symbol )->id );
+      };
+
+      // Create the three genesis tokens for the factory, then the factory singleton.
+      asset_id_type genesis_1 = create_share_asset( "P408G1" );
+      asset_id_type genesis_2 = create_share_asset( "P408G2" );
+      asset_id_type genesis_3 = create_share_asset( "P408G3" );
+      vector<asset_id_type> genesis_assets = { genesis_1, genesis_2, genesis_3 };
+
+      const auto& factory = db.create<reciprocity_factory_object>( [&]( reciprocity_factory_object& fo ){
+         fo.committee_account = GRAPHENE_COMMITTEE_ACCOUNT;
+         fo.genesis_1 = genesis_1;
+         fo.genesis_2 = genesis_2;
+         fo.genesis_3 = genesis_3;
+      });
+
+      // Build and push a pool_create operation using genesis tokens and a fresh share asset.
+      auto create_pool = [&]( const string& share_symbol ) -> void {
+         reciprocity_pool_create_operation pop;
+         pop.account = sam_id;
+         pop.assets = genesis_assets;
+         pop.share_asset = create_share_asset( share_symbol );
+         pop.factory = factory.id;
+         pop.weights = { 1, 1, 1 };
+         pop.extensions = extensions_type();
+
+         signed_transaction tx;
+         tx.operations.push_back( pop );
+         tx.set_expiration( db.head_block_time() + fc::seconds( 600 ) );
+         db.current_fee_schedule().set_fee( tx.operations.front() );
+         tx.sign( sam_private_key, db.get_chain_id() );
+         PUSH_TX( db, tx, ~0 );
+      };
+
+      // Create MAX_POOLS_PER_ACCOUNT pools — all should succeed.
+      for( uint64_t i = 0; i < reciprocity_factory_object::MAX_POOLS_PER_ACCOUNT; i++ ) {
+         create_pool( "P408S" + std::to_string( i ) );
+      }
+
+      // Verify both counters reached the cap.
+      const auto& factory_idx = db.get_index_type<reciprocity_factory_index>().indices().get<by_id>();
+      const auto& rfo = *factory_idx.begin();
+      BOOST_CHECK_EQUAL( rfo.pool_count, reciprocity_factory_object::MAX_POOLS_PER_ACCOUNT );
+      BOOST_CHECK_EQUAL( rfo.pools_by_creator.at( sam_id ), reciprocity_factory_object::MAX_POOLS_PER_ACCOUNT );
+
+      // The next pool by the same account must be rejected by the per-account cap.
+      BOOST_CHECK_THROW( create_pool( "P408OVER" ), fc::exception );
 
    } catch (fc::exception& e) {
       edump((e.to_detail_string()));

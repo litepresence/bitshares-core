@@ -26,6 +26,7 @@ using int128_t = fc::int128_t;
 // Out-of-line definitions of the P4-02 consensus bounds (static constexpr
 // members are odr-used by the FC_ASSERT comparisons in this evaluator).
 constexpr uint64_t reciprocity_factory_object::MAX_POOLS;
+constexpr uint64_t reciprocity_factory_object::MAX_POOLS_PER_ACCOUNT;
 constexpr uint64_t reciprocity_factory_object::MAX_KNOWN_TOKENS;
 
 static uint128_t r_safe_mul( uint128_t a, uint128_t b )
@@ -468,6 +469,22 @@ void_result reciprocity_pool_create_evaluator::do_evaluate( const reciprocity_po
                "Pool creation ceiling reached: max ${n} pools",
                ("n", reciprocity_factory_object::MAX_POOLS) );
 
+    // P4-08 (Important, CODE): per-account pool cap, enforced at creation time
+    // before any state mutation. Defends against a single account exhausting
+    // the global MAX_POOLS ceiling and locking every other account out of
+    // pool creation (the unbounded-state lesson from BSIP-3, applied per
+    // creator).
+    // Invariant: factories->pools_by_creator[op.account] < MAX_POOLS_PER_ACCOUNT
+    // at creation time.
+    // Spec: docs/superpowers/specs/2026-10-25-bsip4-n-asset-pools-design.md §8
+    auto creator_itr = _factory->pools_by_creator.find( op.account );
+    uint64_t creator_pools = ( creator_itr != _factory->pools_by_creator.end() )
+                             ? creator_itr->second
+                             : 0;
+    FC_ASSERT( creator_pools < reciprocity_factory_object::MAX_POOLS_PER_ACCOUNT,
+               "Per-account pool cap reached: max ${n} pools per account",
+               ("n", reciprocity_factory_object::MAX_POOLS_PER_ACCOUNT) );
+
     // Validate weights
    FC_ASSERT( op.weights.size() > 0, "Weights must not be empty" );
    for( const auto& w : op.weights )
@@ -478,18 +495,18 @@ void_result reciprocity_pool_create_evaluator::do_evaluate( const reciprocity_po
 
    // Provenance: validate genesis or known token
    if( _factory->pool_count == 0 ) {
-      // First pool: must use known genesis tokens (BTS=1.3.0, CNY=1.3.110, EUR=1.3.12)
+      // First pool: must use the factory's configured genesis tokens
       vector<asset_id_type> genesis = {
-          asset_id_type( 0 ),  // BTS = 1.3.0
-         asset_id_type( 110 ), // CNY = 1.3.110
-         asset_id_type( 12 )   // EUR = 1.3.12
+          _factory->genesis_1,
+          _factory->genesis_2,
+          _factory->genesis_3
       };
       std::sort( genesis.begin(), genesis.end() );
       FC_ASSERT( op.assets.size() == genesis.size(),
                  "First pool must have exactly ${n} assets", ("n", genesis.size()) );
       for( uint64_t i = 0; i < genesis.size(); i++ )
       FC_ASSERT( op.assets[i] == genesis[i],
-                 "First pool assets must match genesis tokens (BTS, CNY, EUR)" );
+                 "First pool assets must match the factory genesis tokens" );
    } else {
       // Subsequent pools: must share >=1 known token
       bool has_known = false;
@@ -565,6 +582,10 @@ generic_operation_result reciprocity_pool_create_evaluator::do_apply( const reci
                  "Pool creation ceiling reached: max ${n} pools",
                  ("n", reciprocity_factory_object::MAX_POOLS) );
       rfo.pool_count++;
+      // P4-08: increment the creator's per-account pool count alongside the
+      // global counter, so the creation-time cap in do_evaluate stays accurate.
+      // Invariant: pools_by_creator[op.account] <= MAX_POOLS_PER_ACCOUNT.
+      rfo.pools_by_creator[op.account]++;
       rfo.pool_tokens.push_back( op.assets );
       // Register all pool tokens as known, bounded by MAX_KNOWN_TOKENS
       size_t new_tokens = 0;

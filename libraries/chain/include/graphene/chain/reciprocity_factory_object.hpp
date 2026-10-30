@@ -24,11 +24,14 @@ class reciprocity_factory_object : public abstract_object<reciprocity_factory_ob
       // state bloat and denial of service through unrestricted pool creation.
       // Invariant: pool_count <= MAX_POOLS; pool_addresses, pool_token_counts
       // and pool_tokens each hold at most MAX_POOLS entries; known_tokens and
-      // is_known each hold at most MAX_KNOWN_TOKENS entries.
+      // is_known each hold at most MAX_KNOWN_TOKENS entries; pools_by_creator
+      // holds at most one entry per creating account, each value <= MAX_POOLS_PER_ACCOUNT.
       // Spec: docs/superpowers/specs/2026-10-25-bsip4-n-asset-pools-design.md §8
       static constexpr uint64_t MAX_POOLS = 1024;      ///< Consensus bound: maximum pools
+      static constexpr uint64_t MAX_POOLS_PER_ACCOUNT = 64; ///< Per-account cap: max pools one account may create (<= MAX_POOLS)
       static constexpr uint64_t MAX_KNOWN_TOKENS = 8192; ///< Consensus bound: maximum distinct known tokens
       uint64_t                pool_count = 0;      ///< Total pools created (<= MAX_POOLS)
+      flat_map<account_id_type, uint64_t> pools_by_creator; ///< Per-account pool count: creator -> number of pools created (<= MAX_POOLS_PER_ACCOUNT each)
       bool                    genesis_enforced = true; ///< Require genesis tokens for first pool
       asset_id_type           genesis_1;           ///< First genesis token (BTS)
       asset_id_type           genesis_2;           ///< Second genesis token (CNY)
@@ -64,6 +67,7 @@ MAP_OBJECT_ID_TO_TYPE( graphene::chain::reciprocity_factory_object )
 FC_REFLECT_DERIVED( graphene::chain::reciprocity_factory_object, (graphene::db::object),
                     (committee_account)
                     (pool_count)
+                    (pools_by_creator)
                     (genesis_enforced)
                     (genesis_1)
                     (genesis_2)

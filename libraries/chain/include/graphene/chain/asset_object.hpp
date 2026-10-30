@@ -146,6 +146,9 @@ namespace graphene { namespace chain {
          /// The ID of the liquidity pool if the asset is the share asset of a liquidity pool
          optional<liquidity_pool_id_type> for_liquidity_pool;
 
+         /// The ID of the reciprocity pool if the asset is the share asset of a reciprocity pool (BSIP-4)
+         optional<reciprocity_pool_id_type> for_reciprocity_pool;
+
          /// The block number when the asset object was created
          uint32_t       creation_block_num = 0;
          /// The time when the asset object was created
@@ -496,6 +499,7 @@ FC_REFLECT_DERIVED( graphene::chain::asset_object, (graphene::db::object),
                     (bitasset_data_id)
                     (buyback_account)
                     (for_liquidity_pool)
+                    (for_reciprocity_pool)
                     (creation_block_num)
                     (creation_time)
                   )

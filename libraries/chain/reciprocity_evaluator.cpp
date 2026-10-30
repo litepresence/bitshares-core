@@ -452,6 +452,8 @@ void_result reciprocity_pool_create_evaluator::do_evaluate( const reciprocity_po
               "Can not use a market-issued asset as the share asset" );
    FC_ASSERT( !_share_asset->is_liquidity_pool_share_asset(),
               "The share asset is already bound to another liquidity pool" );
+   FC_ASSERT( !_share_asset->for_reciprocity_pool.valid(),
+              "The share asset is already bound to another reciprocity pool" );
    FC_ASSERT( _share_asset->dynamic_data(d).current_supply == 0,
                "Current supply of the share asset must be zero" );
 
@@ -568,7 +570,7 @@ generic_operation_result reciprocity_pool_create_evaluator::do_apply( const reci
    // Bind share asset to pool
    result.updated_objects.insert( _share_asset->id );
    d.modify( *_share_asset, [&new_pool]( asset_object& ao ) {
-      ao.for_liquidity_pool = new_pool.id;
+      ao.for_reciprocity_pool = new_pool.id;
    });
 
    // Register pool tokens as known in factory
@@ -582,9 +584,6 @@ generic_operation_result reciprocity_pool_create_evaluator::do_apply( const reci
                  "Pool creation ceiling reached: max ${n} pools",
                  ("n", reciprocity_factory_object::MAX_POOLS) );
       rfo.pool_count++;
-      // P4-08: increment the creator's per-account pool count alongside the
-      // global counter, so the creation-time cap in do_evaluate stays accurate.
-      // Invariant: pools_by_creator[op.account] <= MAX_POOLS_PER_ACCOUNT.
       rfo.pools_by_creator[op.account]++;
       rfo.pool_tokens.push_back( op.assets );
       // Register all pool tokens as known, bounded by MAX_KNOWN_TOKENS

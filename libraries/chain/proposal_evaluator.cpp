@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/f_activation.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/proposal_evaluator.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -489,25 +490,25 @@ struct proposal_operation_hardfork_visitor
       h2_require_price_leg(block_time);
    }
    void operator()(const graphene::chain::accs_declare_gateway_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
    void operator()(const graphene::chain::accs_deactivate_gateway_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
    void operator()(const graphene::chain::accs_create_offer_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
    void operator()(const graphene::chain::accs_cancel_offer_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
    void operator()(const graphene::chain::accs_match_offer_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
    void operator()(const graphene::chain::accs_fulfill_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
    void operator()(const graphene::chain::accs_claim_griefing_operation&) const {
-      h2_require_gateway_leg(block_time);
+      f_require_accs_leg(block_time);
    }
 
    // loop and self visit in proposals

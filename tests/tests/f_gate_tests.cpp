@@ -30,4 +30,11 @@ BOOST_AUTO_TEST_CASE( f2_applies_after_both_gates )
    BOOST_CHECK_NO_THROW( f_require_accs_leg( t ) );
 }
 
+BOOST_AUTO_TEST_CASE( f3_f_accs_strictly_after_oracle )
+{
+   // F_ACCS must sit strictly after the oracle leg so an inverted schedule
+   // is refused fail-closed (REPAIR-01/04).
+   BOOST_CHECK( HARDFORK_ORACLE_TIME < HARDFORK_F_ACCS_TIME );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

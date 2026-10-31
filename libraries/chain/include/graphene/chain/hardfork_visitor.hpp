@@ -82,14 +82,7 @@ struct hardfork_visitor {
    using h2_gateway_ops = fc::typelist::list< protocol::vault_register_operation,
                                               protocol::vault_bond_lock_operation,
                                               protocol::vault_bond_release_operation,
-                                              protocol::vault_rotate_operation,
-                                              protocol::accs_declare_gateway_operation,
-                                              protocol::accs_deactivate_gateway_operation,
-                                              protocol::accs_create_offer_operation,
-                                              protocol::accs_cancel_offer_operation,
-                                              protocol::accs_match_offer_operation,
-                                              protocol::accs_fulfill_operation,
-                                              protocol::accs_claim_griefing_operation >;
+                                              protocol::vault_rotate_operation >;
    using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
                                             protocol::oracle_bond_release_operation,
                                             protocol::vault_resolve_operation,
@@ -111,6 +104,15 @@ struct hardfork_visitor {
                                               protocol::parity_review_operation,
                                               protocol::stealth_explicit_spend_operation,
                                               protocol::stealth_pool_exchange_operation >;
+   // F-track ACCS ops (tags 110-117): gated on the F leg (oracle + F_ACCS),
+   // not on H2 gateway/bonds/price. See REPAIR-01/04.
+   using f_accs_ops = fc::typelist::list< protocol::accs_declare_gateway_operation,
+                                          protocol::accs_deactivate_gateway_operation,
+                                          protocol::accs_create_offer_operation,
+                                          protocol::accs_cancel_offer_operation,
+                                          protocol::accs_match_offer_operation,
+                                          protocol::accs_fulfill_operation,
+                                          protocol::accs_claim_griefing_operation >;
 
    fc::time_point_sec now;
 
@@ -171,6 +173,13 @@ struct hardfork_visitor {
     template<typename Op>
     std::enable_if_t<fc::typelist::contains<reserved_g_ops, Op>(), bool>
     visit() { return false; }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<f_accs_ops, Op>(), bool>
+    visit() {
+       FC_ASSERT( HARDFORK_ORACLE_TIME <= HARDFORK_F_ACCS_TIME,
+                  "F_ACCS must not be scheduled before the oracle leg" );
+       return HARDFORK_F_ACCS_PASSED( now );
+    }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

@@ -3,6 +3,6 @@
 // a consensus-reject rule (F gate after oracle gate enforced in every ACCS
 // evaluator). Placeholder date; the committee sets the real schedule.
 #ifndef HARDFORK_F_ACCS_TIME
-#define HARDFORK_F_ACCS_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_F_ACCS_TIME (fc::time_point_sec( 1896134400 )) // 2030-02-01T00:00:00Z
 #define HARDFORK_F_ACCS_PASSED(now) (now >= HARDFORK_F_ACCS_TIME)
 #endif

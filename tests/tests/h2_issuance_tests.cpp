@@ -972,8 +972,7 @@ BOOST_AUTO_TEST_CASE( unbonded_mint_and_reserveless_redeem_refuse )
 /// the wind-down machinery). RE-ENTRY: re-enable in the scale binary
 /// that lifts the cap (new binary + audit); the wind-down dilution order
 /// must be re-proven there before scale activation.
-BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first,
-                      * boost::unit_test::disabled() )
+BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();
@@ -1134,8 +1133,7 @@ BOOST_AUTO_TEST_CASE( fxr_dilution_order_in_winddown_burns_junior_first,
 /// the pilot gate first. RE-ENTRY: re-enable in the scale binary that
 /// lifts the cap (new binary + audit); the boundary pin must be
 /// re-proven there before scale activation.
-BOOST_AUTO_TEST_CASE( mint_below_secure_ratio_refused,
-                      * boost::unit_test::disabled() )
+BOOST_AUTO_TEST_CASE( mint_below_secure_ratio_refused )
 { try {
    generate_blocks( HARDFORK_H2_PRICE_TIME );
    generate_block();

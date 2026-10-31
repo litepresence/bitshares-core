@@ -1062,6 +1062,23 @@ database::match_result_type database::match_limit_normal_limit( const limit_orde
    FC_ASSERT( !taker.is_settled_debt, "Internal error: taker is settled debt" );
    // GCOVR_EXCL_STOP
 
+   // OOR-03: Self-trade refusal — on BSIP-5 participating markets, refuse a fill
+   // where taker and maker are the same account. This prevents an issuer from
+   // farming their own open-order rebates by self-matching.
+   // Spec: docs/bsips/bsip-5-open-order-rewards.md §6
+   if( HARDFORK_BSIP5_PASSED( head_block_time() ) )
+   {
+      asset_id_type base = taker.sell_price.base.asset_id;
+      asset_id_type quote = taker.sell_price.quote.asset_id;
+      auto fee_bps = [&]( asset_id_type id ) -> uint16_t {
+         const asset_object& a = id( *this );
+         const fc::optional<uint16_t>& fee = a.options.extensions.value.open_order_fee;
+         return fee.valid() ? *fee : 0;
+      };
+      if( ( fee_bps( base ) > 0 || fee_bps( quote ) > 0 ) && taker.seller == maker.seller )
+         FC_ASSERT( false, "Self-trade refused on BSIP-5 participating market" );
+   }
+
    auto taker_for_sale = taker.amount_for_sale();
    auto maker_for_sale = maker.amount_for_sale();
 
@@ -1831,7 +1848,15 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                   o.reward_asset = receives.asset_id;
                   o.pool_balance = pool_share.amount;
                   if( pays.amount > 0 )
-                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
+                  {
+                     // OOR-04: initialize rolling 1-hour TWAP window on first fill.
+                     // Spec: docs/bsips/bsip-5-open-order-rewards.md §4
+                     uint64_t now_block = this->head_block_num();
+                     uint64_t fill_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
+                     o.window_start_block = now_block;
+                     o.reference_price_wad = fill_price_wad;
+                     o.reference_volume = receives.amount;
+                  }
                });
                (void)mr;
             }
@@ -1840,7 +1865,27 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                modify( *mit, [&pool_share, &pays, &receives, this](market_reward_object& o){
                   o.pool_balance += pool_share.amount;
                   if( pays.amount > 0 )
-                     o.reference_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
+                  {
+                     // OOR-04: rolling 1-hour TWAP — restart the window if it has expired,
+                     // otherwise compute a time-weighted average with the new fill.
+                     // Spec: docs/bsips/bsip-5-open-order-rewards.md §4
+                     uint64_t now_block = this->head_block_num();
+                     uint64_t fill_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
+                     if( o.window_start_block == 0 || now_block - o.window_start_block > BSIP5_MAX_T_BLOCKS )
+                     {
+                        o.window_start_block = now_block;
+                        o.reference_price_wad = fill_price_wad;
+                        o.reference_volume = receives.amount;
+                     }
+                     else
+                     {
+                        __uint128_t new_wad = ((__uint128_t)o.reference_price_wad * (uint64_t)o.reference_volume.value +
+                                               (__uint128_t)fill_price_wad * (uint64_t)receives.amount.value) /
+                                              ((uint64_t)o.reference_volume.value + (uint64_t)receives.amount.value);
+                        o.reference_price_wad = (uint64_t)new_wad;
+                        o.reference_volume += receives.amount;
+                     }
+                  }
                });
             }
          }

@@ -29,6 +29,8 @@ class market_reward_object : public abstract_object<market_reward_object, protoc
 
       share_type      pool_balance = 0;    ///< accrued provider pool, in reward_asset
       uint64_t        reference_price_wad = 0; ///< rolling 1h TWAP of fills (WAD), 0 = no data
+      share_type      reference_volume = 0;    ///< accumulated fill volume in current TWAP window
+      uint64_t        window_start_block = 0;  ///< start block of current one-hour TWAP window
       uint64_t        last_sweep_block = 0;    ///< last distribution block
       uint64_t        total_distributed = 0;  ///< lifetime distributed (audit)
 };
@@ -59,7 +61,7 @@ MAP_OBJECT_ID_TO_TYPE( graphene::chain::market_reward_object )
 
 FC_REFLECT_DERIVED( graphene::chain::market_reward_object, (graphene::db::object),
                     (base_asset)(quote_asset)(reward_asset)(pool_balance)
-                    (reference_price_wad)
+                    (reference_price_wad)(reference_volume)(window_start_block)
                     (last_sweep_block)(total_distributed)
                   )
 

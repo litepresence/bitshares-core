@@ -23,9 +23,21 @@ void_result bsip5_opt_in_evaluator::do_evaluate(const bsip5_opt_in_operation& o)
    const asset_object& a = o.asset_id(d);
    FC_ASSERT( a.issuer == o.issuer, "Only the asset issuer may opt in" );
    FC_ASSERT( o.reward_rate_bps <= 500, "Open order fee must be <= 500 bps" );
-   // Empty-book rule: refuse while qualifying open orders rest on affected markets.
-   // (Conservative: any open order on a market involving this asset blocks the change.)
-   // Placement fields are checked lazily; here we just gate.
+   // OOR-01: Empty-book rule — refuse the opt-in while any limit order with
+   // bsip5_placement_block > 0 rests on a market involving asset_id.
+   // This prevents an issuer from changing the reward rate while open orders
+   // that would be affected by the new rate still rest on the book, which
+   // could otherwise let the issuer retroactively alter fee terms on
+   // already-placed orders.
+   // Spec: docs/bsips/bsip-5-open-order-rewards.md §1
+   const auto& lo_idx = d.get_index_type<limit_order_index>().indices();
+   for( const auto& lo : lo_idx )
+   {
+      if( lo.bsip5_placement_block == 0 ) continue;
+      auto mkt = lo.get_market();
+      if( mkt.first == o.asset_id || mkt.second == o.asset_id )
+         FC_ASSERT( false, "Cannot opt in: open orders rest on a market involving this asset" );
+   }
    return void_result();
 }
 

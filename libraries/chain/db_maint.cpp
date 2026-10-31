@@ -1624,6 +1624,11 @@ void distribute_bsip5_rewards( database& db )
       const market_reward_object& mr = db.get( mrid );
       if( mr.pool_balance <= 0 ) continue;
       if( mr.reference_price_wad == 0 ) continue; // cold start: no payout
+      // OOR-04: skip sweep when no fill occurred in the current one-hour TWAP window
+      // (no last-traded fallback). Only skip when the window was started via a fill
+      // and has since expired; window_start_block == 0 means no fill tracking yet.
+      // Spec: docs/bsips/bsip-5-open-order-rewards.md §4
+      if( mr.window_start_block != 0 && payout_block - mr.window_start_block > BSIP5_MAX_T_BLOCKS ) continue;
 
       // Collect qualifying open orders on this market.
       struct Candidate { limit_order_id_type id; uint64_t S; uint64_t T; uint64_t pk; __uint128_t tsp; };
@@ -1634,7 +1639,10 @@ void distribute_bsip5_rewards( database& db )
       {
          const limit_order_object& lo = *it;
          auto mkt = lo.get_market();
-         if( mkt.first != mr.base_asset || mkt.second != mr.quote_asset ) continue;
+         // OOR-05: match by sorted market so reversed-leg pools find their orders.
+         // Spec: docs/bsips/bsip-5-open-order-rewards.md §5
+         if( !((mkt.first == mr.base_asset && mkt.second == mr.quote_asset) ||
+               (mkt.first == mr.quote_asset && mkt.second == mr.base_asset)) ) continue;
          if( lo.bsip5_placement_block == 0 ) continue;
          // Skip orders that have already expired (OOR-08).
          if( lo.expiration <= db.head_block_time() ) continue;
@@ -1644,12 +1652,22 @@ void distribute_bsip5_rewards( database& db )
          uint64_t T = bsip5_time_component( lo.bsip5_placement_block, payout_block );
          if( T == 0 ) continue;
 
-         // price of the order in WAD (quote/base)
+         // OOR-06: normalize order price to mr's (base, quote) reference orientation.
+         // Spec: docs/bsips/bsip-5-open-order-rewards.md §4
          uint64_t price_wad = 0;
-         if( lo.sell_price.base.amount > 0 )
-            price_wad = (uint64_t)((__uint128_t)lo.sell_price.quote.amount.value * BSIP5_WAD / lo.sell_price.base.amount.value);
+         if( lo.sell_price.base.asset_id == mr.base_asset && lo.sell_price.quote.asset_id == mr.quote_asset )
+         {
+            if( lo.sell_price.base.amount > 0 )
+               price_wad = (uint64_t)((__uint128_t)lo.sell_price.quote.amount.value * BSIP5_WAD / lo.sell_price.base.amount.value);
+         }
+         else if( lo.sell_price.base.asset_id == mr.quote_asset && lo.sell_price.quote.asset_id == mr.base_asset )
+         {
+            if( lo.sell_price.quote.amount > 0 )
+               price_wad = (uint64_t)((__uint128_t)lo.sell_price.base.amount.value * BSIP5_WAD / lo.sell_price.quote.amount.value);
+         }
          uint64_t pk = bsip5_proximity_weight( price_wad, mr.reference_price_wad );
          if( pk == 0 ) continue;
+
 
          Candidate c; c.id = lo.id; c.S = S; c.T = T; c.pk = pk; c.tsp = 0; cands.push_back( c );
       }

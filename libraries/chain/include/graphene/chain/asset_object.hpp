@@ -499,9 +499,9 @@ FC_REFLECT_DERIVED( graphene::chain::asset_object, (graphene::db::object),
                     (bitasset_data_id)
                     (buyback_account)
                     (for_liquidity_pool)
-                    (for_reciprocity_pool)
                     (creation_block_num)
                     (creation_time)
+                    (for_reciprocity_pool)
                   )
 
 FC_REFLECT_TYPENAME( graphene::chain::asset_bitasset_data_object )

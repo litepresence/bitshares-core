@@ -2925,6 +2925,19 @@ flat_map<asset_id_type, uint32_t> database_api_impl::get_stealth_effective_set()
    return idx.begin()->unspent_blind_count;
 }
 
+stealth_status_object database_api::get_stealth_status()const
+{
+   return my->get_stealth_status();
+}
+
+stealth_status_object database_api_impl::get_stealth_status()const
+{
+   const auto& idx = _db.get_index_type<stealth_status_index>().indices();
+   if( idx.empty() )
+      return stealth_status_object();
+   return *idx.begin();
+}
+
 vector<blinded_balance_object> database_api::get_stealth_outputs(
    asset_id_type asset_id, bool unspent_only )const
 {

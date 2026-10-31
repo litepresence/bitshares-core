@@ -38,6 +38,7 @@
 #include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/ticket_object.hpp>
 #include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/witness_object.hpp>
@@ -1473,6 +1474,11 @@ class database_api
       vector<stealth_nullifier_entry> get_stealth_nullifiers(
          uint32_t from_block, uint32_t to_block )const;
 
+       /**
+        * @brief read-only snapshot of the stealth subsystem singleton status.
+        */
+       stealth_status_object get_stealth_status()const;
+
       /////////////////
       // Withdrawals //
       /////////////////
@@ -1749,6 +1755,7 @@ FC_API(graphene::app::database_api,
     (get_stealth_outputs)
     (get_stealth_recognitions)
     (get_stealth_nullifiers)
+     (get_stealth_status)
 
    // Withdrawals
    (get_withdraw_permissions_by_giver)

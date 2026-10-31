@@ -212,6 +212,8 @@ class database_api_impl : public std::enable_shared_from_this<database_api_impl>
        vector<stealth_nullifier_entry> get_stealth_nullifiers(
           uint32_t from_block, uint32_t to_block )const;
 
+       stealth_status_object get_stealth_status()const;
+
       // Withdrawals
       vector<withdraw_permission_object> get_withdraw_permissions_by_giver( const std::string account_id_or_name,
                                                                             withdraw_permission_id_type start,

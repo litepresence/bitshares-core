@@ -622,7 +622,7 @@ void_result reciprocity_pool_swap_evaluator::do_evaluate( const reciprocity_pool
    _pool = &op.pool(d);
    uint64_t n = _pool->factors;
 
-   FC_ASSERT( op.deadline == 0 || fc::time_point::now().sec_since_epoch() <= op.deadline, "Deadline expired" );
+   FC_ASSERT( op.deadline == 0 || d.head_block_time().sec_since_epoch() <= op.deadline, "Deadline expired" );
    FC_ASSERT( _pool->initialized, "Pool has not been initialized" );
    FC_ASSERT( _pool->supply > 0, "Pool drained" );
    FC_ASSERT( op.amounts_to_sell.size() == n, "amounts_to_sell size mismatch" );
@@ -916,7 +916,7 @@ void_result reciprocity_pool_add_liquidity_evaluator::do_evaluate(
    _pool = &op.pool(d);
    uint64_t n = _pool->factors;
 
-   FC_ASSERT( op.deadline == 0 || fc::time_point::now().sec_since_epoch() <= op.deadline, "Deadline expired" );
+   FC_ASSERT( op.deadline == 0 || d.head_block_time().sec_since_epoch() <= op.deadline, "Deadline expired" );
    FC_ASSERT( op.amounts.size() == n, "Amounts count must match pool factors" );
 
    for( uint64_t i = 0; i < n; i++ )
@@ -1082,7 +1082,7 @@ void_result reciprocity_pool_remove_liquidity_evaluator::do_evaluate(
    _pool = &op.pool(d);
    uint64_t n = _pool->factors;
 
-   FC_ASSERT( op.deadline == 0 || fc::time_point::now().sec_since_epoch() <= op.deadline, "Deadline expired" );
+   FC_ASSERT( op.deadline == 0 || d.head_block_time().sec_since_epoch() <= op.deadline, "Deadline expired" );
    FC_ASSERT( op.share_amount.asset_id == _pool->lp_token, "Share asset mismatch" );
    FC_ASSERT( _pool->supply > 0, "Pool has not been initialized" );
 

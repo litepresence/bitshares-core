@@ -92,9 +92,15 @@ static uint128_t r_konstant_weighted_log(
     uint64_t sum_w = 0;
     int128_t sum_ln = 0;
     for (uint64_t i = 0; i < n; i++) {
-        if (gens[i] == 0 || bals[i] == 0) continue;
+        if (gens[i] == 0) continue;
         uint128_t r = r_safe_mul(uint128_t(bals[i]), uint128_t(BASIS)) / gens[i];
-        if (r == 0) continue;
+        // REPAIR-07 (Critical, BSIP4-25-N): a token drained to bals[i]==0 with
+        // gens[i]>0 must terminate the konstant (return 0), not vanish from the
+        // log average. The r==0 case is kept in the average: r=0 drives ln to
+        // -2*BASIS, pulling avg down until pade_num <= 0 and the konstant
+        // returns 0 (pool terminated). Skipping it (the old `if (r == 0)
+        // continue`) let a drained token disappear from the invariant, enabling
+        // drain theft.
         // P4-06 (Important, CODE): overflow guard on the int128 intermediates.
         // Proven bound: bals[i] <= INT64_MAX (~2^63) and BASIS = 10^4, so
         //   r = bals*BASIS/gens <= (2^63-1)*10^4 < 2^77, comfortably inside int128.

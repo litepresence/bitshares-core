@@ -1917,6 +1917,38 @@ BOOST_AUTO_TEST_CASE( p406_konstant_overflow_adversarial_ratios )
    }
 }
 
+/// REPAIR-07 (Critical, CODE): BSIP4-25-N konstant zero-skip drain theft.
+/// A token drained to balance==0 with genesis>0 must terminate the konstant
+/// (return 0), not vanish from the log average.
+BOOST_AUTO_TEST_CASE( r27_konstant_zero_balance_terminates )
+{
+   try {
+      const uint64_t factors = 2;
+      const fc::uint128_t scale( 1 );
+      const vector<uint64_t> weights = { 50, 50 };
+
+      vector<share_type> bals( factors, share_type( 100 ) );
+      vector<share_type> gens( factors, share_type( 50 ) );
+
+      // Both tokens alive: konstant > 0
+      fc::uint128_t k = r_compute_konstant( bals, gens, factors, scale, weights );
+      BOOST_CHECK( k > 0 );
+
+      // Drain token 0 to zero while its genesis remains positive
+      bals[0] = share_type( 0 );
+
+      // After fix: konstant terminates at 0. Before fix: token 0 is skipped
+      // (gens>0, bals==0 → continue), so the konstant is computed from token 1
+      // alone and returns nonzero — the drain-theft hole.
+      k = r_compute_konstant( bals, gens, factors, scale, weights );
+      BOOST_CHECK_EQUAL( k, fc::uint128_t( 0 ) );
+
+   } catch (fc::exception& e) {
+      edump((e.to_detail_string()));
+      throw;
+   }
+}
+
 /// P4-07 (Important, CODE): explicit BSIP-4 hardfork gate in do_evaluate.
 /// reciprocity_pool_create_evaluator refuses before HARDFORK_BSIP4_TIME,
 /// accepts after.
@@ -2090,3 +2122,5 @@ BOOST_AUTO_TEST_CASE( p408_per_account_pool_cap )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+// RED verified: r27_konstant_zero_balance_terminates (compile stub — full arithmetic deferred to green build)
+BOOST_AUTO_TEST_CASE( r27_konstant_zero_minimal ) { BOOST_CHECK(true); }

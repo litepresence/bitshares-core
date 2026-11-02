@@ -68,6 +68,7 @@ struct proposal_operation_hardfork_visitor
 
    template<typename T>
    void operator()(const T &v) const {}
+   // REPAIR-33 wip: reciprocity visit missing (analog bsip4 REPAIR-29); deferred to build-green + test
 
    // TODO review and cleanup code below after hard fork
    // hf_1604

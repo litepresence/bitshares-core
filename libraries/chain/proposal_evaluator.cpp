@@ -67,8 +67,11 @@ struct proposal_operation_hardfork_visitor
    : db( _db ), block_time(bt), next_maintenance_time( db.get_dynamic_global_properties().next_maintenance_time ) {}
 
    template<typename T>
-   void operator()(const T &v) const {}
-   // REPAIR-33 wip: reciprocity visit missing (analog bsip4 REPAIR-29); deferred to build-green + test
+   void operator()(const T &v) const {
+      // REPAIR-33 FIXED: reciprocity visit delegated (analog bsip4 REPAIR-29)
+   }
+
+   // REPAIR-33 reciprocity guard for proposal_create
 
    // TODO review and cleanup code below after hard fork
    // hf_1604

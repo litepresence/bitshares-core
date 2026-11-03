@@ -41,4 +41,6 @@ class pamm_snapshot_evaluator : public evaluator<pamm_snapshot_evaluator>
       const pamm_pool_object* _pool = nullptr;
 };
 
-} } // graphene::chain
+} } // graphene::chain#pragma once
+#include <graphene/chain/evaluator.hpp>
+namespace graphene { namespace chain { class pamm_evaluator; }}

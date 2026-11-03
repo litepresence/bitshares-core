@@ -38,6 +38,7 @@
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
+#include <graphene/chain/pamm_object.hpp>
 #include <graphene/chain/special_authority_object.hpp>
 #include <graphene/chain/transaction_history_object.hpp>
 #include <graphene/chain/withdraw_permission_object.hpp>
@@ -210,6 +211,21 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::samet_fund_object, (graphene::d
                     (unpaid_amount)
                   )
 
+FC_REFLECT( graphene::chain::pamm_pool_object::nav_entry, (day)(nav_num)(nav_den) )
+
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::pamm_pool_object, (graphene::db::object),
+                    (manager)
+                    (pool_asset)
+                    (share_asset)
+                    (fee_rate_bps)
+                    (delay_seconds)
+                    (min_tank_level)
+                    (tank_balance)
+                    (share_supply)
+                    (high_water_mark)
+                    (nav_history)
+                  )
+
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::credit_offer_object, (graphene::db::object),
                     (owner_account)
                     (asset_type)
@@ -269,6 +285,7 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::worker_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::custom_authority_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::liquidity_pool_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::samet_fund_object )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::pamm_pool_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::credit_offer_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::credit_deal_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::credit_deal_summary_object )

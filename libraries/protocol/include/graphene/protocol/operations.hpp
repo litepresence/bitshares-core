@@ -36,6 +36,7 @@
 #include <graphene/protocol/htlc.hpp>
 #include <graphene/protocol/liquidity_pool.hpp>
 #include <graphene/protocol/market.hpp>
+#include <graphene/protocol/pamm.hpp>
 #include <graphene/protocol/proposal.hpp>
 #include <graphene/protocol/samet_fund.hpp>
 #include <graphene/protocol/ticket.hpp>
@@ -130,7 +131,11 @@ namespace graphene { namespace protocol {
             /* 74 */ credit_deal_expired_operation,   // VIRTUAL
             /* 75 */ liquidity_pool_update_operation,
             /* 76 */ credit_deal_update_operation,
-            /* 77 */ limit_order_update_operation
+            /* 77 */ limit_order_update_operation,
+            /* 133 */ pamm_create_operation,
+            /* 134 */ pamm_deposit_operation,
+            /* 135 */ pamm_withdraw_operation,
+            /* 136 */ pamm_snapshot_operation
          >;
 
    /**

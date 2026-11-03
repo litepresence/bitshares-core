@@ -231,6 +231,16 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.current_fees->exists<liquidity_pool_update_operation>(),
                    "Unable to define fees for liquidity pool update operation prior to the core-2604 hardfork");
       }
+      if (!HARDFORK_PAMM_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pamm_create_operation>(),
+                   "Unable to define fees for pamm operations prior to the PAMM hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pamm_deposit_operation>(),
+                   "Unable to define fees for pamm operations prior to the PAMM hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pamm_withdraw_operation>(),
+                   "Unable to define fees for pamm operations prior to the PAMM hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pamm_snapshot_operation>(),
+                   "Unable to define fees for pamm operations prior to the PAMM hardfork");
+      }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
       FC_ASSERT( block_time >= HARDFORK_CORE_1468_TIME, "Not allowed until hardfork 1468" );
@@ -321,6 +331,18 @@ struct proposal_operation_hardfork_visitor
    // Note: credit_deal_expired_operation is a virtual operation thus no need to add code here
    void operator()(const graphene::chain::credit_deal_update_operation&) const {
       FC_ASSERT( HARDFORK_CORE_2595_PASSED(block_time), "Not allowed until the core-2595 hardfork" );
+   }
+   void operator()(const graphene::chain::pamm_create_operation&) const {
+      FC_ASSERT( HARDFORK_PAMM_PASSED(block_time), "Not allowed until the PAMM hardfork" );
+   }
+   void operator()(const graphene::chain::pamm_deposit_operation&) const {
+      FC_ASSERT( HARDFORK_PAMM_PASSED(block_time), "Not allowed until the PAMM hardfork" );
+   }
+   void operator()(const graphene::chain::pamm_withdraw_operation&) const {
+      FC_ASSERT( HARDFORK_PAMM_PASSED(block_time), "Not allowed until the PAMM hardfork" );
+   }
+   void operator()(const graphene::chain::pamm_snapshot_operation&) const {
+      FC_ASSERT( HARDFORK_PAMM_PASSED(block_time), "Not allowed until the PAMM hardfork" );
    }
 
    // loop and self visit in proposals

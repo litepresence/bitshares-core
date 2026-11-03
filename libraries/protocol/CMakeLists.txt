@@ -28,6 +28,7 @@ list(APPEND SOURCES account.cpp
                     credit_offer.cpp
                     liquidity_pool.cpp
                     samet_fund.cpp
+                    pamm.cpp
                     ticket.cpp
                     operations.cpp
                     pts_address.cpp

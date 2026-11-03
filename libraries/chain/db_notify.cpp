@@ -20,6 +20,7 @@
 #include <graphene/chain/ticket_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
+#include <graphene/chain/pamm_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/impacted.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -366,6 +367,22 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // account
    }
+   void operator()( const pamm_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // manager
+   }
+   void operator()( const pamm_deposit_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // investor
+   }
+   void operator()( const pamm_withdraw_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // investor
+   }
+   void operator()( const pamm_snapshot_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // caller
+   }
    void operator()( const credit_offer_create_operation& op )
    {
       _impacted.insert( op.fee_payer() ); // owner_account
@@ -497,6 +514,11 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
         } case liquidity_pool_object_type:
            // no account info in the object although it does have an owner
            break;
+        case pamm_pool_object_type:{
+           const auto* aobj = dynamic_cast<const pamm_pool_object*>( obj );
+           accounts.insert( aobj->manager );
+           break;
+        }
         case samet_fund_object_type:{
            const auto* aobj = dynamic_cast<const samet_fund_object*>( obj );
            accounts.insert( aobj->owner_account );

@@ -1,0 +1,1 @@
+REBUILD: bsip8 P8-01 structural + 0 pamm cases. Command: cmake -S worktrees/bsip8-pamm -B build/bsip8 -DCMAKE_BUILD_TYPE=Release && BUILD_JOBS=2 tooling/build.sh worktrees/bsip8-pamm build/bsip8 chain_test

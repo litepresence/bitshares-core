@@ -24,7 +24,10 @@
 #pragma once
 
 #include <fc/optional.hpp>
+#include <fc/crypto/elliptic.hpp>
+#include <functional>
 #include <graphene/chain/htlc_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
 #include <graphene/app/api.hpp>
 #include <graphene/utilities/key_conversion.hpp>
 #include "wallet_structs.hpp"
@@ -925,6 +928,12 @@ class wallet_api
        * that it exists in the blockchain.  If it exists then it will report the amount received and
        * who sent it.
        *
+       * RP4 (spec §7): receipts built by post-RP4 senders carry the derived
+       * AuthKey in `to` (never the address key); legacy receipts naming the
+       * address key still work via the direct-hit branch, otherwise the
+       * address set is scanned (derive child per OTK, compare, decrypt).
+       * Both paths re-derive the opening before trusting the memo.
+       *
        * @param confirmation_receipt a base58 encoded stealth confirmation
        * @param opt_from if not empty and the sender is a unknown public key,
        *                 then the unknown public key will be given the label \c opt_from
@@ -934,6 +943,112 @@ class wallet_api
       blind_receipt receive_blind_transfer( const string& confirmation_receipt,
                                             const string& opt_from,
                                             const string& opt_memo )const;
+
+      /**
+       * Record the receipt for an op40/op41 CHANGE output.
+       *
+       * The change output's opening is a conservation difference (the sum of
+       * the spent inputs' openings minus the to-output's), so the chain
+       * carries no opening for it and the receiver cannot re-derive it. The
+       * wallet computed it when it built the operation, so it hands it over
+       * here and the receipt (which holds the opening) is the durable
+       * landing: the sender's change is never stranded.
+       *
+       * Not remote-callable (no FC_API entry by design): this is the
+       * wallet's own hand-off of a value it computed.
+       */
+      void record_change_receipt( const blind_confirmation::output& change_output,
+                                   const string& from_label, const string& memo )const;
+
+      /**
+       * Record a receipt for an output whose opening the WALLET computed
+       * itself and the chain does not carry: the change output of an op40
+       * (its opening is the conservation difference — the sum of the spent
+       * inputs' openings minus the to-output's — and the memo must not
+       * reveal the recipient's opening as a difference, so the chain carries
+       * no opening for it).
+       *
+       * The value is checked against the memo's commitment, so a wrong one is
+       * rejected. It is NOT remote-callable (no FC_API entry by design): a
+       * remote party must not be able to choose the reading of an output
+       * (the age gate exists for exactly that reason).
+       */
+      blind_receipt receive_blind_transfer_with_opening( const string& confirmation_receipt,
+                                                         const string& opt_from,
+                                                         const string& opt_memo,
+                                                         const fc::sha256& known_opening )const;
+
+      /**
+       * RP5: create a deterministic dual-key stealth address from a brainkey
+       * (BSIP-0054 salvage; versioned path — wallet release, not a fork).
+       * @return the view public key (base58); label indexes the record.
+       */
+      public_key_type create_stealth_address( const string& label,
+                                              const string& brain_key,
+                                              uint32_t index )const;
+
+      /**
+       * RP5: import a watch-only stealth address (view priv + spend pub).
+       * Scanning tallies; spending is impossible without the spend key.
+       */
+      vector<stealth_address_record> import_stealth_view_key(
+            const string& label, const string& view_wif,
+            const public_key_type& spend_pub )const;
+
+      /**
+       * Import a REMOTE dual-key stealth address by its two public keys AND a
+       * proof that the pair belongs together.
+       *
+       * A remote dual-key recipient shares its view pub and its spend pub.
+       * Without the spend pub the sender cannot derive the output's opening
+       * from the spend key, and the single-key fallback would publish a
+       * view-derived opening (openable by every view-key holder), so the
+       * wallet refuses to build for a recipient it cannot classify. This
+       * record is what makes the remote dual path reachable.
+       *
+       * The pair is proved by BOTH of its holders: the view key holder and
+       * the spend key holder each sign the domain-separated digest that binds
+       * the two public keys (`stealth_pair_proof_digest`). An unproved pair
+       * is refused:
+       *
+       *  - a SWAPPED pair (the two keys exchanged) changes the digest, so
+       *    neither signature verifies — without this check the payments would
+       *    be unopenable by the recipient and the funds stuck;
+       *  - a pair whose SPEND pub the supplier holds (the substitution case)
+       *    can only be vouched for by the holder of the view pub, so the
+       *    supplier cannot open and ring-spend the payments made to it.
+       *
+       * The proof binds the pair; it does NOT authenticate the address
+       * against the person you meant to pay — verify the address with the
+       * recipient over a channel you trust (the consensus owner-key leg is
+       * the structural fix).
+       *
+       * No private key is stored: the record is watch-only (the sender never
+       * holds the recipient's keys).
+       *
+       * @param label the local label of the record
+       * @param view_pub the recipient's view public key
+       * @param spend_pub the recipient's spend public key
+       * @param view_proof the view key holder signing
+       *                `stealth_pair_proof_digest( view_pub, spend_pub )`
+       * @param spend_proof the spend key holder signing the same digest
+       */
+      vector<stealth_address_record> import_stealth_address_pubs(
+            const string& label, const public_key_type& view_pub,
+            const public_key_type& spend_pub,
+            const fc::ecc::compact_signature& view_proof,
+            const fc::ecc::compact_signature& spend_proof )const;
+
+      /**
+       * RP5: bulk scan over the node's recognition API; verifies each memo
+       * against its on-chain commitment; stores blind_receipts. Watch-only
+       * wallets tally without deriving spend keys. Idempotent.
+       */
+      vector<blind_receipt> scan_stealth_recognitions( uint32_t from_block,
+                                                       uint32_t to_block )const;
+
+      /// RP5: list the dual-key address book.
+      vector<stealth_address_record> get_stealth_addresses()const;
 
       /**
        * Transfers a public balance from \c from_account_name_or_id to one or more blinded balances using a
@@ -978,6 +1093,94 @@ class wallet_api
                                          const string& amount,
                                          const string& symbol_or_id,
                                          bool broadcast = false )const;
+
+      /**
+       * Query the blind-by-default settings (BSIP-2 §2). Conformance
+       * hook: tests and the browser-wallet contract assert these values.
+       */
+      blind_transfer_defaults get_blind_defaults()const;
+
+      /**
+       * Flip the default-blind switch (session-local). false = new
+       * transfer_default calls route transparent unless asked otherwise.
+       */
+      void set_blind_by_default( bool blind_by_default )const;
+
+      /**
+       * Replace the full blind-defaults struct (batching, broadcast delay,
+       * reserved mix hold). Session-local; see BLIND_DEFAULTS_CONTRACT.md.
+       */
+      void set_blind_defaults( const blind_transfer_defaults& defaults )const;
+
+      /**
+       * Network-hygiene hook: sleep min_broadcast_delay_sec before a blind
+       * broadcast (timing defense). Called by every blind-sending path when
+       * broadcast=true. Not remote-callable (no FC_API entry by design).
+       */
+      void blind_broadcast_delay()const;
+
+      /**
+       * Single choke point for the broadcast delay (): every
+       * blind-sending path (transfer_from_blind, blind_transfer_help,
+       * transfer_to_blind — including the transfer_default blind branch,
+       * which routes through transfer_to_blind) calls this instead of
+       * invoking the sleep directly. Sleeps exactly when broadcast=true
+       * (blind_broadcast_delay honors a 0 setting as an explicit off).
+       * Hook-testable: set_blind_sleep_hook observes every path's delay.
+       */
+      void maybe_delay_blind_broadcast( bool broadcast )const;
+
+      /**
+       * G3-05 test hook: replace the sleep behind blind_broadcast_delay
+       * with a caller-supplied hook (takes whole seconds). Empty hook
+       * restores the real fc::usleep. Session-local, never serialized, no
+       * consensus effect. Not remote-callable (no FC_API entry by design).
+       */
+      void set_blind_sleep_hook( std::function<void(uint32_t)> hook )const;
+
+      /**
+       * G3-05 test hook: mark the wallet unlocked without keys (offline
+       * unit tests only — the production unlock() path is untouched).
+       * Session-local, no consensus effect. Not remote-callable (no FC_API
+       * entry by design).
+       */
+      void set_unlocked_for_tests()const;
+
+      /**
+       * Default-routed transfer (BSIP-2 §2): blind unless the caller
+       * opts out. Blind routing needs the recipient's blind key or label
+       * (same addressing as transfer_to_blind) and carries no memo — a
+       * non-empty memo or an unresolvable blind recipient fails CLOSED
+       * (never silently falls back to transparent; pass
+       * transparent_opt_out=true explicitly for the compliant path).
+       * @param transparent_opt_out one-tap transparent path (compliance,
+       * exchange deposits)
+       */
+       signed_transaction transfer_default( const string& from,
+                                            const string& to_key_or_account,
+                                            const string& amount,
+                                            const string& asset_symbol,
+                                            const string& memo,
+                                            bool transparent_opt_out,
+                                            bool broadcast = false )const;
+
+       /**
+        * Submit a prebuilt op109 stealth pool swap (G2, BSIP-2).
+        *
+        * The op itself is built (proven) by the caller's tooling — e.g. the
+        * chain-side stealth_prove_pool_exchange builder, which enforces the
+        * exact-cover fee — because proving needs the spent output's opening
+        * (wallet secret state the node never sees). This method is the
+        * broadcast path: it fail-closed validates the op shape FIRST (a
+        * malformed op throws before any timing defense), routes through the
+        * Task-6 blind-broadcast delay choke (maybe_delay_blind_broadcast —
+        * the same choke every legacy blind-sending leg calls, now covering
+        * op109), then signs (+ broadcasts when broadcast=true; fee_payer is
+        * TEMP so no key is required for the op itself).
+        */
+       signed_transaction stealth_pool_swap(
+          const stealth_pool_exchange_operation& op,
+          bool broadcast = false )const;
 
       /** Place a limit order attempting to sell one asset for another.
        *
@@ -1167,6 +1370,106 @@ class wallet_api
        * @param broadcast true to broadcast the transaction on the network
        * @returns the signed transaction updating the bitasset
        */
+      /** Looks up an oracle by name or id.
+       *
+       * @param name_or_id the oracle's name (e.g. "BTC.USD") or its object id
+       * @returns the oracle
+       */
+      oracle_object get_oracle( const string& name_or_id )const;
+
+      /** Creates a named price series that consumers can reference by id.
+       *
+       *  An oracle is not tied to any asset: several consumers can reference the same series,
+       *  and a price that is not the settlement price of any smartcoin has somewhere to live.
+       *  To feed a smartcoin from it afterwards, set \c price_oracle_binding
+       *  ({oracle, series}) in the asset's bitasset options with \c update_bitasset().
+       *
+       * @param owner the account that will administer the oracle and pay the fee
+       * @param name unique, e.g. "BTC.USD"; uppercase letters, digits, '.' and '-'
+       * @param description free text
+       * @param base_symbol symbol of the base reference asset of the quoted price
+       * @param quote_symbol symbol of the quote reference asset of the quoted price
+       * @param series the ordered series list, fixed at creation; every publish carries
+       *               one value per entry, in order
+       * @param options producers and their weights, quorum, staleness, aggregation method
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction create_oracle( const string& owner, const string& name,
+                                        const string& description, const string& base_symbol,
+                                        const string& quote_symbol,
+                                        const vector<oracle_series>& series,
+                                        const oracle_options& options, bool broadcast );
+
+      /** Changes an oracle's description or policy.
+       *
+       *  Takes effect immediately: dropping a producer or tightening the quorum recomputes the
+       *  value at once, and any asset fed by the oracle sees the change in the same block,
+       *  rather than at whatever time someone next publishes.
+       *
+       *  The quoted asset pair and the name cannot be changed. Consumers reference an oracle
+       *  by id and would have no way to notice that what it measures had changed underneath
+       *  them.
+       *
+       * @param owner the oracle's owner
+       * @param name_or_id the oracle's name or id
+       * @param new_description new description, or null to leave it alone
+       * @param new_options new policy, or null to leave it alone
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction update_oracle( const string& owner, const string& name_or_id,
+                                        const optional<string>& new_description,
+                                        const optional<oracle_options>& new_options,
+                                        bool broadcast );
+
+       /** Removes an oracle.
+        *
+        *  Refused while any market-issued asset still reads it through a live binding; clear
+        *  those assets' \c price_oracle_binding first, or they would be left unable to
+        *  margin call. Bindings left stale by mapping drift are pruned, not blocking.
+        *
+       * @param owner the oracle's owner
+       * @param name_or_id the oracle's name or id
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction delete_oracle( const string& owner, const string& name_or_id,
+                                        bool broadcast );
+
+      /** Submits one value per declared series to an oracle, as one of its producers.
+       *
+       *  The values must arrive one per series the oracle declared, in order, and satisfy
+       *  the submission relations (bid <= ask, down-rounded <= up-rounded of the same kind).
+       *
+       * @param producer the publishing account, which must be a producer of this oracle
+       * @param name_or_id the oracle's name or id
+       * @param values one value per declared series, in order
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction publish_oracle_value( const string& producer, const string& name_or_id,
+                                               const vector<oracle_value>& values, bool broadcast );
+
+      /** Creates a reference asset (the quoted legs oracles price against).
+       *
+       *  Reference assets live in their own symbol namespace, disjoint from
+       *  on-chain assets: creating "USD" here does not touch any UIA/MIA.
+       *  Creation is committee-gated at consensus until the committee opens
+       *  it, and refused before the oracle hardfork — both fail closed on
+       *  chain; this command only builds, validates locally, and signs.
+       *
+       * @param creator the account paying the fee (committee member while gated)
+       * @param symbol unique reference symbol, e.g. "USD" ("BTS" forces precision 5)
+       * @param precision decimals the reference quotes at
+       * @param description free text
+       * @param broadcast true to broadcast the transaction on the network
+       * @returns the signed transaction
+       */
+      signed_transaction create_reference_asset( const string& creator, const string& symbol,
+                                                 uint8_t precision, const string& description,
+                                                 bool broadcast );
+
       signed_transaction update_bitasset( const string& symbol_or_id,
                                           const bitasset_options& new_options,
                                           bool broadcast = false )const;
@@ -1874,6 +2177,12 @@ FC_API( graphene::wallet::wallet_api,
         (update_asset)
         (update_asset_issuer)
         (update_bitasset)
+        (get_oracle)
+        (create_reference_asset)
+        (create_oracle)
+        (update_oracle)
+        (delete_oracle)
+        (publish_oracle_value)
         (get_htlc)
         (update_asset_feed_producers)
         (publish_asset_feed)
@@ -1966,8 +2275,18 @@ FC_API( graphene::wallet::wallet_api,
         (transfer_to_blind)
         (transfer_from_blind)
         (blind_transfer)
+        (get_blind_defaults)
+        (set_blind_by_default)
+        (set_blind_defaults)
+        (transfer_default)
+        (stealth_pool_swap)
         (blind_history)
         (receive_blind_transfer)
+        (create_stealth_address)
+        (import_stealth_view_key)
+        (import_stealth_address_pubs)
+        (scan_stealth_recognitions)
+        (get_stealth_addresses)
         (get_order_book)
         (account_store_map)
         (get_account_storage)

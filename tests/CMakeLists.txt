@@ -19,6 +19,10 @@ file(GLOB UNIT_TESTS "tests/*.cpp")
 add_executable( chain_test ${UNIT_TESTS} )
 target_link_libraries( chain_test database_fixture
                        graphene_witness graphene_wallet graphene_app ${PLATFORM_SPECIFIC_LIBS} )
+# G2-3: wallet printer unit tests include the wallet-internal
+# operation_printer.hpp/wallet_api_impl.hpp (same-dir quoted includes resolve
+# via this path; public wallet headers stay under wallet/include).
+target_include_directories( chain_test PRIVATE "${CMAKE_SOURCE_DIR}/libraries/wallet" )
 if(MSVC)
   set_source_files_properties( tests/serialization_tests.cpp PROPERTIES COMPILE_FLAGS "/bigobj" )
   set_source_files_properties( tests/common/database_fixture.cpp PROPERTIES COMPILE_FLAGS "/bigobj" )

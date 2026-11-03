@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+#include <fc/optional.hpp>
+
 using namespace graphene::app;
 using namespace graphene::chain;
 using namespace graphene::utilities;
@@ -102,6 +104,41 @@ struct blind_receipt
    stealth_confirmation::memo_data data;
    bool                            used = false;
    stealth_confirmation            conf;
+   /// Head-block number when this receipt was recorded (best-effort: 0 when
+   /// the wallet was offline or the remote was unreachable = unknown age).
+   /// input selection enforces min_mix_blocks against this field —
+   /// unknown-age receipts are ineligible while a hold is configured
+   /// (fail-closed; 0 with min_mix_blocks == 0 (default off) behaves as
+   /// before). Appended-last: old wallet files load with 0.
+   uint32_t                        received_block = 0;
+   /// RP4: the wallet address key this output was addressed to. Equals to_key
+   /// for legacy receipts (address-key `to`); the scanned address key for
+   /// AuthKey receipts. Balance/spend/history queries match to_key OR
+   /// address_key, so AuthKey outputs stay visible under the address label
+   /// (and survive label renames). Appended-last: old files load empty, and
+   /// empty matches nothing (legacy receipts already match via to_key).
+   public_key_type                 address_key;
+   /// TALLY-ONLY marker: this receipt was recognized with a VIEW key only
+   /// (no spend key), so it carries NO spend authority — the output can be
+   /// tallied but never spent. Every spend builder must refuse it (see
+   /// blind_receipt_spendable): the marker is explicit, not implied by the
+   /// absence of an authority key.
+   /// Appended-last: old wallet files load with false (their watch-only
+   /// receipts are still caught by the empty-authority check).
+   bool                            tally_only = false;
+   /// PENDING marker: this receipt was recorded for an output that is not
+   /// (yet) on chain — the change output of an op40/op41 build the wallet
+   /// has not broadcast, or has broadcast but whose block has not arrived.
+   ///
+   /// The change output's opening is a conservation difference (the sum of
+   /// the spent inputs' openings minus the to-output's), so it is NOT
+   /// derivable from the chain: the wallet computed it when it built the
+   /// operation, and it is durable only in this receipt. The marker keeps the
+   /// balance query from retiring the receipt as "spent" while the output is
+   /// still in flight (a retired receipt is excluded from the spend
+   /// selection, which would strand the sender's change).
+   /// Appended-last: old wallet files load with false.
+   bool                            pending = false;
 };
 
 struct by_from;
@@ -147,9 +184,50 @@ typedef multi_index_container<
 > key_label_index_type;
 
 
-struct wallet_data
+/// RP5: dual-key stealth address book entry (view/spend pubs; watch-only when
+/// the spend priv is absent from _keys). address_key for receipts = view_pub.
+struct stealth_address_record
 {
-   /** Chain ID this wallet is used with */
+   string          label;
+   public_key_type view_pub;
+   public_key_type spend_pub;
+   bool            watch_only = false;
+};
+
+
+/// How a blind-transfer counterparty was classified.
+///
+/// The classification is dual-first (a dual-key address is never silently
+/// degraded to the single-key path) and it is the SAME on both sender paths
+/// (the op39 deposit and the op40 blind transfer), so a remote dual-key
+/// recipient cannot be degraded on one path and not on the other.
+///
+/// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+struct blind_counterparty
+{
+   public_key_type key;                   // the single-key address (view == spend)
+   fc::optional<public_key_type> view_pub, spend_pub;
+   bool dual = false;                     // a dual-key address (spend-derived opening)
+   bool from_address_book = false;        // the wallet's own labeled key
+   bool wallet_owned = false;             // the wallet holds the private key
+
+   /// The HOLDER identity.
+   ///
+   /// Every output of one operation must go to the SAME holder: the
+   /// operation publishes the sum of the outputs' openings, so a co-recipient
+   /// recovers the other holder's opening from that sum (and the opening is
+   /// the credential the ring spend authorizes by).
+   /// Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   std::string holder()const
+   {
+      if( dual && view_pub.valid() && spend_pub.valid() )
+         return "dual:" + std::string( *view_pub ) + ":" + std::string( *spend_pub );
+      return "single:" + std::string( key );
+   }
+};
+
+struct wallet_data
+{   /** Chain ID this wallet is used with */
    chain_id_type chain_id;
    account_multi_index_type my_accounts;
    /// @return IDs of all accounts in @ref my_accounts
@@ -190,8 +268,10 @@ struct wallet_data
 
    key_label_index_type                                              labeled_keys;
    blind_receipt_index_type                                          blind_receipts;
+   /// RP5 dual-key address book (appended-last; old files load empty).
+   vector<stealth_address_record>                                    stealth_addresses;
 
-   string                    ws_server = "ws://localhost:8090";
+   string                    ws_server = "ws:// localhost:8090";
    string                    ws_user;
    string                    ws_password;
 };
@@ -319,9 +399,97 @@ struct account_history_operation_detail {
    vector<operation_detail_ex>  details;
 };
 
+/**
+ * @brief Blind-by-default wallet settings (BSIP-2 §2).
+ *
+ * Reference (cli) wallet creates blinded change and defaults new transfers
+ * to blind, with one-tap transparent opt-out. Network hygiene (decoy-fetch
+ * batching, minimum broadcast delay, RPC rules) is required behavior with
+ * conformance tests — see BLIND_DEFAULTS_CONTRACT.md, which is the
+ * browser-wallet (separate repo) binding spec for the same values.
+ */
+struct blind_transfer_defaults
+{
+   /// New transfers default to blind (transfer_default routes blind unless
+   /// the caller passes transparent_opt_out).
+   bool     blind_by_default = true;
+   /// Decoy/confirmation fetches are batched in chunks of this size: one
+   /// RPC round-trip per chunk, never one per decoy (timing-link defense).
+   uint32_t decoy_fetch_batch_size = 32;
+   /// Seconds to wait after signing before broadcasting a blind transfer
+   /// (propagation-timing defense against few DPOS producers). Applies only
+   /// when broadcast=true; 0 disables (explicit, logged choice).
+   uint32_t min_broadcast_delay_sec = 3;
+   /// Optional N-block holding before a received blind output is spent.
+   /// ENFORCED by cli_wallet input selection (): a receipt may fund a
+   /// blind spend only once head_block - received_block >= min_mix_blocks;
+   /// receipts with unknown age (received_block == 0, e.g. recorded offline
+   /// or by an older wallet) are ineligible while the hold is configured.
+   /// Consensus never enforces a hold (it cannot see wallet receipt age).
+   /// 0 = off (the default).
+   uint32_t min_mix_blocks = 0;
+};
+
+/**
+ * Mix-hold eligibility (BSIP-2 §1): pure decision rule behind
+ * min_mix_blocks, unit-testable without a node. head_block comes from the
+ * remote database_api; received_block from the receipt (0 = unknown age).
+ * - min_mix_blocks == 0 (default off): everything eligible (legacy path).
+ * - otherwise: eligible iff received_block != 0 (known age, fail-closed)
+ *   AND head_block - received_block >= min_mix_blocks (no underflow: a
+ *   receipt from the future is ineligible).
+ * No consensus effect.
+ */
+inline bool blind_receipt_mix_eligible( uint32_t received_block,
+                                        uint32_t head_block,
+                                        uint32_t min_mix_blocks )
+{
+   if( min_mix_blocks == 0 )
+      return true;
+   if( received_block == 0 || received_block > head_block )
+      return false;
+   return ( head_block - received_block ) >= min_mix_blocks;
+}
+
+/**
+ * Number of RPC round-trips needed to cover n decoy candidates at
+ * batch_size per trip (decoy-fetch batching, BSIP-2 §1). Pure helper
+ * so the chunking math is unit-testable without a node: batch 0 is
+ * treated as 1 (same guard as get_blind_balances). No consensus effect.
+ */
+inline size_t blind_batch_chunk_count( size_t n, uint32_t batch_size )
+{
+   if( batch_size == 0 )
+      batch_size = 1;
+   return ( n + batch_size - 1 ) / batch_size;
+}
+
+/**
+ * A receipt may be SPENT only when it was recognized with a spend key.
+ *
+ * Two independent reasons, both checked here so that every spend builder
+ * refuses the same receipts:
+ *  - the explicit TALLY-ONLY marker (a watch-only recognition: the wallet
+ *    can count the output but holds no spend authority for it), and
+ *  - an empty control authority (a receipt with no owner key cannot be
+ *    authorized by any signature) — this also covers receipts written by an
+ *    older wallet, which has no tally_only field.
+ *
+ * Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+ */
+inline bool blind_receipt_spendable( const blind_receipt& r )
+{
+   return !r.tally_only && !( r.control_authority == authority() );
+}
+
 }} // namespace graphene::wallet
 
+FC_REFLECT( graphene::wallet::blind_transfer_defaults,
+            (blind_by_default)(decoy_fetch_batch_size)
+            (min_broadcast_delay_sec)(min_mix_blocks) )
+
 FC_REFLECT( graphene::wallet::key_label, (label)(key) )
+FC_REFLECT( graphene::wallet::stealth_address_record, (label)(view_pub)(spend_pub)(watch_only) )
 FC_REFLECT( graphene::wallet::blind_balance, (amount)(from)(to)(one_time_key)(blinding_factor)(commitment)(used) )
 FC_REFLECT( graphene::wallet::blind_confirmation::output,
             (label)(pub_key)(decrypted_memo)(confirmation)(auth)(confirmation_receipt) )
@@ -337,6 +505,7 @@ FC_REFLECT( graphene::wallet::wallet_data,
             (pending_account_registrations)(pending_witness_registrations)
             (labeled_keys)
             (blind_receipts)
+            (stealth_addresses)
             (ws_server)
             (ws_user)
             (ws_password)
@@ -353,7 +522,8 @@ FC_REFLECT( graphene::wallet::exported_account_keys, (account_name)(encrypted_pr
 FC_REFLECT( graphene::wallet::exported_keys, (password_checksum)(account_keys) )
 
 FC_REFLECT( graphene::wallet::blind_receipt,
-            (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf) )
+            (date)(from_key)(from_label)(to_key)(to_label)(amount)(memo)(control_authority)(data)(used)(conf)
+            (received_block)(address_key)(tally_only)(pending) )
 
 FC_REFLECT( graphene::wallet::approval_delta,
    (active_approvals_to_add)

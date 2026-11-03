@@ -45,6 +45,24 @@ class blinded_balance_object : public graphene::db::abstract_object<blinded_bala
       fc::ecc::commitment_type                commitment;
       asset_id_type                           asset_id;
       authority                               owner;
+      /// G1 (STEALTH hardfork): creation metadata for decoy-eligibility
+      /// (BSIP-2 §1: 24h min age, 100-block skew windows). Appended last;
+      /// pre-fork balances carry 0/epoch (treated as grandfathered:
+      /// NEVER decoy-eligible, spendable only explicitly or via turnstile).
+      uint32_t                                created_block = 0;
+      fc::time_point_sec                      created_time;
+      /// (nullifier migration, BSIP-2): RETIRED cross-path guard.
+      /// Ring spends no longer write this flag (decoy-inclusion griefing:
+      /// nullified outputs stay decoy-eligible, re-spend is refused by the
+      /// nullifier set alone). Post-fork stealth outputs spend ONLY via
+      /// op108; the legacy explicit-spend legs (op40/op41) refuse them via
+      /// the created_block == 0 gate, not this field. Grandfathered
+      /// (pre-fork, created_block == 0) balances keep the legacy legs.
+      /// Field RETAINED (never read post-fork except the turnstile
+      /// no-extension branch until ): removing it would break object
+      /// reflection / wire format. Appended last; default false preserves
+      /// pre-fork balances.
+      bool                                    spent = false;
 };
 
 struct by_commitment;

@@ -30,6 +30,8 @@
 #include <graphene/protocol/committee_member.hpp>
 #include <graphene/protocol/confidential.hpp>
 #include <graphene/protocol/credit_offer.hpp>
+#include <graphene/protocol/oracle.hpp>
+#include <graphene/protocol/accs_ops.hpp>
 #include <graphene/protocol/custom.hpp>
 #include <graphene/protocol/custom_authority.hpp>
 #include <graphene/protocol/fba.hpp>
@@ -38,8 +40,15 @@
 #include <graphene/protocol/market.hpp>
 #include <graphene/protocol/proposal.hpp>
 #include <graphene/protocol/samet_fund.hpp>
+#include <graphene/protocol/stealth.hpp>
 #include <graphene/protocol/ticket.hpp>
 #include <graphene/protocol/transfer.hpp>
+#include <graphene/protocol/vault_ops.hpp>
+#include <graphene/protocol/challenge_ops.hpp>
+#include <graphene/protocol/vault_lifecycle_ops.hpp>
+#include <graphene/protocol/h2_economics.hpp>
+#include <graphene/protocol/issuance_ops.hpp>
+#include <graphene/protocol/seasoning_ops.hpp>
 #include <graphene/protocol/vesting.hpp>
 #include <graphene/protocol/withdraw_permission.hpp>
 #include <graphene/protocol/witness.hpp>
@@ -130,8 +139,48 @@ namespace graphene { namespace protocol {
             /* 74 */ credit_deal_expired_operation,   // VIRTUAL
             /* 75 */ liquidity_pool_update_operation,
             /* 76 */ credit_deal_update_operation,
-            /* 77 */ limit_order_update_operation
-         >;
+            /* 77 */ limit_order_update_operation,
+            /* 78 */ oracle_create_operation,
+            /* 79 */ oracle_update_operation,
+            /* 80 */ oracle_delete_operation,
+            /* 81 */ oracle_publish_operation,
+             /* 82 */ reference_asset_create_operation,
+             /* 83 */ vault_register_operation,
+             /* 84 */ vault_bond_lock_operation,
+             /* 85 */ oracle_bond_lock_operation,
+             /* 86 */ oracle_bond_release_operation,
+             /* 87 */ vault_challenge_operation,
+             /* 88 */ oracle_dispute_operation,
+             /* 89 */ oracle_dispute_escalate_operation,
+             /* 90 */ challenge_vote_operation,
+             /* 91 */ vault_rotate_operation,
+             /* 92 */ vault_bond_release_operation,
+             /* 93 */ vault_resolve_operation,
+             /* 94 */ pair_freeze_operation,
+             /* 95 */ winddown_claim_operation,
+             /* 96 */ oracle_fallback_set_operation,
+             /* 97 */ oracle_unfreeze_operation,
+             /* 98 */ seasoning_verify_operation,
+             /* 99 */ hybrid_mint_operation,
+             /* 100 */ hybrid_redeem_operation,
+             /* 101 */ offset_deposit_operation,
+             /* 102 */ offset_claim_operation,
+             /* 103 */ issuance_exit_request_operation,
+             /* 104 */ stealth_transfer_operation,   // G1 BSIP-2 (STEALTH hardfork-gated)
+             /* 105 */ freeze_blind_operation,       // G1 BSIP-2 (STEALTH hardfork-gated)
+             /* 106 */ turnstile_reproof_operation,  // G1 BSIP-2 (STEALTH hardfork-gated)
+             /* 107 */ parity_review_operation,      // BSIP-2 §2 (STEALTH hardfork-gated)
+             /* 108 */ stealth_explicit_spend_operation,
+              /* 109 */ stealth_pool_exchange_operation,   // G2 BSIP-2 pool swaps (STEALTH hardfork-gated)
+             /* 110 */ oracle_foreign_publish_operation,
+             /* 111 */ accs_declare_gateway_operation,
+             /* 112 */ accs_deactivate_gateway_operation,
+             /* 113 */ accs_create_offer_operation,
+             /* 114 */ accs_cancel_offer_operation,
+             /* 115 */ accs_match_offer_operation,
+             /* 116 */ accs_fulfill_operation,
+             /* 117 */ accs_claim_griefing_operation
+            >;
 
    /**
     *  Appends required authorites to the result vector.  The authorities appended are not the

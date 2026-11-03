@@ -24,6 +24,8 @@
 #include <boost/test/unit_test.hpp>
 #include <boost/range/algorithm.hpp>
 
+#include <algorithm>
+
 #include <graphene/account_history/account_history_plugin.hpp>
 #include <graphene/market_history/market_history_plugin.hpp>
 #include <graphene/grouped_orders/grouped_orders_plugin.hpp>
@@ -35,8 +37,10 @@
 
 #include <graphene/chain/balance_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
+#include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/market_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -677,6 +681,16 @@ void database_fixture_base::verify_asset_supplies( const database& db )
       total_balances[itr->transfer.asset_id] += itr->transfer.amount;
    }
 
+   // G1c parity pool (BSIP-2 §2): pool balances are redirected fee income
+   // (routing splits the accumulated_fees increment; subsidies credit it
+   // back), so they belong in supply accounting like fee_pool does.
+   {
+      const auto& sidx = db.get_index_type<stealth_status_index>().indices();
+      for( const auto& s : sidx )
+         for( const auto& kv : s.parity_pool )
+            total_balances[kv.first] += kv.second;
+   }
+
    for( const asset_object& asset_obj : db.get_index_type<asset_index>().indices() )
    {
       BOOST_CHECK_EQUAL( total_balances[asset_obj.get_id()].value,
@@ -702,6 +716,23 @@ signed_block database_fixture_base::generate_block(uint32_t skip, const fc::ecc:
                             db.get_scheduled_witness(miss_blocks + 1),
                             key, skip);
    db.clear_pending();
+   // GOV-R9-01: maintenance recomputes active_committee_members from the vote
+   // tally, which drops fixture-created members (see
+   // create_and_seat_committee_member). Re-apply the recorded seats so they
+   // survive to the next gated action; supply checks are unaffected because
+   // only gpo.active_committee_members is touched.
+   if( !seated_committee_members_.empty() )
+   {
+      db.modify( db.get_global_properties(), [this]( global_property_object& gpo ) {
+         for( const auto& id : seated_committee_members_ )
+         {
+            if( std::find( gpo.active_committee_members.begin(),
+                           gpo.active_committee_members.end(), id )
+                  == gpo.active_committee_members.end() )
+               gpo.active_committee_members.push_back( id );
+         }
+      } );
+   }
    verify_asset_supplies(db);
    return block;
 }
@@ -1085,7 +1116,7 @@ const account_object& database_fixture_base::create_account(
    FC_CAPTURE_AND_RETHROW( (name)(registrar_id)(referrer_id) )
 }
 
-const committee_member_object& database_fixture_base::create_committee_member( const account_object& owner )
+   const committee_member_object& database_fixture_base::create_committee_member( const account_object& owner )
 {
    committee_member_create_operation op;
    op.committee_member_account = owner.id;
@@ -1095,6 +1126,34 @@ const committee_member_object& database_fixture_base::create_committee_member( c
    processed_transaction ptx = PUSH_TX(db, trx, ~0);
    trx.operations.clear();
    return db.get<committee_member_object>(ptx.operation_results[0].get<object_id_type>());
+}
+
+const committee_member_object& database_fixture_base::create_and_seat_committee_member(
+   const account_object& owner )
+{
+   const committee_member_object& member = create_committee_member( owner );
+   // GOV-R9-01: seat the member into active_committee_members so the newly
+   // elected-set gates accept them. Maintenance recomputes the set from the
+   // vote tally, and a fixture-created member cannot win a real election:
+   // CORE_2262 removed voting power from liquid BTS (only orders and tickets
+   // vote now) and HF2103 zeroes a vote older than 675 days — the g1_*
+   // suites jump years to the stealth hardforks, so any stake set here is
+   // stale by the time maintenance runs, and verify_asset_supplies
+   // cross-checks stats.total_core_in_orders / total_pol_value against real
+   // orders and tickets, so stamping them is not an option. Instead the seat
+   // is recorded and re-applied in generate_block after each maintenance
+   // (see the hook there). No vote options, no stats, no funding: fees are
+   // zeroed at fixture genesis and balances must stay assertion-exact.
+   seated_committee_members_.push_back( member.get_id() );
+   // The db.modify above goes into the pending undo session (started by
+   // create_committee_member's PUSH_TX). _generate_block resets that session
+   // to the committed head-block state before re-applying pending txs, which
+   // would discard the seat. Flushing via generate_block commits the
+   // committee_member_create, then the generate_block hook re-seats into
+   // committed state (after clear_pending, no active undo session), so the
+   // seat survives the next _pending_tx_session.reset().
+   generate_block();
+   return member;
 }
 
 const witness_object& database_fixture_base::create_witness(account_id_type owner,

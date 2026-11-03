@@ -23,6 +23,8 @@
  */
 #pragma once
 
+#include <functional>
+
 #include <fc/thread/mutex.hpp>
 
 #include <graphene/app/api.hpp>
@@ -119,6 +121,29 @@ public:
     * @param destination_filename the filename to save it to
     */
    bool copy_wallet_file( string destination_filename );
+
+   /**
+    * @brief classify a blind-transfer counterparty (dual-first)
+    *
+    * Order: (1) a dual-key record named by its label, (2) the wallet's
+    * address book (a labeled key), (3) a dual-key record whose view pub is
+    * the resolved key.
+    *
+    * A bare key that is in none of those is NOT classifiable: it may be a
+    * remote dual-key recipient's view pub, and the single-key path would
+    * derive the output's opening from the view key and publish it in the
+    * memo (a view-openable output). The caller refuses such a counterparty
+    * unless it is the wallet's own key (`allow_wallet_owned`: the sender
+    * side of a blind transfer).
+    *
+    * A dual-key record without a spend key refuses here: the spend-derived
+    * opening cannot be computed, and the view-derived fallback would hand
+    * the opening to every view-key holder.
+    *
+    * Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+    */
+   blind_counterparty resolve_blind_counterparty( const std::string& label_or_key,
+                                                  bool allow_wallet_owned )const;
 
    /***
     * @brief returns true if the wallet is unlocked
@@ -259,6 +284,21 @@ public:
 
    signed_transaction update_asset_feed_producers(string symbol, flat_set<string> new_feed_producers,
          bool broadcast );
+
+   /// Resolves an oracle by name or by id string, throwing if there is no such oracle.
+   oracle_object get_oracle( const string& name_or_id )const;
+
+   signed_transaction create_reference_asset( string creator, string symbol,
+         uint8_t precision, string description, bool broadcast );
+
+   signed_transaction create_oracle( string owner, string name, string description,
+         string base_symbol, string quote_symbol, vector<oracle_series> series,
+         oracle_options options, bool broadcast );
+   signed_transaction update_oracle( string owner, string name_or_id,
+         optional<string> new_description, optional<oracle_options> new_options, bool broadcast );
+   signed_transaction delete_oracle( string owner, string name_or_id, bool broadcast );
+   signed_transaction publish_oracle_value( string producer, string name_or_id,
+         vector<oracle_value> values, bool broadcast );
 
    signed_transaction publish_asset_feed(string publishing_account, string symbol, price_feed feed,
          bool broadcast );
@@ -405,6 +445,16 @@ public:
 
    string                  _wallet_filename;
    wallet_data             _wallet;
+
+   // blind-by-default settings (BSIP-2 §2, session-local: not written to
+   // the wallet file, so upgrades never misread persisted values; the
+   // browser-wallet contract in BLIND_DEFAULTS_CONTRACT.md owns persistence).
+   blind_transfer_defaults _blind_defaults;
+
+   // G3-05: injectable sleep behind blind_broadcast_delay (tests control
+   // it; empty = the real fc::usleep). Takes whole seconds. Session-local,
+   // never serialized, no consensus effect.
+   std::function<void(uint32_t)> _blind_sleep;
 
    map<public_key_type,string> _keys;
    fc::sha512                  _checksum;

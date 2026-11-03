@@ -41,7 +41,7 @@ struct account_storage_map : chain::base_operation
    void validate()const;
 };
 
-} } //graphene::custom_operations
+} } // graphene::custom_operations
 
 FC_REFLECT( graphene::custom_operations::account_storage_map, (remove)(catalog)(key_values) )
 

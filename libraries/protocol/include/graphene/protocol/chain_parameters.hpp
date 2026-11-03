@@ -25,6 +25,7 @@
 
 #include <memory>
 #include <graphene/protocol/base.hpp>
+#include <graphene/protocol/oracle.hpp>
 
 namespace graphene { namespace protocol {
    struct fee_schedule;
@@ -85,6 +86,15 @@ namespace graphene { namespace protocol {
          optional< custom_authority_options_type > custom_authority_options;
          optional< uint16_t > market_fee_network_percent;
          optional< uint16_t > maker_fee_discount_percent;
+         /// When set, anyone may create reference assets. While absent (the starting
+         /// regime) creation is committee-only, so opening it later needs no hardfork.
+         /// Appended last: extension tags are append-only.
+         optional< bool > allow_public_reference_asset_creation;
+         /// Track A guard: OSM-style delay in seconds between computing an oracle's
+         /// median and letting margin/settlement consume it. Proposal default is 1h
+         /// (GRAPHENE_ORACLE_GUARD_DEFAULT_DELAY_SEC); the committee owns this field.
+         /// Appended last: extension tags are append-only.
+         optional< uint32_t > oracle_guard_delay_sec;
       };
 
       extension<ext> extensions;
@@ -104,6 +114,10 @@ namespace graphene { namespace protocol {
       /// If @c maker_fee_discount_percent in @ref extensions is valid, return the value it contains,
       /// otherwise return 0
       uint16_t get_maker_fee_discount_percent() const;
+
+      /// If @c oracle_guard_delay_sec in @ref extensions is valid, return the value it
+      /// contains, otherwise return GRAPHENE_ORACLE_GUARD_DEFAULT_DELAY_SEC (1h proposal)
+      uint32_t get_oracle_guard_delay_sec() const;
 
       private:
       static void safe_copy(chain_parameters& to, const chain_parameters& from);
@@ -128,6 +142,8 @@ FC_REFLECT( graphene::protocol::chain_parameters::ext,
       (custom_authority_options)
       (market_fee_network_percent)
       (maker_fee_discount_percent)
+      (allow_public_reference_asset_creation)
+      (oracle_guard_delay_sec)
 )
 
 FC_REFLECT( graphene::protocol::chain_parameters,

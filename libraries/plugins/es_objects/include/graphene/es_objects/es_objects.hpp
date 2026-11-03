@@ -54,4 +54,4 @@ class es_objects_plugin : public graphene::app::plugin
       std::unique_ptr<detail::es_objects_plugin_impl> my;
 };
 
-} } //graphene::es_objects
+} } // graphene::es_objects

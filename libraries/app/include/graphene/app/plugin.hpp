@@ -144,4 +144,4 @@ do { \
 } while (false)
 /// @}
 
-} } //graphene::app
+} } // graphene::app

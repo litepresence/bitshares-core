@@ -147,7 +147,7 @@ struct sign_state
              (*available_address_sigs)[ address(item) ] = item;
             }
             for( auto& item : provided_signatures ) {
-             (*provided_address_sigs)[ address(pts_address(item.first, false) ) ] = item.first; //verison 56 (default)
+             (*provided_address_sigs)[ address(pts_address(item.first, false) ) ] = item.first; // verison 56 (default)
              (*provided_address_sigs)[ address(pts_address(item.first, true) ) ] = item.first; // verison 56 (default)
              (*provided_address_sigs)[ address(pts_address(item.first, false, 0) ) ] = item.first;
              (*provided_address_sigs)[ address(pts_address(item.first, true, 0) ) ] = item.first;

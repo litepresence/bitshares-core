@@ -88,7 +88,7 @@ class grouped_orders_plugin : public graphene::app::plugin
       std::unique_ptr<detail::grouped_orders_plugin_impl> my;
 };
 
-} } //graphene::grouped_orders
+} } // graphene::grouped_orders
 
 FC_REFLECT( graphene::grouped_orders::limit_order_group_key, (group)(min_price) )
 FC_REFLECT( graphene::grouped_orders::limit_order_group_data, (max_price)(total_for_sale) )

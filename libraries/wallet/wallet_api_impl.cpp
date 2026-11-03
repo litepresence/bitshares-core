@@ -53,31 +53,37 @@ namespace graphene { namespace wallet { namespace detail {
    wallet_api_impl::wallet_api_impl( wallet_api& s, const wallet_data& initial_data, fc::api<login_api> rapi )
       : self(s),
         _chain_id(initial_data.chain_id),
-        _remote_api(rapi),
-        _remote_db(rapi->database()),
-        _remote_net_broadcast(rapi->network_broadcast()),
-        _remote_hist(rapi->history())
+        _remote_api(rapi)
    {
-      try {
-         _custom_operations = rapi->custom_operations();
-      }
-      catch(const fc::exception& e)
+      // G3-05: a null api means offline (unit-test) mode — every remote
+      // call is skipped and the wallet serves only local state (defaults,
+      // labels, fail-closed addressing checks). Production always passes a
+      // connected api, in which case behavior is unchanged.
+      if( rapi.get_handle() != 0 )
       {
-         wlog("Custom operations API is not active on server.");
-      }
-      chain_id_type remote_chain_id = _remote_db->get_chain_id();
-      if( remote_chain_id != _chain_id )
-      {
-         FC_THROW( "Remote server gave us an unexpected chain_id",
-            ("remote_chain_id", remote_chain_id)
-            ("chain_id", _chain_id) );
+         _remote_db = rapi->database();
+         _remote_net_broadcast = rapi->network_broadcast();
+         _remote_hist = rapi->history();
+         try {
+            _custom_operations = rapi->custom_operations();
+         }
+         catch(const fc::exception& e)
+         {
+            wlog("Custom operations API is not active on server.");
+         }
+         chain_id_type remote_chain_id = _remote_db->get_chain_id();
+         if( remote_chain_id != _chain_id )
+         {
+            FC_THROW( "Remote server gave us an unexpected chain_id",
+               ("remote_chain_id", remote_chain_id)
+               ("chain_id", _chain_id) );
+         }
+         _remote_db->set_block_applied_callback( [this](const variant& block_id )
+         {
+            on_block_applied( block_id );
+         } );
       }
       init_prototype_ops();
-
-      _remote_db->set_block_applied_callback( [this](const variant& block_id )
-      {
-         on_block_applied( block_id );
-      } );
 
       _wallet.chain_id = _chain_id;
       _wallet.ws_server = initial_data.ws_server;
@@ -87,6 +93,8 @@ namespace graphene { namespace wallet { namespace detail {
 
    wallet_api_impl::~wallet_api_impl()
    {
+      if( _remote_api.get_handle() == 0 )
+         return; // offline (unit-test) mode: no subscriptions to cancel
       try
       {
          _remote_db->cancel_all_subscriptions();
@@ -194,6 +202,88 @@ namespace graphene { namespace wallet { namespace detail {
          s.set_fee(op);
    }
 
+   blind_counterparty wallet_api_impl::resolve_blind_counterparty( const std::string& label_or_key,
+                                                                    bool allow_wallet_owned )const
+   {
+      blind_counterparty rcpt;
+
+      // (1) a dual-key record named by its label.
+      for( const auto& r : _wallet.stealth_addresses )
+      {
+         if( r.label != label_or_key )
+            continue;
+         // Refuse a dual-key address without a spend key: the spend-derived
+         // opening cannot be computed, and the view-derived fallback would
+         // leak the opening to every view-key holder.
+         // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+         FC_ASSERT( r.spend_pub != public_key_type(),
+                    "Dual-key address without a spend key: refusing to build the output "
+                    "(the spend-derived opening cannot be computed, and the view-derived "
+                    "fallback would leak the opening to every view-key holder)" );
+         // A label that names BOTH a dual-key address and a LEGACY address is
+         // ambiguous: the two readings derive different openings, so a payment
+         // made to the name would be unopenable by one of the two holders and
+         // the funds would be stranded. Refuse the name instead of guessing
+         // which holder was meant; renaming either of them makes it payable.
+         // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+         {
+            auto book_itr = _wallet.labeled_keys.get<by_label>().find( label_or_key );
+            FC_ASSERT( book_itr == _wallet.labeled_keys.get<by_label>().end()
+                       || book_itr->key == r.view_pub,
+                       "The label names both a dual-key address and a legacy address: "
+                       "refusing to guess which holder a payment to it is meant for (the "
+                       "dual reading derives the opening from the record's spend pub, so "
+                       "the legacy holder could not open the output and the funds would be "
+                       "stranded). Rename one of the two." );
+         }
+         rcpt.view_pub  = r.view_pub;
+         rcpt.spend_pub = r.spend_pub;
+         rcpt.key       = r.view_pub;   // the address identity (the view pub)
+         rcpt.dual = true;
+         return rcpt;
+      }
+
+      // (2) the wallet's address book (a labeled key).
+      auto label_itr = _wallet.labeled_keys.get<by_label>().find( label_or_key );
+      if( label_itr != _wallet.labeled_keys.get<by_label>().end() )
+      {
+         rcpt.key = label_itr->key;
+         rcpt.from_address_book = true;
+      }
+      else
+      {
+         // A bare key: the base58 form (a remote dual-key recipient shares
+         // its view pub that way).
+         try { rcpt.key = fc::variant( label_or_key, 1 ).as<public_key_type>( 1 ); }
+         catch( ... ) {}
+      }
+
+      // (3) a dual-key record whose VIEW pub is that key: the wallet's own
+      // "<label>.view" label lands here, and so does a remote dual-key
+      // recipient the sender already holds a record for.
+      for( const auto& r : _wallet.stealth_addresses )
+      {
+         if( r.view_pub != rcpt.key )
+            continue;
+         FC_ASSERT( r.spend_pub != public_key_type(),
+                    "Dual-key address without a spend key: refusing to build the output "
+                    "(the spend-derived opening cannot be computed, and the view-derived "
+                    "fallback would leak the opening to every view-key holder)" );
+         rcpt.view_pub  = r.view_pub;
+         rcpt.spend_pub = r.spend_pub;
+         rcpt.key       = r.view_pub;   // the address identity (the view pub)
+         rcpt.dual = true;
+         return rcpt;
+      }
+
+      // The wallet's own key (the sender side of a blind transfer): it is not
+      // in the address book, but the wallet holds the private key.
+      if( allow_wallet_owned && _keys.find( rcpt.key ) != _keys.end() )
+         rcpt.wallet_owned = true;
+
+      return rcpt;
+   }
+
    operation wallet_api_impl::get_prototype_operation( string operation_name )
    {
       auto it = _prototype_ops.find( operation_name );
@@ -284,10 +374,16 @@ namespace graphene { namespace wallet { namespace detail {
          fc::copy( src_path, dest_path );
          disable_umask_protection();
       }
-      catch(...)
+      catch( const fc::exception& e )
       {
          disable_umask_protection();
-         throw;
+         // A wallet backup is non-critical: the wallet itself was already
+         // saved successfully. Filesystems such as virtiofs/overlayfs can
+         // reject boost::filesystem::copy (EXDEV) even when same-dir copy
+         // would work; never let a backup failure fail the primary op.
+         elog( "wallet backup copy to ${dest} failed: ${e}",
+               ("dest", dest_path)("e", e.to_detail_string()) );
+         return false;
       }
       return true;
    }
@@ -475,9 +571,16 @@ namespace graphene { namespace wallet { namespace detail {
       }
       catch(...)
       {
+         // WPC-R17-01 (carry WPC-R11-07/WPC-R14-01): the whole-wallet
+         // pretty-string dump leaked every stored blind receipt's opening
+         // (blind_receipts[].data is stealth_confirmation::memo_data, whose
+         // FC_REFLECT carries blinding_factor) into the log on any save
+         // failure (disk full, permission flip, tmp re-read mismatch). Log
+         // the filename + failure reason only; the ws_password blanking
+         // around former dumps is kept for legacy log collectors.
          string ws_password = _wallet.ws_password;
          _wallet.ws_password = "";
-         wlog("wallet file content is next: ${data}", ("data", fc::json::to_pretty_string( _wallet ) ) );
+         wlog("wallet save to file ${fn} failed", ("fn", wallet_filename) );
          _wallet.ws_password = ws_password;
 
          disable_umask_protection();

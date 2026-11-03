@@ -191,7 +191,7 @@ namespace graphene { namespace net {
           FC_ASSERT( m.size.value() <= MAX_MESSAGE_SIZE, "", ("m.size",m.size.value())("MAX_MESSAGE_SIZE",MAX_MESSAGE_SIZE) );
 
           size_t remaining_bytes_with_padding = 16 * ((m.size.value() - LEFTOVER + 15) / 16);
-          m.data.resize(LEFTOVER + remaining_bytes_with_padding); //give extra 16 bytes to allow for padding added in send call
+          m.data.resize(LEFTOVER + remaining_bytes_with_padding); // give extra 16 bytes to allow for padding added in send call
           std::copy(buffer + sizeof(message_header), buffer + sizeof(buffer), m.data.begin());
           if (remaining_bytes_with_padding)
           {

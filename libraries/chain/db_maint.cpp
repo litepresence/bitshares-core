@@ -47,6 +47,7 @@
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/custom_authority_object.hpp>
+#include <graphene/chain/stealth_evaluator.hpp>
 
 namespace graphene { namespace chain {
 
@@ -1313,12 +1314,12 @@ void database::perform_chain_maintenance( const signed_block& next_block )
             voting_stake[vid_worker] += hf2262_passed ? 0 : stats.core_in_balance.value;
 
             // voting power stats
-            uint64_t vp_all = 0;       ///<  all voting power.
+            uint64_t vp_all = 0;       ///< all voting power.
             ///  the voting power of the proxy, if there is no attenuation, it is equal to vp_all.
             uint64_t vp_active = 0;
-            uint64_t vp_committee = 0; ///<  the final voting power for the committees.
-            uint64_t vp_witness = 0;   ///<  the final voting power for the witnesses.
-            uint64_t vp_worker = 0;    ///<  the final voting power for the workers.
+            uint64_t vp_committee = 0; ///< the final voting power for the committees.
+            uint64_t vp_witness = 0;   ///< the final voting power for the witnesses.
+            uint64_t vp_worker = 0;    ///< the final voting power for the workers.
 
             //PoB
             const uint64_t pol_amount = stats.total_core_pol.value;
@@ -1591,6 +1592,17 @@ void database::perform_chain_maintenance( const signed_block& next_block )
 
    process_bitassets();
    delete_expired_custom_auths(*this);
+
+   // G1 (STEALTH hardfork): record activation timestamps once, then reconcile
+   // the blinded-supply shadow against live counters (auto-halt on divergence).
+   // Both are internally gated on HARDFORK_STEALTH_PASSED (no-op pre-fork).
+   stealth_maybe_record_activation( *this );
+   stealth_reconcile_supplies( *this );
+
+   // parity economics (BSIP-2 §2): review/report defaults, burn-ratio
+   // alarms, skew histogram prune, snapshot refresh. Internally gated
+   // post-STEALTH (no-op pre-fork).
+   stealth_parity_maintenance( *this );
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

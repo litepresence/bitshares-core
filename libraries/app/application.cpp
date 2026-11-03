@@ -470,6 +470,10 @@ void application_impl::set_api_limit() {
       _app_options.api_limit_get_credit_offers =
             _options->at("api-limit-get-credit-offers").as<uint32_t>();
    }
+   if(_options->count("api-limit-get-oracles") > 0) {
+      _app_options.api_limit_get_oracles =
+            _options->at("api-limit-get-oracles").as<uint32_t>();
+   }
    if(_options->count("api-limit-get-storage-info") > 0) {
       _app_options.api_limit_get_storage_info =
             _options->at("api-limit-get-storage-info").as<uint32_t>();
@@ -1334,6 +1338,9 @@ void application::set_program_options(boost::program_options::options_descriptio
          ("api-limit-get-credit-offers",
           bpo::value<uint32_t>()->default_value(default_opts.api_limit_get_credit_offers),
           "Set maximum limit value for database APIs which query for credit offers or credit deals")
+         ("api-limit-get-oracles",
+          bpo::value<uint32_t>()->default_value(default_opts.api_limit_get_oracles),
+          "Set maximum limit value for database APIs which query for oracles")
          ("api-limit-get-storage-info",
           bpo::value<uint32_t>()->default_value(default_opts.api_limit_get_storage_info),
           "Set maximum limit value for APIs which query for account storage info")
@@ -1388,7 +1395,13 @@ void application::set_api_limit()
 }
 std::shared_ptr<abstract_plugin> application::get_plugin(const string& name) const
 {
-   return my->_active_plugins[name];
+   // RP4 test-enabler: find, never operator[] — a miss must NOT insert a null
+   // entry, which shutdown_plugins() would later dereference (teardown segfault
+   // on any get_plugin miss, e.g. wallet's optional custom_operations probe).
+   const auto itr = my->_active_plugins.find( name );
+   if( itr == my->_active_plugins.end() )
+      return nullptr;
+   return itr->second;
 }
 
 bool application::is_plugin_enabled(const string& name) const

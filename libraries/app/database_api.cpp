@@ -29,6 +29,8 @@
 #include <graphene/app/util.hpp>
 #include <graphene/chain/get_config.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/stealth_evaluator.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/protocol/pts_address.hpp>
 #include <graphene/protocol/restriction_predicate.hpp>
 
@@ -2076,6 +2078,89 @@ vector<credit_offer_object> database_api::get_credit_offers_by_owner(
                                   idx, limit, start_id, owner );
 }
 
+//////////////////////////////////////////////////////////////////////
+//                                                                  //
+// Oracles                                                          //
+//                                                                  //
+//////////////////////////////////////////////////////////////////////
+
+vector<optional<oracle_object>> database_api::get_oracles(
+            const vector<oracle_id_type>& oracle_ids )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_id>();
+   vector<optional<oracle_object>> result;
+   result.reserve( oracle_ids.size() );
+   // An unknown id yields an empty slot rather than an error: callers batch ids, and one bad
+   // one should not discard the whole answer.
+   std::transform( oracle_ids.begin(), oracle_ids.end(), std::back_inserter(result),
+                   [&idx]( oracle_id_type id ) -> optional<oracle_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<oracle_object> database_api::get_oracle_by_name( const string& name )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_oracle_name>();
+   auto itr = idx.find( name );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
+vector<oracle_object> database_api::list_oracles(
+            const optional<uint32_t>& limit,
+            const optional<oracle_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_id>();
+   return my->get_objects_by_x< oracle_object,
+                                oracle_id_type
+                               >( &application_options::api_limit_get_oracles,
+                                  idx, limit, start_id );
+}
+
+vector<oracle_object> database_api::get_oracles_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<oracle_id_type>& start_id )const
+{
+   account_id_type owner = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_owner>();
+   return my->get_objects_by_x< oracle_object,
+                                oracle_id_type
+                               >( &application_options::api_limit_get_oracles,
+                                  idx, limit, start_id, owner );
+}
+
+vector<optional<reference_asset_object>> database_api::get_reference_assets(
+            const vector<reference_asset_id_type>& reference_ids )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_id>();
+   vector<optional<reference_asset_object>> result;
+   result.reserve( reference_ids.size() );
+   std::transform( reference_ids.begin(), reference_ids.end(), std::back_inserter(result),
+                   [&idx]( reference_asset_id_type id ) -> optional<reference_asset_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<reference_asset_object> database_api::get_reference_asset_by_symbol(
+            const string& symbol )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_reference_symbol>();
+   auto itr = idx.find( symbol );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
 vector<credit_offer_object> database_api::get_credit_offers_by_asset(
             const std::string& asset_symbol_or_id,
             const optional<uint32_t>& limit,
@@ -2821,6 +2906,233 @@ vector<blinded_balance_object> database_api_impl::get_blinded_balances(
       auto itr = by_commitment_idx.find( c );
       if( itr != by_commitment_idx.end() )
          result.push_back( *itr );
+   }
+   return result;
+}
+
+flat_map<asset_id_type, uint32_t> database_api::get_stealth_effective_set()const
+{
+   return my->get_stealth_effective_set();
+}
+
+flat_map<asset_id_type, uint32_t> database_api_impl::get_stealth_effective_set()const
+{
+   // Read-only copy of the consensus counters (empty pre-activation: the
+   // singleton may not exist on old databases replaying without it).
+   const auto& idx = _db.get_index_type<stealth_status_index>().indices();
+   if( idx.empty() )
+      return flat_map<asset_id_type, uint32_t>();
+   return idx.begin()->unspent_blind_count;
+}
+
+stealth_status_object database_api::get_stealth_status()const
+{
+   return my->get_stealth_status();
+}
+
+stealth_status_object database_api_impl::get_stealth_status()const
+{
+   const auto& idx = _db.get_index_type<stealth_status_index>().indices();
+   if( idx.empty() )
+      return stealth_status_object();
+   return *idx.begin();
+}
+
+vector<blinded_balance_object> database_api::get_stealth_outputs(
+   asset_id_type asset_id, bool unspent_only )const
+{
+   return my->get_stealth_outputs( asset_id, unspent_only );
+}
+
+vector<blinded_balance_object> database_api_impl::get_stealth_outputs(
+   asset_id_type asset_id, bool unspent_only )const
+{
+   // Index-backed enumeration (no chain scan): asset match + post-fork
+   // creation metadata; spent excluded on the unspent_only view. Read-only.
+   vector<blinded_balance_object> result;
+   const auto& idx = _db.get_index_type<blinded_balance_index>().indices();
+   for( const auto& o : idx )
+   {
+      if( o.asset_id != asset_id )
+         continue;
+      if( o.created_block == 0 )
+         continue;
+      if( unspent_only && o.spent )
+         continue;
+      result.push_back( o );
+   }
+   return result;
+}
+
+// --- receive-path RP3: bulk-by-height scans (enumerate-don't-compute) ---
+
+namespace {
+// Shared range validation: refuse inverted/too-wide/head-overflow (fail-closed,
+// no silent clamp).
+void rp3_check_range( const database& db, uint32_t from, uint32_t to )
+{
+   FC_ASSERT( to >= from, "to_block before from_block" );
+   FC_ASSERT( to - from <= GRAPHENE_STEALTH_SCAN_MAX_BLOCKS,
+              "range exceeds GRAPHENE_STEALTH_SCAN_MAX_BLOCKS" );
+   const uint32_t head = db.head_block_num();
+   FC_ASSERT( to <= head, "to_block past head (${h})", ("h", head) );
+}
+
+void rp3_collect_recognition( const operation& op,
+                              uint32_t block_num, uint32_t trx_in_block, uint32_t op_in_trx,
+                              vector<stealth_recognition_entry>& out )
+{
+   auto push = [&]( const graphene::protocol::stealth_recognition& rec,
+                    const commitment_type& cmt, uint32_t output_index ) {
+      stealth_recognition_entry e;
+      e.block_num = block_num; e.trx_in_block = trx_in_block;
+      e.op_in_trx = op_in_trx; e.output_index = output_index;
+      e.commitment = cmt; e.recognition = rec;
+      out.push_back( std::move( e ) );
+   };
+   switch( op.which() ) {
+      case operation::tag<transfer_to_blind_operation>::value: {
+         const auto& o = op.get<transfer_to_blind_operation>();
+         for( uint32_t i = 0; i < o.outputs.size(); ++i )
+            if( o.outputs[i].stealth_memo.valid() )
+               push( graphene::protocol::stealth_recognition{
+                        o.outputs[i].stealth_memo->one_time_key,
+                        o.outputs[i].stealth_memo->to.valid()
+                           ? *o.outputs[i].stealth_memo->to : public_key_type(),
+                        o.outputs[i].stealth_memo->encrypted_memo },
+                     o.outputs[i].commitment, i );
+         break;
+      }
+      case operation::tag<blind_transfer_operation>::value: {
+         const auto& o = op.get<blind_transfer_operation>();
+         for( uint32_t i = 0; i < o.outputs.size(); ++i )
+            if( o.outputs[i].stealth_memo.valid() )
+               push( graphene::protocol::stealth_recognition{
+                        o.outputs[i].stealth_memo->one_time_key,
+                        o.outputs[i].stealth_memo->to.valid()
+                           ? *o.outputs[i].stealth_memo->to : public_key_type(),
+                        o.outputs[i].stealth_memo->encrypted_memo },
+                     o.outputs[i].commitment, i );
+         break;
+      }
+      case operation::tag<stealth_transfer_operation>::value: {
+         const auto& o = op.get<stealth_transfer_operation>();
+         for( uint32_t i = 0; i < o.outputs.size(); ++i )
+            if( o.outputs[i].recognition.valid() )
+               push( *o.outputs[i].recognition, o.outputs[i].commitment, i );
+         break;
+      }
+      case operation::tag<turnstile_reproof_operation>::value: {
+         const auto& o = op.get<turnstile_reproof_operation>();
+         if( o.new_output.recognition.valid() )
+            push( *o.new_output.recognition, o.new_output.commitment, 0 );
+         break;
+      }
+      case operation::tag<stealth_explicit_spend_operation>::value: {
+         const auto& o = op.get<stealth_explicit_spend_operation>();
+         for( uint32_t i = 0; i < o.outputs.size(); ++i )
+            if( o.outputs[i].recognition.valid() )
+               push( *o.outputs[i].recognition, o.outputs[i].commitment, i );
+         break;
+      }
+      case operation::tag<stealth_pool_exchange_operation>::value: {
+         const auto& o = op.get<stealth_pool_exchange_operation>();
+         if( o.output.recognition.valid() )
+            push( *o.output.recognition, o.output.commitment, 0 );
+         break;
+      }
+      default: break;
+   }
+}
+
+void rp3_collect_nullifiers( const operation& op,
+                             uint32_t block_num, uint32_t trx_in_block,
+                             vector<stealth_nullifier_entry>& out )
+{
+   auto push = [&]( const std::vector<char>& image33,
+                    uint32_t block_num, uint32_t trx_in_block ) {
+      stealth_nullifier_entry e;
+      e.block_num = block_num; e.trx_in_block = trx_in_block;
+      e.key_image = graphene::chain::nullifier_key( image33 );
+      out.push_back( std::move( e ) );
+   };
+   switch( op.which() ) {
+      case operation::tag<stealth_transfer_operation>::value: {
+         const auto& o = op.get<stealth_transfer_operation>();
+         for( const auto& in : o.inputs ) {
+            push( std::vector<char>( in.key_image.begin(), in.key_image.end() ),
+                  block_num, trx_in_block );
+            push( std::vector<char>( in.alt_key_image.begin(), in.alt_key_image.end() ),
+                  block_num, trx_in_block );
+         }
+         break;
+      }
+      case operation::tag<stealth_explicit_spend_operation>::value: {
+         const auto& o = op.get<stealth_explicit_spend_operation>();
+         for( const auto& in : o.inputs ) {
+            push( std::vector<char>( in.key_image_v1.begin(), in.key_image_v1.end() ),
+                  block_num, trx_in_block );
+            push( std::vector<char>( in.key_image_v2.begin(), in.key_image_v2.end() ),
+                  block_num, trx_in_block );
+         }
+         break;
+      }
+      case operation::tag<stealth_pool_exchange_operation>::value: {
+         const auto& o = op.get<stealth_pool_exchange_operation>();
+         push( std::vector<char>( o.input.key_image.begin(), o.input.key_image.end() ),
+               block_num, trx_in_block );
+         push( std::vector<char>( o.input.alt_key_image.begin(), o.input.alt_key_image.end() ),
+               block_num, trx_in_block );
+         break;
+      }
+      // op106 turnstile records NO nullifiers (consumes via blinded_balance_index);
+      // matches stealth_evaluator.cpp do_apply — nothing to add.
+      default: break;
+   }
+}
+} // anonymous namespace
+
+vector<stealth_recognition_entry> database_api::get_stealth_recognitions(
+   uint32_t from_block, uint32_t to_block )const
+{
+   return my->get_stealth_recognitions( from_block, to_block );
+}
+
+vector<stealth_recognition_entry> database_api_impl::get_stealth_recognitions(
+   uint32_t from_block, uint32_t to_block )const
+{
+   rp3_check_range( _db, from_block, to_block );
+   vector<stealth_recognition_entry> result;
+   for( uint32_t n = from_block; n <= to_block; ++n ) {
+      auto opt = _db.fetch_block_by_number( n );
+      if( !opt ) continue;
+      for( uint32_t t = 0; t < opt->transactions.size(); ++t ) {
+         for( uint32_t k = 0; k < opt->transactions[t].operations.size(); ++k )
+            rp3_collect_recognition( opt->transactions[t].operations[k],
+                                     n, t, k, result );
+      }
+   }
+   return result;
+}
+
+vector<stealth_nullifier_entry> database_api::get_stealth_nullifiers(
+   uint32_t from_block, uint32_t to_block )const
+{
+   return my->get_stealth_nullifiers( from_block, to_block );
+}
+
+vector<stealth_nullifier_entry> database_api_impl::get_stealth_nullifiers(
+   uint32_t from_block, uint32_t to_block )const
+{
+   rp3_check_range( _db, from_block, to_block );
+   vector<stealth_nullifier_entry> result;
+   for( uint32_t n = from_block; n <= to_block; ++n ) {
+      auto opt = _db.fetch_block_by_number( n );
+      if( !opt ) continue;
+      for( uint32_t t = 0; t < opt->transactions.size(); ++t ) {
+         for( uint32_t k = 0; k < opt->transactions[t].operations.size(); ++k )
+            rp3_collect_nullifiers( opt->transactions[t].operations[k], n, t, result );
+      }
    }
    return result;
 }

@@ -34,6 +34,9 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/accs_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
@@ -51,6 +54,7 @@
 #include <graphene/chain/worker_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/custom_authority_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 
 #include <graphene/chain/account_evaluator.hpp>
 #include <graphene/chain/asset_evaluator.hpp>
@@ -59,6 +63,7 @@
 #include <graphene/chain/committee_member_evaluator.hpp>
 #include <graphene/chain/confidential_evaluator.hpp>
 #include <graphene/chain/credit_offer_evaluator.hpp>
+#include <graphene/chain/oracle_evaluator.hpp>
 #include <graphene/chain/custom_evaluator.hpp>
 #include <graphene/chain/liquidity_pool_evaluator.hpp>
 #include <graphene/chain/market_evaluator.hpp>
@@ -72,6 +77,7 @@
 #include <graphene/chain/worker_evaluator.hpp>
 #include <graphene/chain/htlc_evaluator.hpp>
 #include <graphene/chain/custom_authority_evaluator.hpp>
+#include <graphene/chain/stealth_evaluator.hpp>
 
 namespace graphene { namespace chain {
 
@@ -149,6 +155,17 @@ void database::initialize_evaluators()
    register_evaluator<credit_offer_accept_evaluator>();
    register_evaluator<credit_deal_repay_evaluator>();
    register_evaluator<credit_deal_update_evaluator>();
+   register_evaluator<oracle_create_evaluator>();
+   register_evaluator<oracle_update_evaluator>();
+   register_evaluator<oracle_delete_evaluator>();
+   register_evaluator<oracle_publish_evaluator>();
+   register_evaluator<reference_asset_create_evaluator>();
+   register_evaluator<stealth_transfer_evaluator>();
+   register_evaluator<freeze_blind_evaluator>();
+   register_evaluator<turnstile_reproof_evaluator>();
+   register_evaluator<parity_review_evaluator>();
+   register_evaluator<stealth_explicit_spend_evaluator>();
+   register_evaluator<stealth_pool_exchange_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -178,6 +195,10 @@ void database::initialize_indexes()
    add_index< primary_index<samet_fund_index> >();
    add_index< primary_index<credit_offer_index> >();
    add_index< primary_index<credit_deal_index> >();
+   add_index< primary_index<oracle_index> >();
+   add_index< primary_index<reference_asset_index> >();
+   add_index< primary_index<stealth_nullifier_index> >();
+   add_index< primary_index<stealth_status_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

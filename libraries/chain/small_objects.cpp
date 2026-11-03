@@ -38,6 +38,7 @@
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/special_authority_object.hpp>
 #include <graphene/chain/transaction_history_object.hpp>
 #include <graphene/chain/withdraw_permission_object.hpp>
@@ -95,10 +96,28 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::committee_member_object, (graph
                     (committee_member_account)(vote_id)(total_votes)(url) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::blinded_balance_object, (graphene::db::object),
-                                (commitment)(asset_id)(owner) )
+                                 (commitment)(asset_id)(owner)(created_block)(created_time)(spent) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::fba_accumulator_object, (graphene::db::object),
                                 (accumulated_fba_fees)(designated_asset) )
+
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::stealth_nullifier_object, (graphene::db::object),
+                                (key_image)(proof_version)(created) )
+
+FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::stealth_status_object, (graphene::db::object),
+                                (blind_halted)(tripwire_fire_block)(blind_block_num)(blind_block_count)
+                                (stealth_activated_time)(v1_sunset_time)(turnstile_g2_time)
+                                (freeze_votes)(blinded_supply_shadow)(unspent_blind_count)
+                                (parity_pool)(parity_block_num)(parity_subsidized_count)
+                                (last_parity_review_time)(last_set_report_time)
+                                (missed_parity_reviews)(missed_set_reports)
+                                (parity_funding_halted)(h2_diversion_bps)
+                                (interval_routed)(interval_granted)
+                                (blind_window_counts)
+                                (activation_k39_fee)(activation_k39_ppo)(alarms)
+                                (diverged_assets)(pending_parity_votes)
+                                (blind_work_block_num)(blind_work_used_us)(deposit_windows)
+                                (cumulative_routed)(cumulative_granted) )
 
 FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::dynamic_global_property_object, (graphene::db::object),
                     (head_block_number)
@@ -254,6 +273,8 @@ GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::immutable_chain_para
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::chain_property_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::committee_member_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::blinded_balance_object )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::stealth_nullifier_object )
+GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::stealth_status_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::fba_accumulator_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::dynamic_global_property_object )
 GRAPHENE_IMPLEMENT_EXTERNAL_SERIALIZATION( graphene::chain::global_property_object )

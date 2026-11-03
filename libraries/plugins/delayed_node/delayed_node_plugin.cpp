@@ -92,7 +92,7 @@ void delayed_node_plugin::plugin_initialize(const boost::program_options::variab
 {
    FC_ASSERT(options.count("trusted-node") > 0);
    my = std::make_unique<detail::delayed_node_plugin_impl>();
-   my->remote_endpoint = "ws://" + options.at("trusted-node").as<std::string>();
+   my->remote_endpoint = "ws:// " + options.at("trusted-node").as<std::string>();
 }
 
 void delayed_node_plugin::sync_with_trusted_node()

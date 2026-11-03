@@ -112,9 +112,18 @@ public:
    std::string operator()(const graphene::protocol::limit_order_cancel_operation& op)const;
    std::string operator()(const graphene::protocol::fill_order_operation& op)const;
    std::string operator()(const graphene::protocol::proposal_update_operation& op)const;
-   std::string operator()(const graphene::protocol::htlc_create_operation& op)const;
-   std::string operator()(const graphene::protocol::htlc_redeem_operation& op)const;
-   std::string operator()(const graphene::protocol::htlc_redeemed_operation& op)const;
+    std::string operator()(const graphene::protocol::htlc_create_operation& op)const;
+    std::string operator()(const graphene::protocol::htlc_redeem_operation& op)const;
+    std::string operator()(const graphene::protocol::htlc_redeemed_operation& op)const;
+    std::string operator()(const graphene::protocol::parity_review_operation& op)const;
+    // G2-3 stealth entries (ops 104/106/108/109): intentionally remote-free
+    // (raw ids + raw amounts, no get_asset/get_account lookups) so offline
+    // and air-gapped wallets can render blind history — blind amounts stay
+    // blind, only counts/ids/fee units print.
+    std::string operator()(const graphene::protocol::stealth_transfer_operation& op)const;
+    std::string operator()(const graphene::protocol::turnstile_reproof_operation& op)const;
+    std::string operator()(const graphene::protocol::stealth_explicit_spend_operation& op)const;
+    std::string operator()(const graphene::protocol::stealth_pool_exchange_operation& op)const;
 
 protected:
    std::string print_memo( const fc::optional<graphene::protocol::memo_data>& memo)const;

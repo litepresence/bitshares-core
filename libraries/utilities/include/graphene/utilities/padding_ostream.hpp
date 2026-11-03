@@ -54,5 +54,5 @@ private:
    size_t bytes_out = 0;
 };
 
-} } //graphene::utilities
+} } // graphene::utilities
 

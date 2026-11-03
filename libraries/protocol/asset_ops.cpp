@@ -268,6 +268,14 @@ void bitasset_options::validate() const
       FC_ASSERT( *extensions.value.black_swan_response_method < bsrm_count,
                  "black_swan_response_method should be less than ${c}", ("c",bsrm_count) );
    }
+
+   // The explicit {oracle, series} binding: the series index must at least fit the
+   // largest list any oracle may declare (the range against the actual oracle is
+   // chain state, checked in the asset_update_bitasset evaluator). validate() also
+   // refuses a binding with no consensus expiry height (expiry_height == 0); the
+   // strictly-future rule needs the head block number, so it lives in the evaluator.
+   if( extensions.value.price_oracle_binding.valid() )
+      extensions.value.price_oracle_binding->validate();
 }
 
 void asset_options::validate()const

@@ -69,4 +69,4 @@ class template_plugin : public graphene::app::plugin
       std::unique_ptr<detail::template_plugin_impl> my;
 };
 
-} } //graphene::template
+} } // graphene::template

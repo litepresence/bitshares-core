@@ -34,6 +34,7 @@
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/market_object.hpp>
+#include <graphene/chain/stealth_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/witness_schedule_object.hpp>
@@ -586,6 +587,16 @@ void database::init_genesis(const genesis_state_type& genesis_state)
    });
 
    FC_ASSERT( get_index<fba_accumulator_object>().get_next_id() == fba_accumulator_id_type( fba_accumulator_id_count ) );
+
+   // G1 (STEALTH hardfork): singleton consensus state for the stealth subsystem.
+   // Created at genesis (dormant until STEALTH activation, recorded at the first
+   // post-STEALTH maintenance). Older databases replaying without it are handled
+   // lazily by the stealth accessors (create-on-demand in maintenance/apply paths;
+   // read paths treat a missing singleton as pre-activation defaults).
+   create<stealth_status_object>( []( stealth_status_object& s ) {
+      // All fields default-constructed: blind_halted=false, counters zero,
+      // activation times zero (pre-activation), empty vote/shadow maps.
+   } );
 
    //debug_dump(); // for debug
 

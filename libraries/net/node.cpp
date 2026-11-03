@@ -439,7 +439,7 @@ namespace graphene { namespace net { namespace detail {
               _retrigger_connect_loop_promise->wait();
             }
           }
-          catch ( fc::timeout_exception& ) //intentionally not logged
+          catch ( fc::timeout_exception& ) // intentionally not logged
           {
           }  // catch
 #else
@@ -4857,6 +4857,15 @@ namespace graphene { namespace net { namespace detail {
     void node_impl::broadcast( const message& item_to_broadcast, const message_propagation_data& propagation_data )
     {
       VERIFY_CORRECT_THREAD();
+      // (BSIP-2 §1, R7 C-03 disposition): blind-transfer timing
+      // hygiene stops at the wallet (min_broadcast_delay_sec before first
+      // broadcast). What it does NOT do: unlink a broadcast against a
+      // network-wide observer watching few DPOS producers correlate
+      // first-seen propagation with block inclusion. Fixing that needs
+      // network-layer diffusion (dandelion-style stem/fluff relay), which is
+      // NOT implemented here — tracked as future p2p work, honestly
+      // documented as residual in BLIND_DEFAULTS_CONTRACT.md §6, and NEVER
+      // a consensus gate (consensus must not depend on relay timing).
       message_hash_type hash_of_message_contents;
       if( item_to_broadcast.msg_type.value() == graphene::net::block_message_type )
       {

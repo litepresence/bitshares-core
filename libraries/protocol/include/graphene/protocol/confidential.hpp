@@ -160,6 +160,8 @@ struct transfer_to_blind_operation : public base_operation
    account_id_type       from;
    blind_factor_type     blinding_factor;
    vector<blind_output>  outputs;
+   /// Per-output openings (appended-last).
+   vector<blind_factor_type> per_output_openings;
 
    account_id_type fee_payer()const { return from; }
    void            validate()const;
@@ -245,6 +247,8 @@ struct blind_transfer_operation : public base_operation
    asset                 fee;
    vector<blind_input>   inputs;
    vector<blind_output>  outputs;
+   /// Per-output openings (appended-last).
+   vector<blind_factor_type> per_output_openings;
     
    /** graphene TEMP account */
    account_id_type fee_payer()const;
@@ -275,11 +279,11 @@ FC_REFLECT( graphene::protocol::blind_input,
 FC_REFLECT( graphene::protocol::blind_output,
             (commitment)(range_proof)(owner)(stealth_memo) )
 FC_REFLECT( graphene::protocol::transfer_to_blind_operation,
-            (fee)(amount)(from)(blinding_factor)(outputs) )
+            (fee)(amount)(from)(blinding_factor)(outputs)(per_output_openings) )
 FC_REFLECT( graphene::protocol::transfer_from_blind_operation,
             (fee)(amount)(to)(blinding_factor)(inputs) )
 FC_REFLECT( graphene::protocol::blind_transfer_operation,
-            (fee)(inputs)(outputs) )
+            (fee)(inputs)(outputs)(per_output_openings) )
 FC_REFLECT( graphene::protocol::transfer_to_blind_operation::fee_params_t, (fee)(price_per_output) )
 FC_REFLECT( graphene::protocol::transfer_from_blind_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::blind_transfer_operation::fee_params_t, (fee)(price_per_output) )

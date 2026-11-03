@@ -103,7 +103,7 @@ class account_history_plugin : public graphene::app::plugin
       std::unique_ptr<detail::account_history_plugin_impl> my;
 };
 
-} } //graphene::account_history
+} } // graphene::account_history
 
 FC_REFLECT_DERIVED( graphene::account_history::exceeded_account_object, (graphene::db::object),
                     (account_id)(block_num) )

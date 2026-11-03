@@ -3,6 +3,7 @@ file(GLOB HEADERS "include/graphene/protocol/*.hpp")
 list(APPEND SOURCES account.cpp
                     assert.cpp
                     asset_ops.cpp
+                    accs_ops.cpp
                     block.cpp
                     confidential.cpp
                     chain_parameters.cpp
@@ -26,14 +27,22 @@ list(APPEND SOURCES account.cpp
                     custom.cpp
                     market.cpp
                     credit_offer.cpp
+                    oracle.cpp
                     liquidity_pool.cpp
                     samet_fund.cpp
+                    stealth.cpp
                     ticket.cpp
                     operations.cpp
                     pts_address.cpp
                     small_ops.cpp
                     transaction.cpp
                     types.cpp
+                    vault_ops.cpp
+                    challenge_ops.cpp
+                    vault_lifecycle_ops.cpp
+                    h2_economics.cpp
+                    issuance_ops.cpp
+                    seasoning_ops.cpp
                     withdraw_permission.cpp
                     worker.cpp
                     htlc.cpp)

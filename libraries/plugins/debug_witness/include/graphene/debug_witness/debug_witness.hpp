@@ -68,4 +68,4 @@ private:
    boost::signals2::scoped_connection _removed_objects_conn;
 };
 
-} } //graphene::debug_witness_plugin
+} } // graphene::debug_witness_plugin

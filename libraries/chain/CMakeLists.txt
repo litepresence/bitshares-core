@@ -40,6 +40,10 @@ add_library( graphene_chain
              liquidity_pool_evaluator.cpp
              samet_fund_evaluator.cpp
              credit_offer_evaluator.cpp
+             oracle_evaluator.cpp
+             oracle_object.cpp
+             reference_asset_object.cpp
+             h2_activation.cpp
              balance_evaluator.cpp
              account_evaluator.cpp
              assert_evaluator.cpp
@@ -55,6 +59,10 @@ add_library( graphene_chain
              worker_evaluator.cpp
              htlc_evaluator.cpp
              confidential_evaluator.cpp
+              stealth_evaluator.cpp
+              stealth_proof.cpp
+              stealth_prover.cpp
+              stealth_pool_builder.cpp
              special_authority_evaluation.cpp
              custom_authority_evaluator.cpp
              buyback.cpp
@@ -80,6 +88,20 @@ add_dependencies( graphene_chain build_hardfork_hpp )
 target_link_libraries( graphene_chain graphene_db graphene_protocol fc )
 target_include_directories( graphene_chain
                             PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/include" )
+
+# S-02 (vendored-proof isolation): G1 vendored proofs under stealth/vendor/ are
+# REFERENCE ONLY (see stealth/vendor/README.md) — they must never compile
+# into consensus targets. Consensus sources here are an explicit list (no
+# file(GLOB) reaches stealth/vendor/), and this guard fails the configure
+# if any stealth/vendor file ever enters graphene_chain.
+get_target_property( _g1_chain_srcs graphene_chain SOURCES )
+foreach( _g1_src IN LISTS _g1_chain_srcs )
+   if( _g1_src MATCHES "stealth/vendor" )
+      message( FATAL_ERROR "S-02: stealth/vendor reference file in consensus target graphene_chain: ${_g1_src}" )
+   endif()
+endforeach()
+unset( _g1_chain_srcs )
+unset( _g1_src )
 
 set( GRAPHENE_CHAIN_BIG_FILES
      db_init.cpp

@@ -30,6 +30,12 @@
 #include <algorithm> // std::max
 
 namespace graphene { namespace protocol {
+      // AGI-08: the four legs are NOT grief-equal — sha1 (~2^63
+      // collision) lets a lock author equivocate a published digest; the
+      // G1 create path keeps all four at legacy parity (accepted-risk label
+      // at htlc_create_evaluator::do_evaluate), and the sha1 SUNSET ships
+      // with H2 (track-b-h2), not here. ripemd160/hash160 (~2^80 collision,
+      // ~2^160 redeem second-preimage) do not enable that model.
       typedef fc::ripemd160    htlc_algo_ripemd160;
       typedef fc::sha1         htlc_algo_sha1;
       typedef fc::sha256       htlc_algo_sha256;

@@ -38,6 +38,15 @@ using namespace graphene::wallet;
 
 BOOST_FIXTURE_TEST_SUITE(wallet_tests, database_fixture)
 
+/// Collects FC_API vtable member names without binding an instance.
+/// File scope: local classes cannot carry the member template the
+/// per-method functor types require.
+struct wallet_method_name_collector {
+   std::vector<std::string>& out;
+   template<typename Member>
+   void operator()( const char* name, Member )const { out.emplace_back( name ); }
+};
+
   /***
    * Check the basic behavior of deriving potential owner keys from a brain key
    */
@@ -74,8 +83,40 @@ BOOST_FIXTURE_TEST_SUITE(wallet_tests, database_fixture)
               BOOST_CHECK_EQUAL(0u, description.find(expected_prefix));
           }
 
-      } FC_LOG_AND_RETHROW()
-  }
-  
+       } FC_LOG_AND_RETHROW()
+   }
+
+   /***
+    * F3 wallet gap: op 82 (reference_asset_create) has consensus, builder,
+    * and database_api paths, but no wallet convenience command, while the
+    * four oracle commands (create/update/delete/publish) all have one.
+    * cli_wallet serves exactly the FC_API vtable, so presence in the
+    * vtable == presence on the CLI. No wallet instance (and no node)
+    * needed: the vtable visits member names without binding them.
+    */
+   BOOST_AUTO_TEST_CASE(wallet_exposes_create_reference_asset) {
+       try {
+           /***
+            * Act: collect the FC_API method names of wallet_api
+            */
+           fc::vtable<graphene::wallet::wallet_api,
+                      fc::identity_member_with_optionals> vt;
+           std::vector<std::string> names;
+           vt.visit( wallet_method_name_collector{ names } );
+
+           /***
+            * Assert: the oracle family is whole — reference-asset create
+            * sits beside the four oracle commands
+            */
+           auto has = [&names]( const std::string& m ) {
+              return std::find( names.begin(), names.end(), m ) != names.end();
+           };
+           BOOST_CHECK( has( "create_oracle" ) );
+           BOOST_CHECK( has( "publish_oracle_value" ) );
+           BOOST_CHECK( has( "create_reference_asset" ) );
+
+       } FC_LOG_AND_RETHROW()
+   }
+
 BOOST_AUTO_TEST_SUITE_END()
 

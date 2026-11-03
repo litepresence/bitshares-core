@@ -68,7 +68,7 @@ class es_objects_plugin_impl
             bool no_delete = false;
             string index_name = "";
          };
-         std::string elasticsearch_url = "http://localhost:9200/";
+         std::string elasticsearch_url = "http:// localhost:9200/";
          std::string auth = "";
          uint32_t bulk_replay = 10000;
          uint32_t bulk_sync = 100;
@@ -400,7 +400,7 @@ void es_objects_plugin::plugin_set_program_options(
 {
    cli.add_options()
          ("es-objects-elasticsearch-url", boost::program_options::value<std::string>(),
-               "Elasticsearch node url(http://localhost:9200/)")
+               "Elasticsearch node url(http:// localhost:9200/)")
          ("es-objects-auth", boost::program_options::value<std::string>(), "Basic auth username:password('')")
          ("es-objects-bulk-replay", boost::program_options::value<uint32_t>(),
                "Number of bulk documents to index on replay(10000)")

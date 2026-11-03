@@ -117,4 +117,4 @@ class api_helper_indexes : public graphene::app::plugin
       void refresh_next_ids();
 };
 
-} } //graphene::template
+} } // graphene::template

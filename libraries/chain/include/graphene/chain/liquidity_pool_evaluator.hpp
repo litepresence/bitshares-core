@@ -122,4 +122,36 @@ namespace graphene { namespace chain {
          asset _pool_taker_fee;
    };
 
+   /**
+    * Shared constant-product exchange math (G2, design
+    * 2026-10-10-stealth-pool-swaps-design §4).
+    *
+    * The maker-fee → pool-receives → delta → pool-taker-fee → pool-pays →
+    * taker-fee → account-receives leg of
+    * liquidity_pool_exchange_evaluator::do_evaluate, extracted VERBATIM
+    * (same calls, same asserts, same rounding, same
+    * liquidity_pool_exchange_unfillable_price throw on an unfillable price)
+    * so the transparent pool swap and the blind G2 pool swap can never
+    * diverge on rounding: two copies of a rounding rule will diverge, and
+    * that divergence is consensus.
+    *
+    * Pure function of (database, pool, amount_to_sell, min_to_receive):
+    * reads reserves/fees via database::calculate_market_fee, writes nothing.
+    * pool_taker_fee never leaves the pool (it is absent from the G2 kernel
+    * by design). Throws, never returns partial results.
+    */
+   struct pool_exchange_amounts
+   {
+      asset maker_market_fee;
+      asset pool_receives;
+      asset pool_pays;
+      asset taker_market_fee;
+      asset account_receives;
+      asset pool_taker_fee;
+   };
+
+   pool_exchange_amounts calculate_pool_exchange_amounts( const database& d,
+         const liquidity_pool_object& pool,
+         const asset& amount_to_sell, const asset& min_to_receive );
+
 } } // graphene::chain

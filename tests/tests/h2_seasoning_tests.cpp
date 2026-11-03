@@ -971,4 +971,93 @@ BOOST_AUTO_TEST_CASE( breach_count_monotonic_ac15c )
    BOOST_CHECK( h2s_find_record( *this, cp.pair ).window_start > restarted );
 } FC_LOG_AND_RETHROW() }
 
+/// REPAIR-21 (H2-18-N): Seasoning phantom numerator - CDD-drained bonds must
+/// not count as backing. h2_seasoning_vault_backing and
+/// h2_seasoning_oracle_backing sum bond_amount without checking vesting
+/// coverage, so a drained vesting balance still inflates cur_vault_bps /
+/// cur_oracle_bps, opening the issuer-direct mint door with no real backing.
+///
+/// RED pre-fix: after draining the vault bond's vesting balance, the seasoning
+/// sweep still counts the bond and min_vault_bps stays high. Post-fix: the
+/// drained bond is skipped and vault coverage drops to 0.
+BOOST_AUTO_TEST_CASE( repair_21_seasoning_phantom_numerator )
+{ try {
+   generate_blocks( HARDFORK_H2_PRICE_TIME );
+   generate_block();
+   set_expiration( db, trx );
+
+   ACTORS( (alice)(bob) );
+   fund( alice, asset( 5000000000000LL ) );
+   fund( bob, asset( 5000000000000LL ) );
+   h2s_make_committee_member( *this, alice );
+   const auto bts_ref = h2s_create_reference( *this, alice_id, alice_private_key, "BTS", 5 );
+   const auto usd_ref = h2s_create_reference( *this, alice_id, alice_private_key, "USD", 4 );
+   (void)bts_ref; (void)usd_ref;
+
+   const asset_id_type pair = h2s_create_uia( *this, alice_id, alice_private_key, "SEASR21" );
+   const vault_id_type vid = h2s_register_vault(
+         *this, alice_id, alice_private_key, pair, authority( 1, alice_id, 1 ) );
+   h2s_lock_vault_bond( *this, alice_id, alice_private_key, vid,
+         h2s_make_cdd_vesting( *this, alice_id, alice_private_key, H2S_VAULT_RAW ) );
+
+   oracle_options opts;
+   opts.producers[bob_id] = oracle_producer_entry( 1 );
+   opts.value_lifetime_sec = 120 * 86400;
+   const oracle_id_type oid = h2s_make_oracle(
+         *this, alice_id, alice_private_key, "SEASR21-O", bts_ref, usd_ref, opts );
+   h2s_lock_producer_bond( *this, bob_id, bob_private_key, oid,
+         h2s_make_cdd_vesting( *this, bob_id, bob_private_key, H2S_ORACLE_RAW ) );
+
+   h2s_freeze( *this, alice_id, alice_private_key, vid, oid );
+
+   generate_block();
+   db.modify( vid( db ), []( vault_object& v ) { v.frozen = false; } );
+   db.modify( oid( db ), []( oracle_object& o ) { o.options.frozen = false; } );
+   h2s_publish( *this, oid, bob_id, bob_private_key, 1, 1 );
+
+   // Set books: outstanding debt at 1/4 of bond => 4.0x vault coverage
+   h2s_set_books( *this, vid, H2S_VAULT_RAW / 4 );
+
+   // Covered sweep: vault coverage counts the bond
+   h2s_run_maintenance( *this );
+   const auto before = h2s_find_record( *this, pair );
+   BOOST_CHECK_MESSAGE( before.min_vault_bps > 0,
+      "REPAIR-21: vault coverage should be > 0 before drain, was "
+         << before.min_vault_bps );
+
+   // Drain the vault bond's vesting balance via CDD withdraw
+   const auto& bond_idx = db.get_index_type<vault_bond_index>()
+                               .indices().get<by_bond_vault>();
+   const auto vrange = bond_idx.equal_range( vid );
+   BOOST_REQUIRE( vrange.first != vrange.second );
+   const auto& drained_bond = *vrange.first;
+   const vesting_balance_object* vb = db.find( drained_bond.vesting_balance );
+   BOOST_REQUIRE( vb != nullptr );
+   const share_type bond_balance = vb->balance.amount;
+   BOOST_REQUIRE( bond_balance >= H2S_VAULT_RAW );
+
+   // Advance time past start_claim + vesting_seconds so CDD allows full withdraw
+   generate_blocks( drained_bond.unlock_time + GRAPHENE_H2_BOND_UNBOND_DELAY_SEC );
+
+   // Withdraw full balance via CDD (preserves supply via adjust_balance)
+   vesting_balance_withdraw_operation wop;
+   wop.vesting_balance = vb->id;
+   wop.amount = asset( bond_balance, asset_id_type() );
+   wop.owner = alice_id;
+   set_expiration( db, trx );
+   trx.operations.push_back( wop );
+   sign( trx, alice_private_key );
+   PUSH_TX( db, trx );
+
+   // Run seasoning sweep again: vault coverage should drop to 0 because the
+   // drained bond no longer counts as backing (vesting no longer covers)
+   h2s_run_maintenance( *this );
+   const auto after = h2s_find_record( *this, pair );
+   BOOST_CHECK_MESSAGE( after.min_vault_bps == 0,
+      "REPAIR-21: drained bond still counts as vault backing; "
+         "min_vault_bps=" << after.min_vault_bps );
+   BOOST_CHECK_MESSAGE( after.min_vault_bps < before.min_vault_bps,
+      "REPAIR-21: vault coverage did not drop after draining vesting balance" );
+} FC_LOG_AND_RETHROW() }
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -31,6 +31,7 @@
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/vault_object.hpp>
 
 #include <boost/multiprecision/cpp_int.hpp>
@@ -104,20 +105,30 @@ share_type h2_seasoning_vault_backing( const database& d, vault_id_type vid )
    const auto& bond_idx = d.get_index_type<vault_bond_index>().indices().get<by_bond_vault>();
    const auto range = bond_idx.equal_range( vid );
    for( auto itr = range.first; itr != range.second; ++itr )
-      if( !itr->seized )
-         backing = h2_seasoning_sat_add( backing, itr->bond_amount );
+   {
+      // REPAIR-21 (H2-18-N): a CDD-drained bond no longer counts as locked
+      // funds. The vesting-covered predicate matches the other five bond
+      // consumers (oracle_substrate.cpp:37-42, h2_economics.cpp:489-494,
+      // h2_economics.cpp:1055-1058): vesting balance exists and holds >=
+      // bond_amount in BTS.
+      if( itr->seized )
+         continue;
+      const vesting_balance_object* vb = d.find( itr->vesting_balance );
+      if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+          || vb->balance.amount < itr->bond_amount )
+         continue;
+      backing = h2_seasoning_sat_add( backing, itr->bond_amount );
+   }
    return backing;
 }
 
 /**
- * Unslashed producer-bond backing for @p oid. A backing-SIZE sum, not the
- * bonded-live read gate (h2_oracle_has_bonded_live_set): the BSIP-H2
- * formula is oracle_bonds / secured_debt, a size ratio over locked funds,
- * so liveness, weights, and unlock posture do not filter rows -- slashed
- * bonds (dispute-loss, H2b) back nothing and are the only exclusion.
- * Unbounded by row count like the dispute-history scans (producer churn
- * can strand rows past the 32-producer set cap); stranded rows stay
- * countable because they are still locked funds.
+ * Vesting-covered producer-bond backing for @p oid. A backing-SIZE sum over
+ * rows whose vesting balance still holds the encumbered BTS (REPAIR-21).
+ * Not the bonded-live read gate (h2_oracle_has_bonded_live_set): that gate
+ * also requires live submissions and producer weight; this is the pure
+ * backing-size input to cur_oracle_bps. Slashed bonds back nothing;
+ * CDD-drained or unlock-time-passed bonds back nothing.
  */
 share_type h2_seasoning_oracle_backing( const database& d, oracle_id_type oid )
 {
@@ -126,8 +137,18 @@ share_type h2_seasoning_oracle_backing( const database& d, oracle_id_type oid )
                              .indices().get<by_oracle_producer>();
    for( auto bitr = bond_idx.lower_bound( boost::make_tuple( oid ) );
          bitr != bond_idx.end() && bitr->oracle == oid; ++bitr )
-      if( !bitr->slashed )
-         backing = h2_seasoning_sat_add( backing, bitr->bond_amount );
+   {
+      // REPAIR-21 (H2-18-N): same vesting-covered predicate as the vault leg
+      // and the other five bond consumers. A slashed or CDD-drained bond
+      // backs nothing.
+      if( bitr->slashed )
+         continue;
+      const vesting_balance_object* vb = d.find( bitr->vesting_balance );
+      if( vb == nullptr || vb->balance.asset_id != asset_id_type()
+          || vb->balance.amount < bitr->bond_amount )
+         continue;
+      backing = h2_seasoning_sat_add( backing, bitr->bond_amount );
+   }
    return backing;
 }
 

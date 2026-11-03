@@ -25,6 +25,7 @@
 
 #include <graphene/protocol/operations.hpp>
 
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
 
 #include <fc/reflect/typelist.hpp>
@@ -68,6 +69,50 @@ struct hardfork_visitor {
                                                 protocol::credit_deal_repay_operation,
                                                 protocol::credit_deal_expired_operation >;
    using credit_deal_update_op = fc::typelist::list< protocol::credit_deal_update_operation >;
+   using oracle_ops = fc::typelist::list< protocol::oracle_create_operation,
+                                           protocol::oracle_update_operation,
+                                           protocol::oracle_delete_operation,
+                                           protocol::oracle_publish_operation,
+                                           protocol::oracle_foreign_publish_operation,
+                                           protocol::reference_asset_create_operation >;
+   using h2_primitives_ops = fc::typelist::list< protocol::vault_challenge_operation,
+                                                     protocol::oracle_dispute_operation,
+                                                     protocol::oracle_dispute_escalate_operation,
+                                                     protocol::challenge_vote_operation >;
+   using h2_gateway_ops = fc::typelist::list< protocol::vault_register_operation,
+                                              protocol::vault_bond_lock_operation,
+                                              protocol::vault_bond_release_operation,
+                                              protocol::vault_rotate_operation >;
+   using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
+                                            protocol::oracle_bond_release_operation,
+                                            protocol::vault_resolve_operation,
+                                            protocol::pair_freeze_operation,
+                                            protocol::winddown_claim_operation,
+                                             protocol::oracle_fallback_set_operation,
+                                             protocol::oracle_unfreeze_operation,
+                                             protocol::seasoning_verify_operation,
+                                             protocol::hybrid_mint_operation,
+                                             protocol::hybrid_redeem_operation,
+                                             protocol::offset_deposit_operation,
+                                             protocol::offset_claim_operation,
+                                             protocol::issuance_exit_request_operation >;
+   // Reserved G-track stubs (tags 104-109): disabled until Task 5 replaces
+   // them with the real stealth implementations.
+   using reserved_g_ops = fc::typelist::list< protocol::stealth_transfer_operation,
+                                              protocol::freeze_blind_operation,
+                                              protocol::turnstile_reproof_operation,
+                                              protocol::parity_review_operation,
+                                              protocol::stealth_explicit_spend_operation,
+                                              protocol::stealth_pool_exchange_operation >;
+   // F-track ACCS ops (tags 110-117): gated on the F leg (oracle + F_ACCS),
+   // not on H2 gateway/bonds/price. See REPAIR-01/04.
+   using f_accs_ops = fc::typelist::list< protocol::accs_declare_gateway_operation,
+                                          protocol::accs_deactivate_gateway_operation,
+                                          protocol::accs_create_offer_operation,
+                                          protocol::accs_cancel_offer_operation,
+                                          protocol::accs_match_offer_operation,
+                                          protocol::accs_fulfill_operation,
+                                          protocol::accs_claim_griefing_operation >;
 
    fc::time_point_sec now;
 
@@ -103,6 +148,38 @@ struct hardfork_visitor {
    template<typename Op>
    std::enable_if_t<fc::typelist::contains<liquidity_pool_update_op, Op>(), bool>
    visit() { return HARDFORK_CORE_2604_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<oracle_ops, Op>(), bool>
+   visit() { return HARDFORK_ORACLE_PASSED(now); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<h2_primitives_ops, Op>(), bool>
+   visit() { return HARDFORK_H2_BONDS_PASSED(now)
+                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                        HARDFORK_H2_GATEWAY_TIME,
+                                        HARDFORK_H2_PRICE_TIME ); }
+   template<typename Op>
+   std::enable_if_t<fc::typelist::contains<h2_gateway_ops, Op>(), bool>
+   visit() { return HARDFORK_H2_GATEWAY_PASSED(now)
+                    && HARDFORK_H2_BONDS_PASSED(now)
+                    && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                        HARDFORK_H2_GATEWAY_TIME,
+                                        HARDFORK_H2_PRICE_TIME ); }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<h2_price_ops, Op>(), bool>
+    visit() { return HARDFORK_H2_PRICE_PASSED(now)
+                     && h2_legs_ordered( HARDFORK_H2_BONDS_TIME,
+                                         HARDFORK_H2_GATEWAY_TIME,
+                                         HARDFORK_H2_PRICE_TIME ); }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<reserved_g_ops, Op>(), bool>
+    visit() { return false; }
+    template<typename Op>
+    std::enable_if_t<fc::typelist::contains<f_accs_ops, Op>(), bool>
+    visit() {
+       FC_ASSERT( HARDFORK_ORACLE_TIME <= HARDFORK_F_ACCS_TIME,
+                  "F_ACCS must not be scheduled before the oracle leg" );
+       return HARDFORK_F_ACCS_PASSED( now );
+    }
    /// @}
 
    /// typelist::runtime::dispatch adaptor

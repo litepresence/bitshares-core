@@ -43,6 +43,11 @@
 #include <graphene/chain/special_authority_object.hpp>
 #include <graphene/chain/ticket_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
+#include <graphene/chain/challenge_evaluator.hpp>
+#include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/accs_evaluator.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
 #include <graphene/chain/vote_count.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/worker_object.hpp>
@@ -1591,6 +1596,46 @@ void database::perform_chain_maintenance( const signed_block& next_block )
 
    process_bitassets();
    delete_expired_custom_auths(*this);
+   // H2b fail-closed arbitration: open challenges/disputes past their vote
+   // window expire into frozen targets at the first maintenance after the
+   // deadline (inventory OQ-19 vehicle). Pre-fork this is a gated no-op.
+    // X-06 H2-side order pin (H2-internal, load-bearing): challenge-expiry
+    // first, then vault top-up/seizure, then oracle
+    // reward/guard/recovery/tripwire. Expiry must precede both consumers: a
+    // challenge expiring in this sweep freezes its target (vault or oracle)
+    // before the vault sweep reads coverage pins and before the tripwire
+    // reopen reads guilty history — otherwise one sweep could recover a
+    // vault or reopen a wire past a finding that landed in the same block.
+    // The vault sweep precedes the oracle sweep so coverage recovery respects
+    // the tripwire door hold it does not own (it never clears door-held
+    // freezes; only tripwire reopen does). Pinned by
+    // h2_maintenance_order_expiry_vault_tripwire_pinned (h2_oracle_tests).
+    // H2-side sweep order (load-bearing): H1 market and bitasset work above
+    // (process_bitassets, expired auths) unchanged first; then H2b expiry, H2c
+    // vault, H2d oracle/tripwire as pinned here; then the X-02 seasoning clock,
+    // which reads post-sweep state; no G1 stealth sweep runs on this branch.
+    // The cross-track H1+H2+G1 order lives in the integration tree; pinning the
+    // merged order is tracked in build/ACTIVATION-CHECKLIST.md. process_budget
+    // stays last (it needs the final next_maintenance_time).
+    process_expired_h2_challenges(*this);
+   // H2c vault lifecycle: 150% coverage rule -> mint halt -> 36h top-up ->
+   // auto wind-down + seizure (inventory OQ-09/OQ-19 vehicles). Pre-fork no-op.
+   process_h2_vault_maintenance(*this);
+   // H2d oracle economics: reward-pool sweep + pro-rata payouts, guard rate
+   // windows, Recovery scope, tripwire ladder. Pre-fork no-op.
+   process_h2_oracle_economics(*this);
+   // X-02 BTC seasoning clock (BSIP-1 section 5): folds current vault/oracle
+   // coverages into each pair's full-window minimums, resets breaching
+   // windows, recomputes complete. Runs LAST among the H2 sweeps: it reads
+   // vault bonds/outstanding and producer bonds the earlier sweeps may have
+   // seized or swept, so it must observe their post-sweep state. Appended
+   // after the X-06-pinned expiry/vault/tripwire prefix, whose relative
+   // order is untouched. Pre-gateway no-op.
+   process_h2_seasoning(*this);
+
+   // F2 ACCS: expire open offers past their expiry block, mark matched
+   // offers past SLA as claimable. Pre-gateway no-op.
+   process_accs_maintenance(*this);
 
    // process_budget needs to run at the bottom because
    //   it needs to know the next_maintenance_time

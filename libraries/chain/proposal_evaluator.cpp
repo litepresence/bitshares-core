@@ -22,6 +22,8 @@
  * THE SOFTWARE.
  */
 #include <graphene/chain/database.hpp>
+#include <graphene/chain/f_activation.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/proposal_evaluator.hpp>
 #include <graphene/chain/proposal_object.hpp>
 #include <graphene/chain/hardfork.hpp>
@@ -39,6 +41,10 @@ namespace detail {
    void check_asset_publish_feed_extensions_hf_bsip77( const fc::time_point_sec& block_time,
                                                        const asset_publish_feed_operation::ext& extensions );
    void check_bitasset_options_hf_bsip77(const fc::time_point_sec& block_time, const bitasset_options& options);
+
+   void check_bitasset_options_hf_oracle(const fc::time_point_sec& block_time, const bitasset_options& options);
+
+   void check_asset_options_hf_oracle(const fc::time_point_sec& block_time, const asset_options& options);
 
    void check_bitasset_options_hf_bsip74(const fc::time_point_sec& block_time,
                                          const bitasset_options& options); // HF_REMOVABLE
@@ -87,12 +93,14 @@ struct proposal_operation_hardfork_visitor
       detail::check_asset_options_hf_1774(block_time, v.common_options);
       detail::check_asset_options_hf_bsip_48_75(block_time, v.common_options);
       detail::check_asset_options_hf_bsip81(block_time, v.common_options);
+      detail::check_asset_options_hf_oracle(block_time, v.common_options);
       detail::check_asset_options_hf_core2281( next_maintenance_time, v.common_options ); // HF_REMOVABLE
       detail::check_asset_options_hf_core2467( next_maintenance_time, v.common_options ); // HF_REMOVABLE
       if( v.bitasset_opts.valid() ) {
          detail::check_bitasset_options_hf_bsip_48_75( block_time, *v.bitasset_opts );
          detail::check_bitasset_options_hf_bsip74( block_time, *v.bitasset_opts ); // HF_REMOVABLE
          detail::check_bitasset_options_hf_bsip77( block_time, *v.bitasset_opts ); // HF_REMOVABLE
+         detail::check_bitasset_options_hf_oracle( block_time, *v.bitasset_opts );
          detail::check_bitasset_options_hf_bsip87( block_time, *v.bitasset_opts ); // HF_REMOVABLE
          detail::check_bitasset_opts_hf_core2467( next_maintenance_time, *v.bitasset_opts ); // HF_REMOVABLE
       }
@@ -113,6 +121,7 @@ struct proposal_operation_hardfork_visitor
       detail::check_asset_options_hf_1774(block_time, v.new_options);
       detail::check_asset_options_hf_bsip_48_75(block_time, v.new_options);
       detail::check_asset_options_hf_bsip81(block_time, v.new_options);
+      detail::check_asset_options_hf_oracle(block_time, v.new_options);
       detail::check_asset_options_hf_core2281( next_maintenance_time, v.new_options ); // HF_REMOVABLE
       detail::check_asset_options_hf_core2467( next_maintenance_time, v.new_options ); // HF_REMOVABLE
 
@@ -136,6 +145,12 @@ struct proposal_operation_hardfork_visitor
       detail::check_bitasset_options_hf_bsip74( block_time, v.new_options ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip77( block_time, v.new_options ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip87( block_time, v.new_options ); // HF_REMOVABLE
+      // The consensus expiry height rides inside price_oracle_binding (struct-level),
+      // so this absent-check inherits it with no new overload: a proposal smuggling a
+      // binding (expiry or not) past the fork is refused here, and a proposal-wrapped
+      // extend past the fork runs the same asset_update_bitasset do_evaluate that
+      // refuses it directly. No visitor change needed: no new operation type exists.
+      detail::check_bitasset_options_hf_oracle( block_time, v.new_options );
       detail::check_bitasset_opts_hf_core2467( next_maintenance_time, v.new_options ); // HF_REMOVABLE
    }
 
@@ -231,6 +246,75 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.current_fees->exists<liquidity_pool_update_operation>(),
                    "Unable to define fees for liquidity pool update operation prior to the core-2604 hardfork");
       }
+      if (!HARDFORK_ORACLE_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_create_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_update_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_delete_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_publish_operation>(),
+                   "Unable to define fees for oracle operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reference_asset_create_operation>(),
+                   "Unable to define fees for reference asset operations prior to the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.extensions.value.allow_public_reference_asset_creation.valid(),
+                   "Unable to set reference asset creation policy before the oracle hardfork");
+         FC_ASSERT(!op.new_parameters.extensions.value.oracle_guard_delay_sec.valid(),
+                   "Unable to set the oracle guard delay before the oracle hardfork");
+      }
+      // E-01: H2 fee-schedule votes are gated by leg, mirroring the
+      // execution pre-checks below (primitives/BONDS, gateway, price). Without this,
+      // a committee could price H2 fees before the code activates.
+      if (!HARDFORK_H2_BONDS_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_challenge_operation>(),
+                   "Unable to define fees for vault challenges prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_dispute_operation>(),
+                   "Unable to define fees for oracle disputes prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_dispute_escalate_operation>(),
+                   "Unable to define fees for dispute escalation prior to the H2 bonds hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<challenge_vote_operation>(),
+                   "Unable to define fees for challenge votes prior to the H2 bonds hardfork");
+      }
+      if (!HARDFORK_H2_GATEWAY_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_register_operation>(),
+                   "Unable to define fees for vault registration prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_bond_lock_operation>(),
+                   "Unable to define fees for vault bond locks prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_rotate_operation>(),
+                   "Unable to define fees for vault rotation prior to the H2 gateway hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_bond_release_operation>(),
+                   "Unable to define fees for vault bond release prior to the H2 gateway hardfork");
+      }
+      if (!HARDFORK_H2_PRICE_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_bond_lock_operation>(),
+                   "Unable to define fees for oracle bond locks prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_bond_release_operation>(),
+                   "Unable to define fees for oracle bond release prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<vault_resolve_operation>(),
+                   "Unable to define fees for vault resolution prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<pair_freeze_operation>(),
+                   "Unable to define fees for pair freeze prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<winddown_claim_operation>(),
+                   "Unable to define fees for wind-down claims prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_fallback_set_operation>(),
+                   "Unable to define fees for oracle fallback prior to the H2 price hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_unfreeze_operation>(),
+                   "Unable to define fees for oracle unfreeze prior to the H2 price hardfork");
+          FC_ASSERT(!op.new_parameters.current_fees->exists<seasoning_verify_operation>(),
+                    "Unable to define fees for seasoning verification prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_mint_operation>(),
+                     "Unable to define fees for hybrid mints prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<hybrid_redeem_operation>(),
+                     "Unable to define fees for hybrid redeems prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<offset_deposit_operation>(),
+                     "Unable to define fees for offset deposits prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<offset_claim_operation>(),
+                     "Unable to define fees for offset claims prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<issuance_exit_request_operation>(),
+                     "Unable to define fees for issuance exits prior to the H2 price hardfork");
+           FC_ASSERT(!op.new_parameters.current_fees->exists<oracle_foreign_publish_operation>(),
+                     "Unable to define fees for foreign transaction publishes prior to the H2 price hardfork");
+      }
    }
    void operator()(const graphene::chain::htlc_create_operation &op) const {
       FC_ASSERT( block_time >= HARDFORK_CORE_1468_TIME, "Not allowed until hardfork 1468" );
@@ -321,6 +405,110 @@ struct proposal_operation_hardfork_visitor
    // Note: credit_deal_expired_operation is a virtual operation thus no need to add code here
    void operator()(const graphene::chain::credit_deal_update_operation&) const {
       FC_ASSERT( HARDFORK_CORE_2595_PASSED(block_time), "Not allowed until the core-2595 hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_create_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_update_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_delete_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_publish_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::oracle_foreign_publish_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   void operator()(const graphene::chain::reference_asset_create_operation&) const {
+      FC_ASSERT( HARDFORK_ORACLE_PASSED(block_time), "Not allowed until the oracle hardfork" );
+   }
+   // H2 legs (H2e): the proposal pre-check mirrors the evaluator gates, so
+   // a leg-dark op is refused at proposal creation, not only at execution.
+   void operator()(const graphene::chain::vault_register_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_bond_lock_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_bond_lock_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_bond_release_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_challenge_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::oracle_dispute_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::oracle_dispute_escalate_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::challenge_vote_operation&) const {
+      h2_require_primitives(block_time);
+   }
+   void operator()(const graphene::chain::vault_rotate_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_bond_release_operation&) const {
+      h2_require_gateway_leg(block_time);
+   }
+   void operator()(const graphene::chain::vault_resolve_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::pair_freeze_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::winddown_claim_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_fallback_set_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::oracle_unfreeze_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::seasoning_verify_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::hybrid_mint_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::hybrid_redeem_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::offset_deposit_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::offset_claim_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::issuance_exit_request_operation&) const {
+      h2_require_price_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_declare_gateway_operation&) const {
+      f_require_accs_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_deactivate_gateway_operation&) const {
+      f_require_accs_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_create_offer_operation&) const {
+      f_require_accs_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_cancel_offer_operation&) const {
+      f_require_accs_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_match_offer_operation&) const {
+      f_require_accs_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_fulfill_operation&) const {
+      f_require_accs_leg(block_time);
+   }
+   void operator()(const graphene::chain::accs_claim_griefing_operation&) const {
+      f_require_accs_leg(block_time);
    }
 
    // loop and self visit in proposals

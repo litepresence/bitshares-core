@@ -294,9 +294,6 @@ processed_transaction database::_push_transaction( const precomputable_transacti
    auto temp_session = _undo_db.start_undo_session();
    auto processed_trx = _apply_transaction( trx );
    _pending_tx.push_back(processed_trx);
-
-   // notify_changed_objects();
-   // The transaction applied successfully. Merge its changes into the pending block session.
    temp_session.merge();
 
    // notify anyone listening to pending transactions
@@ -784,6 +781,22 @@ processed_transaction database::_apply_transaction(const signed_transaction& trx
 operation_result database::apply_operation( transaction_evaluation_state& eval_state, const operation& op,
                                             bool is_virtual /* = true */ )
 { try {
+    // E-02: evaluator-only hardfork model (deliberate, not a gap; R4-07
+    // amended). Two layers, both central: (1) the creation-time
+    // proposal_operation_hardfork_visitor rejects leg-dark ops at proposal
+    // creation (proposal_evaluator.cpp:64-75 visitor shell, 404-450 H2 legs),
+    // so a pre-fork H2 op cannot even be proposed; (2) execution-time
+    // evaluator gates assert the activation leg on head-block time first
+    // (h2_require_primitives / h2_require_gateway_leg / h2_require_price_leg,
+    // each also asserting the BONDS<GATEWAY<PRICE ordering), and proposals
+    // funnel through this same apply path, so a pre-fork H2 op fails at
+    // apply no matter how it arrived (mempool, proposal, or block). A
+    // witness that includes one produces an invalid block, which the network
+    // rejects as invalid (no fork-choice reward for invalid blocks) — that
+    // rejection is the enforcement, and a central apply-time reject here
+    // would only duplicate it. Follow-up (not consensus):
+    // a mempool smuggling fuzz proposing/executing/voting each new op 83-97
+    // pre-fork to pin the refusal at every entry point.
    int i_which = op.which();
    uint64_t u_which = uint64_t( i_which );
    FC_ASSERT( i_which >= 0, "Negative operation tag in operation ${op}", ("op",op) );

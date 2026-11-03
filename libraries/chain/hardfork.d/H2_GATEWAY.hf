@@ -1,0 +1,11 @@
+// H2 gateway leg: bonded-vault custody (register, bond, rotate).
+// Activates strictly before the price leg. BSIP-1 section 6 makes the order
+// a consensus-reject rule (gateway height < price height enforced in every
+// H2 evaluator, never a sequencing promise); these placeholder dates only
+// pre-stage the mechanism. The committee sets the real schedule, but no
+// schedule can stage price judgment before bonded custody: an inverted
+// configuration is refused by consensus, not merely misordered.
+#ifndef HARDFORK_H2_GATEWAY_TIME
+#define HARDFORK_H2_GATEWAY_TIME (fc::time_point_sec( 1890777600 )) // 2029-12-01T00:00:00Z
+#define HARDFORK_H2_GATEWAY_PASSED(now) (now >= HARDFORK_H2_GATEWAY_TIME)
+#endif

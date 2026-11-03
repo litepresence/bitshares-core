@@ -29,6 +29,25 @@
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/balance_object.hpp>
 #include <graphene/chain/committee_member_object.hpp>
+// E-05: H2 object headers for API-doc coverage. New OPERATIONS need no
+// registry update anywhere: the wallet prototype map iterates the operation
+// static_variant dynamically (wallet_api_impl::init_prototype_ops walks
+// op.count()/set_which, so tags 83-97 appear automatically), the JS binding
+// generator does the same (programs/js_operation_serializer/main.cpp:396-421
+// loops op.count()/set_which and serializer<static_variant>::init visits
+// every reflected op, so the UI serializer picks up tags 83-97 with no
+// registry edit), and this enumerator walks signed_block the same way
+// (process_class over the variant visits every reflected op). These object
+// includes keep the member walker able to descend into H2 state types
+// referenced by the new ops/objects exactly like the legacy chain objects
+// above. Stealth headers are intentionally absent: they live on the G1
+// branch (merge task), and no stealth op exists in this tree.
+#include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/challenge_object.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/vault_object.hpp>
+#include <graphene/chain/winddown_object.hpp>
 #include <iostream>
 
 using namespace graphene::chain;
@@ -76,6 +95,19 @@ struct member_visitor
    {
       members.emplace_back( name );
       proc->process_class( (const Member*) nullptr );
+   }
+
+   /// The enum form. FC_REFLECT_ENUM's visitor passes a name and the enumerator's value,
+   /// while FC_REFLECT passes only a name -- so a reflected enum used directly as a struct
+   /// member instantiates a two-argument call that the one-argument overload above cannot
+   /// satisfy, and the build helper stops compiling. No struct in this tree had such a
+   /// member until oracle_options::aggregation, which is why the gap went unnoticed.
+   ///
+   /// Recording the enumerator name and stopping there is deliberate: an enum value is not
+   /// a class, so there is nothing further to descend into.
+   void operator()( const char* name, int64_t )const
+   {
+      members.emplace_back( name );
    }
 
    class_processor* proc;

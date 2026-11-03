@@ -29,6 +29,7 @@
 #include <graphene/app/util.hpp>
 #include <graphene/chain/get_config.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/protocol/pts_address.hpp>
 #include <graphene/protocol/restriction_predicate.hpp>
 
@@ -2048,6 +2049,67 @@ vector<samet_fund_object> database_api::get_samet_funds_by_asset(
 
 //////////////////////////////////////////////////////////////////////
 //                                                                  //
+// ACCS (foreign-chain settlement)                                  //
+//                                                                  //
+//////////////////////////////////////////////////////////////////////
+
+vector<accs_gateway_object> database_api::list_accs_gateways(
+            const optional<uint32_t>& limit,
+            const optional<accs_gateway_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<accs_gateway_index>().indices().get<by_id>();
+   return my->get_objects_by_x< accs_gateway_object,
+                                accs_gateway_id_type
+                               >( &application_options::api_limit_get_credit_offers,
+                                  idx, limit, start_id );
+}
+
+vector<accs_orderbook_object> database_api::list_accs_orderbooks(
+            const optional<uint32_t>& limit,
+            const optional<accs_orderbook_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<accs_orderbook_index>().indices().get<by_id>();
+   return my->get_objects_by_x< accs_orderbook_object,
+                                accs_orderbook_id_type
+                               >( &application_options::api_limit_get_credit_offers,
+                                  idx, limit, start_id );
+}
+
+vector<accs_offer_object> database_api::list_accs_offers(
+            const optional<uint32_t>& limit,
+            const optional<accs_offer_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<accs_offer_index>().indices().get<by_id>();
+   return my->get_objects_by_x< accs_offer_object,
+                                accs_offer_id_type
+                               >( &application_options::api_limit_get_credit_offers,
+                                  idx, limit, start_id );
+}
+
+vector<accs_offer_object> database_api::get_accs_offers_by_seller(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<accs_offer_id_type>& start_id )const
+{
+   account_id_type seller = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<accs_offer_index>().indices().get<by_id>();
+   const auto configured_limit = my->_app_options->api_limit_get_credit_offers;
+   uint64_t lim = limit.valid() ? *limit : configured_limit;
+   FC_ASSERT( lim <= configured_limit, "limit can not be greater than configured limit" );
+   vector<accs_offer_object> results;
+   accs_offer_id_type start = start_id.valid() ? *start_id : accs_offer_id_type();
+   for( const auto& o : idx )
+   {
+      if( o.id < object_id_type( start ) ) continue;
+      if( o.seller != seller ) continue;
+      results.push_back( o );
+      if( results.size() >= lim ) break;
+   }
+   return results;
+}
+
+//////////////////////////////////////////////////////////////////////
+//                                                                  //
 // Credit offers and credit deals                                   //
 //                                                                  //
 //////////////////////////////////////////////////////////////////////
@@ -2074,6 +2136,99 @@ vector<credit_offer_object> database_api::get_credit_offers_by_owner(
                                 credit_offer_id_type
                                >( &application_options::api_limit_get_credit_offers,
                                   idx, limit, start_id, owner );
+}
+
+//////////////////////////////////////////////////////////////////////
+//                                                                  //
+// Oracles                                                          //
+//                                                                  //
+//////////////////////////////////////////////////////////////////////
+
+vector<optional<oracle_object>> database_api::get_oracles(
+            const vector<oracle_id_type>& oracle_ids )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_id>();
+   vector<optional<oracle_object>> result;
+   result.reserve( oracle_ids.size() );
+   // An unknown id yields an empty slot rather than an error: callers batch ids, and one bad
+   // one should not discard the whole answer.
+   std::transform( oracle_ids.begin(), oracle_ids.end(), std::back_inserter(result),
+                   [&idx]( oracle_id_type id ) -> optional<oracle_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<oracle_object> database_api::get_oracle_by_name( const string& name )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_oracle_name>();
+   auto itr = idx.find( name );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
+vector<oracle_object> database_api::list_oracles(
+            const optional<uint32_t>& limit,
+            const optional<oracle_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_id>();
+   return my->get_objects_by_x< oracle_object,
+                                oracle_id_type
+                               >( &application_options::api_limit_get_oracles,
+                                  idx, limit, start_id );
+}
+
+vector<oracle_object> database_api::get_oracles_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<oracle_id_type>& start_id )const
+{
+   account_id_type owner = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_owner>();
+   return my->get_objects_by_x< oracle_object,
+                                oracle_id_type
+                               >( &application_options::api_limit_get_oracles,
+                                  idx, limit, start_id, owner );
+}
+
+vector<optional<reference_asset_object>> database_api::get_reference_assets(
+            const vector<reference_asset_id_type>& reference_ids )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_id>();
+   vector<optional<reference_asset_object>> result;
+   result.reserve( reference_ids.size() );
+   std::transform( reference_ids.begin(), reference_ids.end(), std::back_inserter(result),
+                   [&idx]( reference_asset_id_type id ) -> optional<reference_asset_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<reference_asset_object> database_api::get_reference_asset_by_symbol(
+            const string& symbol )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_reference_symbol>();
+   auto itr = idx.find( symbol );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
+fc::optional<uint64_t> database_api::get_h2_qualified_depth(
+            const std::string& asset_symbol_or_id )const
+{
+   // Thin read-only alias of h2_issue_qualified_depth (the F1 cap's depth
+   // leg): pool-observe tripwire inputs, no state touched, no gate needed
+   // (pre-pool reads empty; unqualified reads zero and the door refuses).
+   asset_id_type pair = my->get_asset_from_string( asset_symbol_or_id )->get_id();
+   return h2_issue_qualified_depth( my->_db, pair );
 }
 
 vector<credit_offer_object> database_api::get_credit_offers_by_asset(

@@ -13,6 +13,7 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/witness_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
+#include <graphene/chain/accs_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/transaction_history_object.hpp>
@@ -21,6 +22,8 @@
 #include <graphene/chain/liquidity_pool_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/impacted.hpp>
 #include <graphene/chain/hardfork.hpp>
 
@@ -38,6 +41,15 @@ struct get_impacted_account_visitor
    {}
 
    using result_type = void;
+
+   // Default for operation types without a specialized impacted-account rule
+   // (e.g. reserved G-track stubs): the fee payer is the only impacted
+   // account. Explicit overloads below take precedence.
+   template<typename T>
+   void operator()( const T& op )
+   {
+      _impacted.insert( op.fee_payer() );
+   }
 
    void operator()( const transfer_operation& op )
    {
@@ -386,6 +398,142 @@ struct get_impacted_account_visitor
    {
       _impacted.insert( op.fee_payer() ); // account
    }
+   void operator()( const oracle_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_update_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_delete_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_publish_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
+   void operator()( const reference_asset_create_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // creator
+   }
+   void operator()( const vault_register_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // registrar
+   }
+   void operator()( const vault_bond_lock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_bond_lock_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
+   void operator()( const oracle_bond_release_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // producer
+   }
+   void operator()( const vault_challenge_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const oracle_dispute_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // challenger
+   }
+   void operator()( const oracle_dispute_escalate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // escalator
+   }
+   void operator()( const challenge_vote_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // voter
+   }
+   void operator()( const vault_rotate_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // rotator
+   }
+   void operator()( const vault_bond_release_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const vault_resolve_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // resolver
+   }
+   void operator()( const pair_freeze_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // freezer
+   }
+   void operator()( const winddown_claim_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimant
+   }
+   void operator()( const oracle_fallback_set_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // owner
+   }
+   void operator()( const oracle_unfreeze_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // unfreezer (committee)
+   }
+   void operator()( const seasoning_verify_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // verifier (committee)
+   }
+   void operator()( const hybrid_mint_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // minter
+   }
+   void operator()( const hybrid_redeem_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // redeemer
+   }
+   void operator()( const offset_deposit_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // depositor
+   }
+   void operator()( const offset_claim_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimant
+   }
+   void operator()( const issuance_exit_request_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // requester
+   }
+   void operator()( const oracle_foreign_publish_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // attestor
+   }
+   void operator()( const accs_declare_gateway_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // committee_member
+   }
+   void operator()( const accs_deactivate_gateway_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // committee_member
+   }
+   void operator()( const accs_create_offer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // seller
+   }
+   void operator()( const accs_cancel_offer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // seller
+   }
+   void operator()( const accs_match_offer_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // buyer
+   }
+   void operator()( const accs_fulfill_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // publisher
+   }
+   void operator()( const accs_claim_griefing_operation& op )
+   {
+      _impacted.insert( op.fee_payer() ); // claimer
+   }
    void operator()( const credit_deal_expired_operation& op )
    {
       _impacted.insert( op.offer_owner );
@@ -454,6 +602,22 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
            break;
         } case custom_object_type:
           break;
+        case accs_gateway_object_type: {
+           const auto* aobj = dynamic_cast<const accs_gateway_object*>(obj);
+           accounts.insert( aobj->declared_by );
+           break;
+        }
+        case accs_orderbook_object_type:
+          break;
+        case accs_offer_object_type: {
+           const auto* aobj = dynamic_cast<const accs_offer_object*>(obj);
+           accounts.insert( aobj->seller );
+           if( aobj->matched_buyer != account_id_type() )
+              accounts.insert( aobj->matched_buyer );
+           break;
+        }
+        case accs_consumed_tx_object_type:
+          break;
         case proposal_object_type:{
            const auto* aobj = dynamic_cast<const proposal_object*>(obj);
            transaction_get_impacted_accs( aobj->proposed_transaction, accounts,
@@ -509,6 +673,18 @@ static void get_relevant_accounts( const object* obj, flat_set<account_id_type>&
            const auto* aobj = dynamic_cast<const credit_deal_object*>( obj );
            accounts.insert( aobj->offer_owner );
            accounts.insert( aobj->borrower );
+           break;
+        } case oracle_object_type:{
+           const auto* aobj = dynamic_cast<const oracle_object*>( obj );
+           accounts.insert( aobj->owner );
+           // Producers are impacted too: an account learns that an oracle it publishes to
+           // was reconfigured or removed from under it.
+           for( const auto& p : aobj->options.producers )
+              accounts.insert( p.first );
+           break;
+        } case reference_asset_object_type:{
+           const auto* aobj = dynamic_cast<const reference_asset_object*>( obj );
+           accounts.insert( aobj->creator );
            break;
         }
         // Do not have a default fallback so that there will be a compiler warning when a new type is added

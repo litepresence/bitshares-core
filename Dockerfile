@@ -1,6 +1,10 @@
 # The image for building
-FROM phusion/baseimage:focal-1.2.0 as build
+FROM phusion/baseimage:noble-1.0.2 AS build
 ENV LANG=en_US.UTF-8
+
+ENV CCACHE_DIR=/ccache
+ENV CCACHE_COMPRESS=true
+ENV CCACHE_SLOPPINESS=include_file_ctime,include_file_mtime,time_macros
 
 # Install dependencies
 RUN \
@@ -12,7 +16,11 @@ RUN \
       autoconf \
       cmake \
       git \
+      ccache \
       libbz2-dev \
+      libzstd-dev \
+      liblzma-dev \
+      libz-dev \
       libcurl4-openssl-dev \
       libssl-dev \
       libncurses-dev \
@@ -29,16 +37,16 @@ RUN \
       libboost-coroutine-dev \
       libtool \
       doxygen \
-      ca-certificates \
-    && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+      ca-certificates
 
 ADD . /bitshares-core
 WORKDIR /bitshares-core
 
+RUN mkdir -p /ccache
+
 # Compile
-RUN \
+RUN --mount=type=cache,id=cpp-ccache,target=/ccache \
+    ccache --show-stats && \
     ( git submodule sync --recursive || \
       find `pwd`  -type f -name .git | \
 	while read f; do \
@@ -49,9 +57,12 @@ RUN \
     git submodule update --init --recursive && \
     cmake \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+        -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
 	-DGRAPHENE_DISABLE_UNITY_BUILD=ON \
         . && \
     make witness_node cli_wallet get_dev_key && \
+    ccache --show-stats && \
     install -s programs/witness_node/witness_node \
                programs/genesis_util/get_dev_key \
                programs/cli_wallet/cli_wallet \
@@ -59,12 +70,10 @@ RUN \
     #
     # Obtain version
     mkdir -p /etc/bitshares && \
-    git rev-parse --short HEAD > /etc/bitshares/version && \
-    cd / && \
-    rm -rf /bitshares-core
+    git rev-parse --short HEAD > /etc/bitshares/version
 
 # The final image
-FROM phusion/baseimage:focal-1.2.0
+FROM phusion/baseimage:noble-1.0.2
 LABEL maintainer="The bitshares decentralized organisation"
 ENV LANG=en_US.UTF-8
 
@@ -87,7 +96,7 @@ COPY --from=build /etc/bitshares/version /etc/bitshares/
 WORKDIR /
 RUN groupadd -g 10001 bitshares
 RUN useradd -u 10000 -g bitshares -s /bin/bash -m -d /var/lib/bitshares --no-log-init bitshares
-ENV HOME /var/lib/bitshares
+ENV HOME=/var/lib/bitshares
 RUN chown bitshares:bitshares -R /var/lib/bitshares
 
 # default exec/config files

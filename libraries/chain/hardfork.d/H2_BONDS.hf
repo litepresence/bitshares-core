@@ -1,0 +1,10 @@
+// H2 bonds: bonded price oracles + vault-backed issuance primitives.
+// Shared primitives gate (vault_challenge, oracle_dispute, escalate, vote).
+// Activates strictly before the gateway leg (E-03 audit-round-2: BONDS <
+// GATEWAY < PRICE with distinct heights, so Dec 2029 vaults never form with
+// no challenge machinery). The committee sets the real schedule, but no
+// schedule can stage custody before judgment machinery exists.
+#ifndef HARDFORK_H2_BONDS_TIME
+#define HARDFORK_H2_BONDS_TIME (fc::time_point_sec( 1888185600 )) // 2029-11-01T00:00:00Z
+#define HARDFORK_H2_BONDS_PASSED(now) (now >= HARDFORK_H2_BONDS_TIME)
+#endif

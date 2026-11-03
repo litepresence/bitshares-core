@@ -34,6 +34,8 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/operation_history_object.hpp>
 #include <graphene/chain/samet_fund_object.hpp>
 #include <graphene/chain/ticket_object.hpp>
@@ -948,6 +950,80 @@ class database_api
             const optional<uint32_t>& limit = optional<uint32_t>(),
             const optional<credit_offer_id_type>& start_id = optional<credit_offer_id_type>() )const;
 
+      /////////////
+      // Oracles //
+      /////////////
+
+      /**
+       * @brief Get a list of oracles by ID
+       * @param oracle_ids IDs of the oracles to retrieve
+       * @return The oracles corresponding to the provided IDs
+       *
+       * @note An empty result is returned in the position of any ID that cannot be tied to an
+       *       oracle, rather than an error, so one bad id does not lose the whole batch.
+       */
+      vector<optional<oracle_object>> get_oracles( const vector<oracle_id_type>& oracle_ids )const;
+
+      /**
+       * @brief Get an oracle by its name
+       * @param name the oracle's name, e.g. "BTC.USD"
+       * @return The oracle, or null if there is no oracle with that name
+       */
+      optional<oracle_object> get_oracle_by_name( const string& name )const;
+
+      /**
+       * @brief Get a list of oracles
+       * @param limit The limitation of items each query can fetch, not greater than the
+       *              configured value of @a api_limit_get_oracles
+       * @param start_id Start oracle id, fetch items whose IDs are greater than or equal to
+       *                 this ID
+       * @return The oracles
+       */
+      vector<oracle_object> list_oracles(
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<oracle_id_type>& start_id = optional<oracle_id_type>() )const;
+
+      /**
+       * @brief Get a list of oracles administered by an account
+       * @param account_name_or_id name or ID of the owner account
+       * @param limit The limitation of items each query can fetch, not greater than the
+       *              configured value of @a api_limit_get_oracles
+       * @param start_id Start oracle id, fetch items whose IDs are greater than or equal to
+       *                 this ID
+       * @return The oracles
+       */
+      vector<oracle_object> get_oracles_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit = optional<uint32_t>(),
+            const optional<oracle_id_type>& start_id = optional<oracle_id_type>() )const;
+
+      /**
+       * @brief Get the reference assets with the given ids
+       * @param reference_ids IDs of the reference assets to retrieve
+       * @return The reference assets, with an empty slot for each unknown id
+       */
+      vector<optional<reference_asset_object>> get_reference_assets(
+            const vector<reference_asset_id_type>& reference_ids )const;
+
+      /**
+       * @brief Get the reference asset with the given symbol
+       * @param symbol Symbol of the reference asset, e.g. "USD"
+       * @return The reference asset, or nothing if there is no such symbol
+       */
+      optional<reference_asset_object> get_reference_asset_by_symbol(
+            const string& symbol )const;
+
+      /**
+       * @brief Get the qualified pool-observe depth behind the issuance door cap
+       * @param asset_symbol_or_id symbol or ID of the pair's face asset
+       * @return the qualified two-window depth (sum of both tripwire windows),
+       *         empty when no pools observed yet (depth leg skipped), or zero
+       *         when live state is unqualified (thin or single-pool: the door
+       *         refuses outright). Read-only: exposes h2_issue_qualified_depth.
+       */
+      fc::optional<uint64_t> get_h2_qualified_depth(
+            const std::string& asset_symbol_or_id )const;
+
       /**
        * @brief Get a list of credit offers by the name or ID of the owner account
        * @param account_name_or_id name or ID of the owner account
@@ -1558,6 +1634,13 @@ FC_API(graphene::app::database_api,
    // Credit offers and credit deals
    (list_credit_offers)
    (get_credit_offers_by_owner)
+   (get_oracles)
+   (get_oracle_by_name)
+   (list_oracles)
+   (get_oracles_by_owner)
+   (get_reference_assets)
+   (get_reference_asset_by_symbol)
+   (get_h2_qualified_depth)
    (get_credit_offers_by_asset)
    (list_credit_deals)
    (get_credit_deals_by_offer_id)

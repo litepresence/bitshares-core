@@ -27,8 +27,15 @@
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/database.hpp>
 #include <graphene/chain/exceptions.hpp>
+#include <graphene/chain/h2_activation.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/is_authorized_asset.hpp>
+#include <graphene/chain/vault_object.hpp>
 
 #include <functional>
 
@@ -127,6 +134,66 @@ namespace detail {
       }
    }
 
+    void check_bitasset_options_hf_oracle( const fc::time_point_sec& block_time,
+                                           const bitasset_options& options )
+    {
+       // The consensus expiry height rides INSIDE price_oracle_binding (struct-level,
+       // last field), so this absent-check gates it too: no binding means no expiry
+       // field to smuggle past the fork, and a binding with expiry is refused here
+       // pre-fork exactly like one without. Absent on old pairs is the legacy path,
+       // never a new restriction on old state.
+       FC_ASSERT( !options.extensions.value.price_oracle_id.valid()
+                  || HARDFORK_ORACLE_PASSED( block_time ),
+                  "A BitAsset's price oracle cannot be set before the oracle hardfork" );
+       // H2 latch/sunset (MUSE-R01): the explicit-bound latch is H2-gated
+       // state, so it must be absent before the H2 bonds leg (covers create,
+       // update, and proposal paths through this one check: all three call
+       // it). Post-leg the latch is set and read by the bind evaluator.
+       FC_ASSERT( !options.extensions.value.explicit_oracle_bound_once.valid()
+                  || HARDFORK_H2_BONDS_PASSED( block_time ),
+                  "The explicit-binding latch cannot be set before the H2 bonds hardfork" );
+       FC_ASSERT( !options.extensions.value.price_oracle_binding.valid()
+                  || HARDFORK_ORACLE_PASSED( block_time ),
+                  "A BitAsset's price oracle cannot be set before the oracle hardfork" );
+       FC_ASSERT( !options.extensions.value.reference_asset_mapping.valid()
+                  || HARDFORK_ORACLE_PASSED( block_time ),
+                  "A BitAsset's reference mapping cannot be set before the oracle hardfork" );
+    }
+
+    void check_asset_options_hf_oracle( const fc::time_point_sec& block_time,
+                                        const asset_options& options )
+    {
+       FC_ASSERT( !options.extensions.value.reference_asset_mapping.valid()
+                  || HARDFORK_ORACLE_PASSED( block_time ),
+                  "An asset's reference mapping cannot be set before the oracle hardfork" );
+    }
+
+    /// A declared mapping must be internally consistent and point at a reference asset that
+    /// exists. Checked here rather than left to first use: an asset mapped to nothing would
+    /// look consumable while no oracle value could ever convert into its price.
+    void check_reference_mapping( const database& d, const bitasset_options& options )
+    {
+       const auto& m = options.extensions.value.reference_asset_mapping;
+       if( !m.valid() )
+          return;
+       m->validate();
+       FC_ASSERT( nullptr != d.find( m->reference ),
+                  "Reference asset ${r} does not exist", ("r", m->reference) );
+    }
+
+    /// The UIA-home mapping check: same rule as check_reference_mapping, for the mapping in
+    /// a non-market-issued asset's common options. Only the reference's existence is new
+    /// chain state; the amounts are self-contained in the operation.
+    void check_uia_reference_mapping( const database& d, const asset_options& options )
+    {
+       const auto& m = options.extensions.value.reference_asset_mapping;
+       if( !m.valid() )
+          return;
+       m->validate();
+       FC_ASSERT( nullptr != d.find( m->reference ),
+                  "Reference asset ${r} does not exist", ("r", m->reference) );
+    }
+
    void check_bitasset_options_hf_bsip87(const fc::time_point_sec& block_time, const bitasset_options& options)
    {
       // HF_REMOVABLE: Following hardfork check should be removable after hardfork date passes:
@@ -193,12 +260,37 @@ void_result asset_create_evaluator::do_evaluate( const asset_create_operation& o
    detail::check_asset_options_hf_1774(now, op.common_options);
    detail::check_asset_options_hf_bsip_48_75(now, op.common_options);
    detail::check_asset_options_hf_bsip81(now, op.common_options);
-   detail::check_asset_options_hf_core2281( next_maint_time, op.common_options ); // HF_REMOVABLE
-   detail::check_asset_options_hf_core2467( next_maint_time, op.common_options ); // HF_REMOVABLE
-   if( op.bitasset_opts ) {
+    detail::check_asset_options_hf_core2281( next_maint_time, op.common_options ); // HF_REMOVABLE
+    detail::check_asset_options_hf_core2467( next_maint_time, op.common_options ); // HF_REMOVABLE
+    detail::check_asset_options_hf_oracle( now, op.common_options );
+    // The UIA mapping home: a non-market-issued asset may declare what it tracks at
+    // creation, provided the reference exists. A market-issued asset must not: its mapping
+    // lives in bitasset options, and a second home would disagree about what the token
+    // tracks while get_effective_reference_mapping reads only the bitasset one.
+    detail::check_uia_reference_mapping( d, op.common_options );
+    if( op.bitasset_opts.valid() )
+       FC_ASSERT( !op.common_options.extensions.value.reference_asset_mapping.valid(),
+                  "A market-issued asset declares its reference mapping in bitasset options, "
+                  "not in asset options" );
+    if( op.bitasset_opts ) {
       detail::check_bitasset_options_hf_bsip_48_75( now, *op.bitasset_opts );
       detail::check_bitasset_options_hf_bsip74( now, *op.bitasset_opts ); // HF_REMOVABLE
       detail::check_bitasset_options_hf_bsip77( now, *op.bitasset_opts ); // HF_REMOVABLE
+      detail::check_bitasset_options_hf_oracle( now, *op.bitasset_opts );
+       // An oracle feeding a smartcoin must be quoted as <that smartcoin>/<backing asset>, and
+       // the smartcoin does not exist yet here, so there is nothing to check the orientation
+       // against. Bind with asset_update_bitasset once the asset has an id. Both binding
+       // fields are refused here: the legacy one names no series and the explicit one names
+       // a series of an oracle that cannot be validated against a nonexistent asset.
+       FC_ASSERT( !op.bitasset_opts->extensions.value.price_oracle_id.valid(),
+                  "A price oracle cannot be bound when creating an asset; use "
+                  "asset_update_bitasset once the asset exists" );
+       FC_ASSERT( !op.bitasset_opts->extensions.value.price_oracle_binding.valid(),
+                  "A price oracle cannot be bound when creating an asset; use "
+                  "asset_update_bitasset once the asset exists" );
+      // A mapping, unlike a binding, names no asset of its own: the issuer may declare it
+      // at creation, provided the reference exists.
+      detail::check_reference_mapping( d, *op.bitasset_opts );
       detail::check_bitasset_options_hf_bsip87( now, *op.bitasset_opts ); // HF_REMOVABLE
       detail::check_bitasset_opts_hf_core2467( next_maint_time, *op.bitasset_opts ); // HF_REMOVABLE
    }
@@ -342,11 +434,81 @@ void_result asset_issue_evaluator::do_evaluate( const asset_issue_operation& o )
 
    FC_ASSERT( a.can_create_new_supply(), "Can not create new supply" );
 
+   // FXR provenance lock (ISS-R9-07 / R9-I8): once an asset is pinned as
+   // some reserve's junior token, issuer-direct supply is refused -- the
+   // reserve's fxr_supply ledger mirrors this token's current_supply and
+   // only the mint door may move both sides together (an issue here would
+   // grow the balance the wind-down junior path burns, with no ledger
+   // behind it). Fail-closed, no hardfork date: the reserve index is empty
+   // until the first post-H2 mint, so this gate never fires on a legacy
+   // replay (bit*, HONEST.*, gateway UIAs) or pre-fork. Scope: pinned juniors
+   // only -- the senior PAIR's issuer-direct door is untouched below.
+   {
+      const auto& by_fxr = d.get_index_type<reserve_index>()
+                            .indices().get<by_reserve_fxr>();
+      FC_ASSERT( by_fxr.find( o.asset_to_issue.asset_id ) == by_fxr.end(),
+                 "Asset ${s} is pinned as an FXR junior by an issuance "
+                 "reserve; issuer-direct supply is refused",
+                 ("s", a.symbol) );
+   }
+
    to_account = &o.issue_to_account(d);
    FC_ASSERT( is_authorized_asset( d, *to_account, a ) );
 
    asset_dyn_data = &a.dynamic_asset_data_id(d);
    FC_ASSERT( (asset_dyn_data->current_supply + o.asset_to_issue.amount) <= a.options.max_supply );
+
+    // Pilot ceiling (AC-02, consensus-enforced): an asset bound as an H2
+    // vault pair is capped at $20,000 face total senior outstanding while
+    // the pilot phase holds. The issuer-direct path checks the same
+    // precision-scaled cap the mint door enforces, so neither
+    // supply-creating path can print past it. Inert by construction
+    // everywhere else: legacy assets (bit*, HONEST.*, gateway UIAs) never
+    // bind a vault, so the lookup misses and this gate never fires for
+    // them. No hardfork date needed: vault rows only exist post-H2, so
+    // pre-fork the index is empty. Equality admits (inclusive cap).
+    // PC-01: this door counts pending + queued restore face
+    // the same way the mint door does, because issuer-direct issue grows the
+    // token WITHOUT touching the book -- on its own it would refill a
+    // redeemed/exited pair back to the cap while the restore face still sat
+    // parked, which is exactly the halt/wind-down restore bypass. The book
+    // leg needs no counterpart here: issuer-direct flow never moves
+    // stable_supply, so `book + pending + queued` only ever grows at the
+    // mint door.
+    {
+       const auto& vault_by_pair =
+             d.get_index_type<vault_index>().indices().get<by_vault_pair>();
+       if( vault_by_pair.find( o.asset_to_issue.asset_id ) != vault_by_pair.end() )
+       {
+          // Seasoning on the second supply door (ISS-R14-16):
+          // the mint door (issuance.cpp:950) already refuses senior prints
+          // on an unseasoned pair; issuer-direct issue printing senior face
+          // on the SAME pair must clear the identical gate, or a fresh
+          // unseasoned pair bypasses BSIP-1 section-5 staging through the
+          // twin door. Fail-closed: a missing record reads incomplete.
+          FC_ASSERT( h2_seasoning_complete( d, o.asset_to_issue.asset_id ),
+                     "Pair ${p} is not seasoned: 90-day coverage with an "
+                     "independent verifier is required before issuer-direct "
+                     "issue",
+                     ("p", o.asset_to_issue.asset_id) );
+          const share_type pilot_cap = h2_issue_pilot_cap_face( a.precision );
+          share_type restore_face( 0 );
+          if( const reserve_object* reserve =
+                h2_find_reserve( d, o.asset_to_issue.asset_id ) )
+             restore_face = h2_issue_sat_add(
+                   h2_issue_pending_restore_face( d, *reserve,
+                                                  d.head_block_time() ),
+                   h2_issue_queued_restore_face( *reserve ) );
+          const share_type projected = h2_issue_sat_add(
+                h2_issue_sat_add( asset_dyn_data->current_supply, restore_face ),
+                o.asset_to_issue.amount );
+          FC_ASSERT( projected <= pilot_cap,
+                     "Pilot ceiling: post-issue token supply ${s} exceeds the "
+                     "$20,000 face pilot cap for this pair; scale-up needs a "
+                     "new binary",
+                     ("s", projected) );
+       }
+    }
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (o) ) } // GCOVR_EXCL_LINE
@@ -455,6 +617,7 @@ void_result asset_update_evaluator::do_evaluate(const asset_update_operation& o)
    detail::check_asset_options_hf_bsip81(now, o.new_options);
    detail::check_asset_options_hf_core2281( next_maint_time, o.new_options ); // HF_REMOVABLE
    detail::check_asset_options_hf_core2467( next_maint_time, o.new_options ); // HF_REMOVABLE
+   detail::check_asset_options_hf_oracle( now, o.new_options );
    detail::check_asset_update_extensions_hf_bsip_48_75( now, o.extensions.value );
 
    bool hf_bsip_48_75_passed = ( HARDFORK_BSIP_48_75_PASSED( now ) );
@@ -465,6 +628,14 @@ void_result asset_update_evaluator::do_evaluate(const asset_update_operation& o)
    auto a_copy = a;
    a_copy.options = o.new_options;
    a_copy.validate();
+
+   // The UIA mapping home may be declared or changed here, provided the reference exists.
+   // A market-issued asset must not carry it: its mapping lives in bitasset options.
+   detail::check_uia_reference_mapping( d, o.new_options );
+   if( a.is_market_issued() )
+      FC_ASSERT( !o.new_options.extensions.value.reference_asset_mapping.valid(),
+                 "A market-issued asset declares its reference mapping in bitasset options, "
+                 "not in asset options" );
 
    if( o.new_issuer )
    {
@@ -732,7 +903,9 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
    detail::check_bitasset_options_hf_bsip74( now, op.new_options ); // HF_REMOVABLE
    detail::check_bitasset_options_hf_bsip77( now, op.new_options ); // HF_REMOVABLE
    detail::check_bitasset_options_hf_bsip87( now, op.new_options ); // HF_REMOVABLE
+   detail::check_bitasset_options_hf_oracle( now, op.new_options );
    detail::check_bitasset_opts_hf_core2467( next_maint_time, op.new_options ); // HF_REMOVABLE
+   detail::check_reference_mapping( d, op.new_options );
 
    const asset_object& asset_obj = op.asset_to_update(d);
 
@@ -778,7 +951,140 @@ void_result asset_update_bitasset_evaluator::do_evaluate(const asset_update_bita
                            || ( old_mssr.valid() && *old_mssr != *new_mssr ) );
       FC_ASSERT( !mssr_changed, "No permission to update MSSR" );
    }
-   // check if BSRM will change
+   // Validate a newly bound oracle. A binding is valid when the oracle's base is the
+   // reference asset of the smartcoin's own mapping and the oracle's quote is the
+   // reference asset of the backing asset's mapping (the core asset maps 1:1 to "BTS" by
+   // protocol rule, a UIA maps through its asset-options mapping home). Checked here at
+   // bind time AND again on every read -- a mapping can change after binding, and a
+   // binding that no longer matches yields no price rather than a wrong one. A smartcoin
+   // fed by a mismatched oracle would margin-call everyone.
+   //
+   // Two binding fields, mutually exclusive: the legacy price_oracle_id names an oracle
+   // but no series (it reads series 0 and is refused against multi-series oracles -- F3),
+   // while price_oracle names {oracle, series} explicitly. The granular asserts below
+   // mirror is_smartcoin_binding_valid(); keep them in sync.
+   //
+    // Expiry (H1-EXP): only the explicit binding carries a consensus expiry height, and
+    // only it is gated on it. The legacy price_oracle_id path keeps its historical
+    // behavior byte-identical (single-series only, no expiry, read path untouched)
+    // for assets that NEVER carried an explicit binding. The H2 latch/sunset
+    // (MUSE-R01) closes the residual dodge: once an asset has carried an
+    // explicit binding (sticky explicit_oracle_bound_once flag, set on bind
+    // and on unbind, H2-bonds-gated), rebinding legacy is refused -- unbinding
+    // an explicit binding to rebind legacy no longer dodges expiry. What no
+    // path permits is extending a live explicit binding: while set it is
+    // immutable, past expiry it reads null, and no operation or chain
+    // parameter touches the height after binding.
+   const auto& new_ext = op.new_options.extensions.value;
+   const auto& old_ext = current_bitasset_data.options.extensions.value;
+   FC_ASSERT( !( new_ext.price_oracle_binding.valid() && new_ext.price_oracle_id.valid() ),
+              "Set at most one of price_oracle_binding and price_oracle_id, not both" );
+   const auto& new_oracle = new_ext.price_oracle_binding;
+   const auto& old_oracle = old_ext.price_oracle_binding;
+   const bool oracle_changed = ( ( old_oracle.valid() != new_oracle.valid() )
+                                 || ( old_oracle.valid() && *old_oracle != *new_oracle ) );
+   const auto& new_legacy_oracle = new_ext.price_oracle_id;
+   const auto& old_legacy_oracle = old_ext.price_oracle_id;
+   const bool legacy_oracle_changed = ( ( old_legacy_oracle.valid() != new_legacy_oracle.valid() )
+                                 || ( old_legacy_oracle.valid()
+                                      && *old_legacy_oracle != *new_legacy_oracle ) );
+   if( new_oracle.valid() && oracle_changed )
+   {
+      // Consensus expiry, bind-time half. Every explicit binding carries the height past
+      // which it yields no price (head block number -- no wall-clock, exact integer
+      // compare). It must be present (zero is the struct default, refused) and strictly
+      // in the future: a binding that is already expired, or one that expires in the
+      // block that binds it, never feeds.
+      FC_ASSERT( new_oracle->expiry_height > 0,
+                 "A price_oracle_binding must carry a consensus expiry height" );
+      FC_ASSERT( new_oracle->expiry_height > d.head_block_num(),
+                 "A price_oracle_binding's expiry height ${e} must be in the future "
+                 "(head block ${h})",
+                 ("e", new_oracle->expiry_height)("h", d.head_block_num()) );
+      // Immutability while bound: a live binding cannot be changed at all -- not
+      // extended, not pointed at another oracle or series. Past expiry the pair fails
+      // closed with no committee action permitted to extend, so no update path may move
+      // the height (or smuggle a fresh one in beside a new oracle id). Unbinding
+      // (clearing the field) is allowed; a rebind afterwards reads as a new first bind
+      // above -- but unbinding nulls the feed in that block, so life can never be
+      // extended seamlessly: there is always a dead-feed gap first. See the H1-EXP
+      // report for the residual and the H2 latch recommendation.
+      FC_ASSERT( !old_oracle.valid() || *new_oracle == *old_oracle,
+                 "A bound price_oracle_binding is immutable while set: unbind first "
+                 "(the feed goes null in that block); a live binding cannot be extended, "
+                 "moved, or re-pointed" );
+      const oracle_object& o = new_oracle->oracle_id(d);
+      FC_ASSERT( new_oracle->series < o.series.size(),
+                 "Oracle '${n}' declares ${s} series but the binding names series ${b}",
+                 ("n", o.name)("s", o.series.size())("b", new_oracle->series) );
+      const auto debt_mapping = get_effective_reference_mapping( d, op.asset_to_update );
+      FC_ASSERT( debt_mapping.valid(),
+                 "Cannot bind oracle '${n}': asset ${a} declares no reference mapping",
+                 ("n", o.name)("a", op.asset_to_update) );
+      FC_ASSERT( o.base == debt_mapping->reference,
+                 "Oracle '${n}' is quoted with base reference ${b}, but must be quoted against "
+                 "this asset's reference (${a})", ("n", o.name)("b", o.base)("a", debt_mapping->reference) );
+      const auto backing_mapping = get_effective_reference_mapping(
+            d, op.new_options.short_backing_asset );
+      FC_ASSERT( backing_mapping.valid(),
+                 "Cannot bind oracle '${n}': backing asset ${s} declares no reference mapping",
+                 ("n", o.name)("s", op.new_options.short_backing_asset) );
+      FC_ASSERT( o.quote == backing_mapping->reference,
+                 "Oracle '${n}' is quoted with quote reference ${q}, but must be quoted against "
+                 "the backing asset's reference (${s})",
+                 ("n", o.name)("q", o.quote)("s", backing_mapping->reference) );
+      FC_ASSERT( o.subscribers.size() < size_t( GRAPHENE_ORACLE_MAX_SUBSCRIBERS )
+                 || o.subscribers.count( op.asset_to_update ) > 0,
+                 "Oracle '${n}' already has the maximum of ${m} subscribed assets",
+                 ("n", o.name)("m", GRAPHENE_ORACLE_MAX_SUBSCRIBERS) );
+   }
+   if( new_legacy_oracle.valid() && legacy_oracle_changed )
+   {
+      const oracle_object& o = (*new_legacy_oracle)(d);
+      // A bind that names no series cannot choose: it reads series 0, so it is refused
+      // against any oracle declaring more than one series. Bind price_oracle_binding.
+      FC_ASSERT( o.series.size() == 1,
+                 "Oracle '${n}' declares ${s} series; a bind without a series choice is "
+                 "refused -- bind an explicit price_oracle_binding naming the series",
+                 ("n", o.name)("s", o.series.size()) );
+      const auto debt_mapping = get_effective_reference_mapping( d, op.asset_to_update );
+      FC_ASSERT( debt_mapping.valid(),
+                 "Cannot bind oracle '${n}': asset ${a} declares no reference mapping",
+                 ("n", o.name)("a", op.asset_to_update) );
+      FC_ASSERT( o.base == debt_mapping->reference,
+                 "Oracle '${n}' is quoted with base reference ${b}, but must be quoted against "
+                 "this asset's reference (${a})", ("n", o.name)("b", o.base)("a", debt_mapping->reference) );
+      const auto backing_mapping = get_effective_reference_mapping(
+            d, op.new_options.short_backing_asset );
+      FC_ASSERT( backing_mapping.valid(),
+                 "Cannot bind oracle '${n}': backing asset ${s} declares no reference mapping",
+                 ("n", o.name)("s", op.new_options.short_backing_asset) );
+      FC_ASSERT( o.quote == backing_mapping->reference,
+                 "Oracle '${n}' is quoted with quote reference ${q}, but must be quoted against "
+                 "the backing asset's reference (${s})",
+                 ("n", o.name)("q", o.quote)("s", backing_mapping->reference) );
+       FC_ASSERT( o.subscribers.size() < size_t( GRAPHENE_ORACLE_MAX_SUBSCRIBERS )
+                  || o.subscribers.count( op.asset_to_update ) > 0,
+                  "Oracle '${n}' already has the maximum of ${m} subscribed assets",
+                  ("n", o.name)("m", GRAPHENE_ORACLE_MAX_SUBSCRIBERS) );
+       // H2 latch/sunset (MUSE-R01): once an asset has carried an explicit
+       // price_oracle_binding, the expiry-free legacy path closes for it
+       // permanently -- unbinding explicit to rebind legacy would dodge the
+       // consensus expiry. Both the sticky latch (binds post-dating it) and
+       // a currently-live explicit binding (binds pre-dating the latch,
+       // replaced in this same op) refuse. Never-explicit assets bind legacy
+       // exactly as before. Gated on the H2 bonds leg: pre-leg history
+       // replays identically (no latch state can exist there).
+       if( HARDFORK_H2_BONDS_PASSED( d.head_block_time() ) )
+          FC_ASSERT( ( !old_ext.explicit_oracle_bound_once.valid()
+                       || !*old_ext.explicit_oracle_bound_once )
+                     && !old_ext.price_oracle_binding.valid(),
+                     "Asset carried an explicit price_oracle_binding; legacy "
+                     "price_oracle_id rebind refused (H2 latch/sunset: the "
+                     "consensus expiry cannot be dodged)" );
+    }
+
+    // check if BSRM will change
    const auto old_bsrm = current_bitasset_data.get_black_swan_response_method();
    const auto new_bsrm = op.new_options.get_black_swan_response_method();
    if( old_bsrm != new_bsrm )
@@ -921,6 +1227,19 @@ static bool update_bitasset_object_options(
    if( op.new_options.minimum_feeds != bdo.options.minimum_feeds )
       should_update_feeds = true;
 
+   // A changed reference mapping re-points what the asset tracks: any oracle binding must
+   // be re-checked against the new mapping NOW, not at the next publish. For a bound
+   // asset the recompute fails the binding closed (null feed) when the mapping drifted;
+   // without this the stale price would stand until something else happened to refresh it.
+   {
+      const auto& old_map = bdo.options.extensions.value.reference_asset_mapping;
+      const auto& new_map = op.new_options.extensions.value.reference_asset_mapping;
+      const bool mapping_changed = ( old_map.valid() != new_map.valid() )
+            || ( old_map.valid() && *old_map != *new_map );
+      if( mapping_changed )
+         should_update_feeds = true;
+   }
+
    // after hardfork core-868-890, we also should call update_bitasset_current_feed if the feed_lifetime_sec changed
    if( after_hf_core_868_890
          && op.new_options.feed_lifetime_sec != bdo.options.feed_lifetime_sec )
@@ -1029,12 +1348,68 @@ void_result asset_update_bitasset_evaluator::do_apply(const asset_update_bitasse
       auto& db_conn = db();
       bool to_check_call_orders = false;
 
+       // Captured before the modify below overwrites the options. Either binding field
+       // resolves to an effective oracle id; the binding changed when either field did
+       // (including a series change on the same oracle, which must refresh the feed even
+       // though the subscriber set itself is unchanged). The element compare now covers
+       // the consensus expiry height too (price_oracle::operator==): an expiry change
+       // counts as a binding change here -- but do_evaluate above refuses any change to
+       // a live binding, so apply only ever sees identical no-ops, first binds, and
+       // unbinds, never an in-place extension.
+       const auto& old_ext = bitasset_to_update->options.extensions.value;
+       const auto& new_ext = op.new_options.extensions.value;
+       optional<oracle_id_type> old_eff;
+       if( old_ext.price_oracle_binding.valid() )
+          old_eff = old_ext.price_oracle_binding->oracle_id;
+       else if( old_ext.price_oracle_id.valid() )
+          old_eff = *old_ext.price_oracle_id;
+       optional<oracle_id_type> new_eff;
+       if( new_ext.price_oracle_binding.valid() )
+          new_eff = new_ext.price_oracle_binding->oracle_id;
+       else if( new_ext.price_oracle_id.valid() )
+          new_eff = *new_ext.price_oracle_id;
+       const bool binding_changed = ( old_ext.price_oracle_binding != new_ext.price_oracle_binding )
+             || ( old_ext.price_oracle_id != new_ext.price_oracle_id );
+       // H2 latch/sunset input (MUSE-R01): an explicit binding observed on
+       // either side latches the asset once the H2 bonds leg passes. Set on
+       // first bind AND on unbind (an unbind observes a pre-latch bind whose
+       // set predates the flag) so the dodge sequence always trips it.
+       const bool latch_now = HARDFORK_H2_BONDS_PASSED( db_conn.head_block_time() )
+             && ( old_ext.price_oracle_binding.valid()
+                  || new_ext.price_oracle_binding.valid() );
+
       db_conn.modify( *bitasset_to_update,
-                      [&op, &to_check_call_orders, &db_conn, this]( asset_bitasset_data_object& bdo )
+                      [&op, &to_check_call_orders, &db_conn, this, latch_now]( asset_bitasset_data_object& bdo )
       {
          to_check_call_orders = update_bitasset_object_options( op, db_conn, bdo, *asset_to_update,
                                                                 update_feeds_due_to_bsrm_change );
+         // Monotonic: once latched, no op clears it (an issuer-supplied
+         // options copy with the flag cleared still latches here).
+         if( latch_now )
+            bdo.options.extensions.value.explicit_oracle_bound_once = true;
       });
+
+       if( binding_changed )
+       {
+          // Keep the oracle's subscriber set in step. It exists so that publishing can refresh
+          // bound assets without walking every bitasset on the chain, and so that deleting an
+          // oracle something depends on can be refused in constant time.
+          if( old_eff.valid() && old_eff != new_eff )
+          {
+             const oracle_object* old_obj = db_conn.find( *old_eff );
+             if( nullptr != old_obj )
+                db_conn.modify( *old_obj, [&op]( oracle_object& oo )
+                                { oo.subscribers.erase( op.asset_to_update ); } );
+          }
+          if( new_eff.valid() && old_eff != new_eff )
+             db_conn.modify( (*new_eff)(db_conn), [&op]( oracle_object& oo )
+                             { oo.subscribers.insert( op.asset_to_update ); } );
+
+          // The price source itself changed, so the feed has to be recomputed now rather than
+          // at the next publish -- and the new price may put existing positions under water.
+          db_conn.update_bitasset_current_feed( *bitasset_to_update );
+          to_check_call_orders = true;
+       }
 
       if( to_check_call_orders )
          // Process margin calls, allow black swan, not for a new limit order

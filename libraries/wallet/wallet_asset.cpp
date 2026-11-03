@@ -218,6 +218,126 @@ namespace graphene { namespace wallet { namespace detail {
       return sign_transaction( tx, broadcast );
    } FC_CAPTURE_AND_RETHROW( (publishing_account)(symbol)(feed)(broadcast) ) }
 
+    signed_transaction wallet_api_impl::create_reference_asset( string creator, string symbol,
+          uint8_t precision, string description, bool broadcast )
+    { try {
+       // Fail-closed twice: tx.validate() below refuses a bad symbol /
+       // precision (including the BTS-precision rule) before anything is
+       // signed, and consensus refuses pre-hardfork and duplicate symbols
+       // at apply time. The wallet sets no fee override: the fee schedule
+       // (500 BTS + data fee) prices the state (one bounded object).
+       reference_asset_create_operation op;
+       op.creator     = get_account_id( creator );
+       op.symbol      = symbol;
+       op.precision   = precision;
+       op.description = description;
+
+       signed_transaction tx;
+       tx.operations.push_back( op );
+       set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+       tx.validate();
+
+       return sign_transaction( tx, broadcast );
+    } FC_CAPTURE_AND_RETHROW( (creator)(symbol)(precision)(broadcast) ) }
+
+    oracle_object wallet_api_impl::get_oracle( const string& name_or_id )const
+   { try {
+      // Names are the way people refer to oracles, so try that first; fall back to an id so
+      // that anything the API returned can be pasted straight back in.
+      auto by_name = _remote_db->get_oracle_by_name( name_or_id );
+      if( by_name.valid() )
+         return *by_name;
+
+      FC_ASSERT( !name_or_id.empty() && ( isdigit( name_or_id[0] ) || name_or_id.find('.') != string::npos ),
+                 "No oracle named '${n}' exists", ("n", name_or_id) );
+      auto found = _remote_db->get_oracles( { fc::variant( name_or_id, 1 ).as<oracle_id_type>(1) } );
+      FC_ASSERT( !found.empty() && found[0].valid(), "No oracle '${n}' exists", ("n", name_or_id) );
+      return *found[0];
+   } FC_CAPTURE_AND_RETHROW( (name_or_id) ) }
+
+   signed_transaction wallet_api_impl::create_oracle( string owner, string name, string description,
+         string base_symbol, string quote_symbol, vector<oracle_series> series,
+         oracle_options options, bool broadcast )
+   { try {
+      // Reference assets live in their own namespace: these are reference symbols, not
+      // on-chain asset symbols, so they resolve through the reference registry.
+      auto base  = _remote_db->get_reference_asset_by_symbol( base_symbol );
+      auto quote = _remote_db->get_reference_asset_by_symbol( quote_symbol );
+      FC_ASSERT( base.valid(),  "No reference asset with symbol '${s}' exists", ("s", base_symbol) );
+      FC_ASSERT( quote.valid(), "No reference asset with symbol '${s}' exists", ("s", quote_symbol) );
+
+      oracle_create_operation op;
+      op.owner       = get_account_id( owner );
+      op.name        = name;
+      op.description = description;
+      op.base        = base->get_id();
+      op.quote       = quote->get_id();
+      op.series      = series;
+      op.options     = options;
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      return sign_transaction( tx, broadcast );
+   } FC_CAPTURE_AND_RETHROW( (owner)(name)(base_symbol)(quote_symbol)(broadcast) ) }
+
+   signed_transaction wallet_api_impl::update_oracle( string owner, string name_or_id,
+         optional<string> new_description, optional<oracle_options> new_options, bool broadcast )
+   { try {
+      oracle_update_operation op;
+      op.owner           = get_account_id( owner );
+      op.oracle_id       = get_oracle( name_or_id ).get_id();
+      op.new_description = new_description;
+      op.new_options     = new_options;
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      return sign_transaction( tx, broadcast );
+   } FC_CAPTURE_AND_RETHROW( (owner)(name_or_id)(broadcast) ) }
+
+   signed_transaction wallet_api_impl::delete_oracle( string owner, string name_or_id, bool broadcast )
+   { try {
+      oracle_delete_operation op;
+      op.owner     = get_account_id( owner );
+      op.oracle_id = get_oracle( name_or_id ).get_id();
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      return sign_transaction( tx, broadcast );
+   } FC_CAPTURE_AND_RETHROW( (owner)(name_or_id)(broadcast) ) }
+
+   signed_transaction wallet_api_impl::publish_oracle_value( string producer, string name_or_id,
+         vector<oracle_value> values, bool broadcast )
+   { try {
+      const oracle_object o = get_oracle( name_or_id );
+
+      // Checked here as well as on chain so a wrong-arity submission fails locally, with a
+      // message naming the oracle, instead of coming back as a rejected transaction.
+      FC_ASSERT( values.size() == o.series.size(),
+                 "Oracle '${n}' declares ${s} series but the submission carries ${v} values",
+                 ("n", o.name)("s", o.series.size())("v", values.size()) );
+
+      oracle_publish_operation op;
+      op.producer  = get_account_id( producer );
+      op.oracle_id = o.get_id();
+      op.values    = values;
+
+      signed_transaction tx;
+      tx.operations.push_back( op );
+      set_operation_fees( tx, _remote_db->get_global_properties().parameters.get_current_fees() );
+      tx.validate();
+
+      return sign_transaction( tx, broadcast );
+   } FC_CAPTURE_AND_RETHROW( (producer)(name_or_id)(values)(broadcast) ) }
+
    signed_transaction wallet_api_impl::fund_asset_fee_pool(string from, string symbol, string amount,
          bool broadcast /* = false */)
    { try {

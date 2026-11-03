@@ -29,6 +29,8 @@
 #include <graphene/chain/credit_offer_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
 #include <graphene/chain/htlc_object.hpp>
 #include <graphene/chain/market_object.hpp>
 #include <graphene/chain/proposal_object.hpp>
@@ -300,15 +302,100 @@ void database::update_bitasset_current_feed( const asset_bitasset_data_object& b
    }
 
    const auto& head_time = head_block_time();
+   // Consensus expiry is a head block NUMBER, never a time: head_block_num() is the
+   // only clock on this path (consensus law: no wall-clock, exact integer compare).
+   const uint32_t head_num = head_block_num();
+
+    // Resolve a bound oracle before entering modify(), which cannot look objects up. The
+    // binding fields can only be set after HARDFORK_ORACLE (see the asset_update_bitasset
+    // evaluator), so for every asset on chain today both stay absent and the legacy path
+    // below is unchanged. The explicit price_oracle_binding names {oracle, series}; the
+    // legacy price_oracle_id names an oracle but no series and reads series 0 (bind-time
+    // refused against multi-series oracles, so index 0 always exists for it).
+    const auto& bound_ext = bitasset.options.extensions.value;
+    optional<oracle_id_type> bound_oracle_id;
+    uint16_t bound_series = 0;
+    // An expired explicit binding yields no price, exactly as a drifted one: the body
+    // below is skipped and the feed goes null, which blocks new debt through the
+    // null-settlement-price rule while existing positions keep their last-good delayed
+    // behavior. A legacy (price_oracle_id) binding carries no expiry and is unaffected;
+    // an unbound asset never enters the branch at all (byte-identical legacy path).
+    const bool bound_expired = is_price_oracle_binding_expired(
+          bound_ext.price_oracle_binding, head_num );
+    if( bound_ext.price_oracle_binding.valid() )
+    {
+       bound_oracle_id = bound_ext.price_oracle_binding->oracle_id;
+       bound_series    = bound_ext.price_oracle_binding->series;
+    }
+    else if( bound_ext.price_oracle_id.valid() )
+       bound_oracle_id = *bound_ext.price_oracle_id;
+    const bool oracle_bound = bound_oracle_id.valid();
+   optional<price> oracle_value;
+   // Defaults to head time so an absent value still produces a feed stamped "now", which is
+   // the same unusable-but-current state the legacy path reaches with too few publishers.
+   time_point_sec oracle_value_time = head_time;
+     if( oracle_bound )
+     {
+        const oracle_object* o = find( *bound_oracle_id );
+        // A bound oracle cannot be deleted while a live binding references it
+        // (oracle_delete refuses, pruning only stale entries), but read defensively: a
+        // missing oracle means "no value", never a stale or invented one.
+        //
+        // Bound consumers read the GUARDED value (Track A guards, new-pairs-only):
+        // the raw aggregate after the committee-owned delay and the per-interval rate
+        // limit. While frozen, or while nothing ripe is available, or past the value
+        // lifetime, the read yields no price: the smartcoin behaves as it does when
+        // its feeds expire. It fails closed. Legacy (unbound) assets never reach this
+        // branch; their path below is byte-identical.
+        //
+        // Freshness is checked HERE rather than trusted from consumed_value, because that
+        // field is only recomputed when a producer publishes or the owner updates. An
+        // oracle whose producers all stopped keeps its last aggregate for ever, so asking
+        // is_submission_live against the consumed timestamp is the only thing that
+        // distinguishes a current price from one that expired months ago.
+        //
+        // The binding match is re-checked HERE as well, with the same predicate the bind
+        // time uses (is_smartcoin_binding_valid), because a mapping can change after
+        // binding. A binding that no longer matches -- or names a series the oracle does
+        // not declare -- yields no price: the smartcoin behaves as it does when its feeds
+        // expire. It fails closed. Past its consensus expiry height an explicit binding
+        // joins that set (same null, same fail-closed shape); the legacy binding has no
+        // expiry to pass and an unbound asset never reaches this predicate.
+        if( nullptr != o && !o->options.frozen
+            && !bound_expired
+            && o->consumed_value.valid()
+            && o->is_submission_live( o->consumed_value_time, head_time )
+            && bound_series < o->series.size()
+            && o->consumed_value->size() == o->series.size() )
+        {
+           const auto debt_mapping = get_effective_reference_mapping( *this, bitasset.asset_id );
+           const auto backing_mapping = get_effective_reference_mapping(
+                 *this, bitasset.options.short_backing_asset );
+           if( debt_mapping.valid() && backing_mapping.valid()
+               && is_smartcoin_binding_valid( *o, bound_series,
+                                              *debt_mapping, *backing_mapping ) )
+           {
+              oracle_value = convert_oracle_value_to_price(
+                    o->consumed_value->at( bound_series ), *debt_mapping, bitasset.asset_id,
+                    *backing_mapping, bitasset.options.short_backing_asset,
+                    o->series[ bound_series ].get_rounding() );
+              oracle_value_time = o->consumed_value_time;
+           }
+        }
+     }
 
    // We need to update the database
-   modify( bitasset, [this, skip_median_update, &head_time, &new_current_feed_price, &bsrm]
+   modify( bitasset, [this, skip_median_update, &head_time, &new_current_feed_price, &bsrm,
+                      oracle_bound, &oracle_value, oracle_value_time]
                      ( asset_bitasset_data_object& abdo )
    {
       if( !skip_median_update )
       {
          const auto& maint_time = get_dynamic_global_properties().next_maintenance_time;
-         abdo.update_median_feeds( head_time, maint_time );
+         if( oracle_bound )
+            abdo.update_feed_from_oracle( oracle_value_time, oracle_value );
+         else
+            abdo.update_median_feeds( head_time, maint_time );
          abdo.current_feed = abdo.median_feed;
          if( bsrm_type::no_settlement == bsrm || bsrm_type::individual_settlement_to_fund == bsrm )
             new_current_feed_price = get_derived_current_feed_price( *this, abdo );

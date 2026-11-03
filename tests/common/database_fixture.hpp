@@ -224,6 +224,15 @@ struct database_fixture_base {
    bool bsip77 = false;
    bool hf2595 = false;
 
+   // GOV-R9-01 test support: members seated via create_and_seat_committee_member
+   // are re-appended to active_committee_members after every maintenance block,
+   // because HF2262 removed liquid-BTS voting power and HF2103 zeroes stale
+   // votes — no fixture-created member can win a real stake election against
+   // the unvoted genesis seats. The re-seat hook keeps the fixture's committee
+   // actors elected without stamping supply-affecting state that
+   // verify_asset_supplies cross-checks against real orders/tickets.
+   std::vector<chain::committee_member_id_type> seated_committee_members_;
+
    string es_index_prefix; ///< Index prefix for elasticsearch plugin
    string es_obj_index_prefix; ///< Index prefix for es_objects plugin
 
@@ -373,6 +382,12 @@ struct database_fixture_base {
       );
 
    const committee_member_object& create_committee_member( const account_object& owner );
+   /// GOV-R9-01 test support: register @p owner and seat it on
+   /// active_committee_members (the set update_active_committee_members()
+   /// yields when the member carries stake). Use this for committee ACTORS
+   /// that must genuinely hold a seat; keep create_committee_member for tests
+   /// that need an UNSEATED permissionless registrant (the sybil case).
+   const committee_member_object& create_and_seat_committee_member( const account_object& owner );
    const witness_object& create_witness(account_id_type owner,
                                         const fc::ecc::private_key& signing_private_key = generate_private_key("null_key"),
                                         uint32_t skip_flags = ~0);

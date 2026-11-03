@@ -29,6 +29,7 @@
 #include <graphene/app/util.hpp>
 #include <graphene/chain/get_config.hpp>
 #include <graphene/chain/hardfork.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
 #include <graphene/protocol/pts_address.hpp>
 #include <graphene/protocol/restriction_predicate.hpp>
 
@@ -2074,6 +2075,99 @@ vector<credit_offer_object> database_api::get_credit_offers_by_owner(
                                 credit_offer_id_type
                                >( &application_options::api_limit_get_credit_offers,
                                   idx, limit, start_id, owner );
+}
+
+//////////////////////////////////////////////////////////////////////
+//                                                                  //
+// Oracles                                                          //
+//                                                                  //
+//////////////////////////////////////////////////////////////////////
+
+vector<optional<oracle_object>> database_api::get_oracles(
+            const vector<oracle_id_type>& oracle_ids )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_id>();
+   vector<optional<oracle_object>> result;
+   result.reserve( oracle_ids.size() );
+   // An unknown id yields an empty slot rather than an error: callers batch ids, and one bad
+   // one should not discard the whole answer.
+   std::transform( oracle_ids.begin(), oracle_ids.end(), std::back_inserter(result),
+                   [&idx]( oracle_id_type id ) -> optional<oracle_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<oracle_object> database_api::get_oracle_by_name( const string& name )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_oracle_name>();
+   auto itr = idx.find( name );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
+vector<oracle_object> database_api::list_oracles(
+            const optional<uint32_t>& limit,
+            const optional<oracle_id_type>& start_id )const
+{
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_id>();
+   return my->get_objects_by_x< oracle_object,
+                                oracle_id_type
+                               >( &application_options::api_limit_get_oracles,
+                                  idx, limit, start_id );
+}
+
+vector<oracle_object> database_api::get_oracles_by_owner(
+            const std::string& account_name_or_id,
+            const optional<uint32_t>& limit,
+            const optional<oracle_id_type>& start_id )const
+{
+   account_id_type owner = my->get_account_from_string(account_name_or_id)->get_id();
+   const auto& idx = my->_db.get_index_type<oracle_index>().indices().get<by_owner>();
+   return my->get_objects_by_x< oracle_object,
+                                oracle_id_type
+                               >( &application_options::api_limit_get_oracles,
+                                  idx, limit, start_id, owner );
+}
+
+vector<optional<reference_asset_object>> database_api::get_reference_assets(
+            const vector<reference_asset_id_type>& reference_ids )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_id>();
+   vector<optional<reference_asset_object>> result;
+   result.reserve( reference_ids.size() );
+   std::transform( reference_ids.begin(), reference_ids.end(), std::back_inserter(result),
+                   [&idx]( reference_asset_id_type id ) -> optional<reference_asset_object> {
+      auto itr = idx.find( object_id_type( id ) );
+      if( itr == idx.end() )
+         return {};
+      return *itr;
+   } );
+   return result;
+}
+
+optional<reference_asset_object> database_api::get_reference_asset_by_symbol(
+            const string& symbol )const
+{
+   const auto& idx = my->_db.get_index_type<reference_asset_index>().indices().get<by_reference_symbol>();
+   auto itr = idx.find( symbol );
+   if( itr == idx.end() )
+      return {};
+   return *itr;
+}
+
+fc::optional<uint64_t> database_api::get_h2_qualified_depth(
+            const std::string& asset_symbol_or_id )const
+{
+   // Thin read-only alias of h2_issue_qualified_depth (the F1 cap's depth
+   // leg): pool-observe tripwire inputs, no state touched, no gate needed
+   // (pre-pool reads empty; unqualified reads zero and the door refuses).
+   asset_id_type pair = my->get_asset_from_string( asset_symbol_or_id )->get_id();
+   return h2_issue_qualified_depth( my->_db, pair );
 }
 
 vector<credit_offer_object> database_api::get_credit_offers_by_asset(

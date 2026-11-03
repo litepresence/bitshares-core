@@ -1,0 +1,17 @@
+// Stealth transfers: ring-signature + Bulletproofs+ private transfers.
+// The date below is a PLACEHOLDER; the real activation date is set by the
+// committee when the feature is scheduled for a particular network.
+//
+// CORRECTION 2026-10-07: this header previously said "Placeholder activation
+// flag only -- gates nothing yet." That was FALSE and dangerously reassuring.
+// The flag gates the entire stealth feature: 18 direct HARDFORK_STEALTH_PASSED
+// sites plus 22 stealth_passed() call sites (the evaluator wrapper) gate ops,
+// objects, shared fee routing, the maintenance sweeps, the fee schedule, and the
+// proposal-operation hardfork visitor. Before it passes, every stealth-gated
+// path stays rejected, so no node can produce a block a pre-fork node cannot
+// validate -- that fail-closed property is exactly why the flag is load-bearing.
+// Do not read "placeholder" as "inert".
+#ifndef HARDFORK_STEALTH_TIME
+#define HARDFORK_STEALTH_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_STEALTH_PASSED(now) (now >= HARDFORK_STEALTH_TIME)
+#endif

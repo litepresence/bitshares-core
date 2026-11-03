@@ -34,6 +34,11 @@
 #include <graphene/chain/committee_member_object.hpp>
 #include <graphene/chain/confidential_object.hpp>
 #include <graphene/chain/credit_offer_object.hpp>
+#include <graphene/chain/oracle_object.hpp>
+#include <graphene/chain/reference_asset_object.hpp>
+#include <graphene/chain/vault_object.hpp>
+#include <graphene/chain/bond_object.hpp>
+#include <graphene/chain/challenge_object.hpp>
 #include <graphene/chain/fba_object.hpp>
 #include <graphene/chain/global_property_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
@@ -59,6 +64,20 @@
 #include <graphene/chain/committee_member_evaluator.hpp>
 #include <graphene/chain/confidential_evaluator.hpp>
 #include <graphene/chain/credit_offer_evaluator.hpp>
+#include <graphene/chain/oracle_evaluator.hpp>
+#include <graphene/chain/vault_evaluator.hpp>
+#include <graphene/chain/bond_evaluator.hpp>
+#include <graphene/chain/challenge_evaluator.hpp>
+#include <graphene/chain/vault_lifecycle_evaluator.hpp>
+#include <graphene/chain/accs_evaluator.hpp>
+#include <graphene/chain/accs_object.hpp>
+#include <graphene/chain/h2_economics_evaluator.hpp>
+#include <graphene/chain/h2_economics_object.hpp>
+#include <graphene/chain/issuance_evaluator.hpp>
+#include <graphene/chain/issuance_object.hpp>
+#include <graphene/chain/seasoning_evaluator.hpp>
+#include <graphene/chain/seasoning_object.hpp>
+#include <graphene/chain/winddown_object.hpp>
 #include <graphene/chain/custom_evaluator.hpp>
 #include <graphene/chain/liquidity_pool_evaluator.hpp>
 #include <graphene/chain/market_evaluator.hpp>
@@ -149,6 +168,40 @@ void database::initialize_evaluators()
    register_evaluator<credit_offer_accept_evaluator>();
    register_evaluator<credit_deal_repay_evaluator>();
    register_evaluator<credit_deal_update_evaluator>();
+   register_evaluator<oracle_create_evaluator>();
+   register_evaluator<oracle_update_evaluator>();
+   register_evaluator<oracle_delete_evaluator>();
+   register_evaluator<oracle_publish_evaluator>();
+   register_evaluator<reference_asset_create_evaluator>();
+   register_evaluator<vault_register_evaluator>();
+   register_evaluator<vault_bond_lock_evaluator>();
+   register_evaluator<oracle_bond_lock_evaluator>();
+   register_evaluator<oracle_bond_release_evaluator>();
+   register_evaluator<vault_challenge_evaluator>();
+   register_evaluator<oracle_dispute_evaluator>();
+   register_evaluator<oracle_dispute_escalate_evaluator>();
+   register_evaluator<challenge_vote_evaluator>();
+   register_evaluator<vault_rotate_evaluator>();
+   register_evaluator<vault_bond_release_evaluator>();
+   register_evaluator<vault_resolve_evaluator>();
+   register_evaluator<oracle_foreign_publish_evaluator>();
+   register_evaluator<accs_declare_gateway_evaluator>();
+   register_evaluator<accs_deactivate_gateway_evaluator>();
+   register_evaluator<accs_create_offer_evaluator>();
+   register_evaluator<accs_cancel_offer_evaluator>();
+   register_evaluator<accs_match_offer_evaluator>();
+   register_evaluator<accs_fulfill_evaluator>();
+   register_evaluator<accs_claim_griefing_evaluator>();
+   register_evaluator<pair_freeze_evaluator>();
+   register_evaluator<winddown_claim_evaluator>();
+   register_evaluator<oracle_fallback_set_evaluator>();
+   register_evaluator<oracle_unfreeze_evaluator>();
+   register_evaluator<seasoning_verify_evaluator>();
+   register_evaluator<hybrid_mint_evaluator>();
+   register_evaluator<hybrid_redeem_evaluator>();
+   register_evaluator<offset_deposit_evaluator>();
+   register_evaluator<offset_claim_evaluator>();
+   register_evaluator<issuance_exit_request_evaluator>();
 }
 
 void database::initialize_indexes()
@@ -178,6 +231,26 @@ void database::initialize_indexes()
    add_index< primary_index<samet_fund_index> >();
    add_index< primary_index<credit_offer_index> >();
    add_index< primary_index<credit_deal_index> >();
+   add_index< primary_index<oracle_index> >();
+   add_index< primary_index<reference_asset_index> >();
+   add_index< primary_index<vault_index> >();
+   add_index< primary_index<vault_bond_index> >();
+   add_index< primary_index<producer_bond_index> >();
+   add_index< primary_index<vault_challenge_index> >();
+   add_index< primary_index<oracle_dispute_index> >();
+   add_index< primary_index<winddown_vault_index> >();
+   add_index< primary_index<winddown_claim_index> >();
+   add_index< primary_index<reward_pool_index> >();
+   add_index< primary_index<guard_state_index> >();
+   add_index< primary_index<tripwire_index> >();
+   add_index< primary_index<accs_gateway_index> >();
+   add_index< primary_index<accs_orderbook_index> >();
+   add_index< primary_index<accs_offer_index> >();
+   add_index< primary_index<accs_consumed_tx_index> >();
+   add_index< primary_index<recovery_state_index> >();
+   add_index< primary_index<seasoning_record_index> >();
+   add_index< primary_index<reserve_index> >();
+   add_index< primary_index<offset_pool_index> >();
 
    //Implementation object indexes
    add_index< primary_index<transaction_index                             > >();

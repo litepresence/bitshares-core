@@ -637,6 +637,19 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
                  "per_output_openings required for proof_version >= V3" );
       FC_ASSERT( o.per_output_openings.size() == o.outputs.size(),
                  "per_output_openings must have one entry per output" );
+      // REPAIR-11 (G1-05-C): enforce single-key owner shape at stealth
+      // output creation. A multi-key owner would orphan their balance
+      // because spend_auth cross-checks (REPAIR-10) require a single
+      // key_auth equal to member_owner_keys[i]. Fail-closed here so no
+      // V3 output can ever be created with an authority the spend_auth
+      // leg cannot bind to.
+      for( const auto& out : o.outputs )
+      {
+         FC_ASSERT( out.owner.num_auths() == 1 &&
+                    out.owner.weight_threshold == 1 &&
+                    out.owner.key_auths.size() == 1,
+                     "V3 stealth output owner must be single-key" );
+      }
    }
    else
    {

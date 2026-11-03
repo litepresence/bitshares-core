@@ -834,8 +834,35 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
          FC_ASSERT( !in.spend_auth.empty(), "spend_auth required for V3" );
          std::string sa_err;
          FC_ASSERT( stealth_verify_spend_auth( o.proof_version, in.member_owner_keys,
-                                              in.spend_auth, msg, sa_err ),
+                                               in.spend_auth, msg, sa_err ),
                     "Spend auth does not verify: ${e}", ("e", sa_err) );
+         // REPAIR-10 (CLS-15-N-V): ViewKey two-key composite binding.
+         // Cross-check that member_owner_keys[i] matches the actual owner of
+         // the blinded balance at ring[i]. Without this, a view-key holder
+         // who knows only b of ring member j can construct a valid V3 spend
+         // with a self-chosen member_owner_keys list, forging the spend_auth
+         // leg. Binding each member_owner_keys[i] to the real owner of
+         // ring[i] forces the spend_auth ring signature to prove knowledge
+         // of the spend scalar for a member whose owner key matches, closing
+         // the index-splitting attack.
+         const auto& bbi_idx = d.get_index_type<blinded_balance_index>()
+                                  .indices().get<by_commitment>();
+         for( size_t i = 0; i < in.ring.size(); ++i )
+         {
+            const auto b_itr = bbi_idx.find( in.ring[i] );
+            FC_ASSERT( b_itr != bbi_idx.end(),
+                       "Ring member ${i} commitment is not a known blinded balance",
+                       ("i", i) );
+            const authority& owner_auth = b_itr->owner;
+            FC_ASSERT( owner_auth.num_auths() == 1 &&
+                       owner_auth.weight_threshold == 1 &&
+                       owner_auth.key_auths.size() == 1,
+                       "Ring member ${i} owner is not single-key",
+                       ("i", i) );
+            FC_ASSERT( owner_auth.key_auths.begin()->first == in.member_owner_keys[i],
+                       "Ring member ${i} owner key does not match member_owner_keys[${i}]",
+                       ("i", i) );
+         }
       }
       else
       {

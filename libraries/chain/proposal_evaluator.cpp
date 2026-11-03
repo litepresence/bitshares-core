@@ -266,8 +266,13 @@ struct proposal_operation_hardfork_visitor
    void operator()(const graphene::chain::ticket_update_operation&) const {
       FC_ASSERT( HARDFORK_CORE_2103_PASSED(block_time), "Not allowed until hardfork 2103" );
    }
-   void operator()(const graphene::chain::liquidity_pool_create_operation&) const {
+   void operator()(const graphene::chain::liquidity_pool_create_operation& op) const {
       FC_ASSERT( HARDFORK_LIQUIDITY_POOL_PASSED(block_time), "Not allowed until the LP hardfork" );
+      uint8_t _curve_type = 0;
+      if( op.extensions.value.curve_type.valid() )
+         _curve_type = *op.extensions.value.curve_type;
+      if( _curve_type == 2 )
+         FC_ASSERT( HARDFORK_AB_POOL_PASSED(block_time), "BSIP-7 hardfork has not passed" );
    }
    void operator()(const graphene::chain::liquidity_pool_delete_operation&) const {
       FC_ASSERT( HARDFORK_LIQUIDITY_POOL_PASSED(block_time), "Not allowed until the LP hardfork" );

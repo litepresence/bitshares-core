@@ -33,6 +33,8 @@
 
 #include <graphene/protocol/liquidity_pool.hpp>
 
+#include <graphene/chain/abpool.hpp>
+
 namespace graphene { namespace chain {
 
 void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_create_operation& op)
@@ -58,6 +60,26 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    FC_ASSERT( _share_asset->dynamic_data(d).current_supply == 0,
               "Current supply of the share asset needs to be zero" );
 
+   uint8_t _curve_type = 0;
+   if( op.extensions.value.curve_type.valid() )
+      _curve_type = *op.extensions.value.curve_type;
+   if( _curve_type == 2 )
+   {
+      FC_ASSERT( HARDFORK_AB_POOL_PASSED( d.head_block_time() ), "BSIP-7 hardfork has not passed" );
+      FC_ASSERT( op.extensions.value.ab_weight_num.valid() && *op.extensions.value.ab_weight_num > 0
+                 && op.extensions.value.ab_weight_den.valid() && *op.extensions.value.ab_weight_den > 0,
+                 "AB pool requires positive weight" );
+      FC_ASSERT( *op.extensions.value.ab_weight_num < *op.extensions.value.ab_weight_den,
+                 "AB pool weight must be in (0, 1)" );
+      FC_ASSERT( op.extensions.value.ab_p_low.valid() && *op.extensions.value.ab_p_low > 0
+                 && op.extensions.value.ab_p_high.valid() && *op.extensions.value.ab_p_high > *op.extensions.value.ab_p_low,
+                 "AB pool requires valid price bounds" );
+   }
+   else
+   {
+      FC_ASSERT( _curve_type == 0, "Unknown curve type" );
+   }
+
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
@@ -66,12 +88,31 @@ generic_operation_result liquidity_pool_create_evaluator::do_apply(const liquidi
    database& d = db();
    generic_operation_result result;
 
-   const auto& new_liquidity_pool_object = d.create<liquidity_pool_object>([&op](liquidity_pool_object& obj){
+   uint8_t _ct = 0;
+   if( op.extensions.value.curve_type.valid() ) _ct = *op.extensions.value.curve_type;
+   uint64_t _wn = 0, _wd = 0, _pl = 0, _ph = 0;
+   if( op.extensions.value.ab_weight_num.valid() ) _wn = *op.extensions.value.ab_weight_num;
+   if( op.extensions.value.ab_weight_den.valid() ) _wd = *op.extensions.value.ab_weight_den;
+   if( op.extensions.value.ab_p_low.valid() ) _pl = *op.extensions.value.ab_p_low;
+   if( op.extensions.value.ab_p_high.valid() ) _ph = *op.extensions.value.ab_p_high;
+
+   const auto& new_liquidity_pool_object = d.create<liquidity_pool_object>([&op,_ct,_wn,_wd,_pl,_ph](liquidity_pool_object& obj){
       obj.asset_a = op.asset_a;
       obj.asset_b = op.asset_b;
       obj.share_asset = op.share_asset;
       obj.taker_fee_percent = op.taker_fee_percent;
       obj.withdrawal_fee_percent = op.withdrawal_fee_percent;
+      obj.curve_type = _ct;
+      obj.ab_weight_num = _wn;
+      obj.ab_weight_den = _wd;
+      obj.ab_p_low = _pl;
+      obj.ab_p_high = _ph;
+      if( _ct == 2 )
+      {
+         auto vo = compute_abpool_virtual_offsets( _wn, _wd, _pl, _ph );
+         obj.ab_xv = vo.first;
+         obj.ab_yv = vo.second;
+      }
    });
    result.new_objects.insert( new_liquidity_pool_object.id );
 
@@ -259,7 +300,18 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
    FC_ASSERT( op.share_amount.asset_id == _pool->share_asset, "Share asset type mismatch" );
 
-   FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
+   if( _pool->curve_type == 2 )
+      FC_ASSERT( _pool->balance_a > 0 || _pool->balance_b > 0, "AB pool has not been initialized" );
+   else
+      FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
+
+   if( op.single_asset.valid() )
+   {
+      FC_ASSERT( HARDFORK_AB_POOL_PASSED( d.head_block_time() ), "BSIP-7 hardfork has not passed" );
+      FC_ASSERT( _pool->curve_type == 2, "Only an AB pool can pay a withdrawal in a single asset" );
+      FC_ASSERT( *op.single_asset == _pool->asset_a || *op.single_asset == _pool->asset_b,
+                 "single_asset must be one of the pool assets" );
+   }
 
    const asset_object& share_asset_obj = _pool->share_asset(d);
 
@@ -287,19 +339,80 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
       fc::uint128_t share128( op.share_amount.amount.value );
       fc::uint128_t a128 = share128 * _pool->balance_a.value / _share_asset_dyn_data->current_supply.value;
       FC_ASSERT( a128 < fc::uint128_t( _pool->balance_a.value ), "Internal error" );
-      fc::uint128_t fee_a = a128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
-      FC_ASSERT( fee_a <= a128, "Withdrawal fee percent of the pool is too high" );
-      a128 -= fee_a;
       fc::uint128_t b128 = share128 * _pool->balance_b.value / _share_asset_dyn_data->current_supply.value;
       FC_ASSERT( b128 < fc::uint128_t( _pool->balance_b.value ), "Internal error" );
-      fc::uint128_t fee_b = b128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
-      FC_ASSERT( fee_b <= b128, "Withdrawal fee percent of the pool is too high" );
-      b128 -= fee_b;
-      FC_ASSERT( a128 > 0 || b128 > 0, "Aborting due to zero outcome" );
-      _pool_pays_a = asset( static_cast<int64_t>( a128 ), _pool->asset_a );
-      _pool_pays_b = asset( static_cast<int64_t>( b128 ), _pool->asset_b );
-      _fee_a = asset( static_cast<int64_t>( fee_a ), _pool->asset_a );
-      _fee_b = asset( static_cast<int64_t>( fee_b ), _pool->asset_b );
+
+      if( op.single_asset.valid() )
+      {
+         FC_ASSERT( HARDFORK_AB_POOL_PASSED( d.head_block_time() ), "BSIP-7 hardfork has not passed" );
+         FC_ASSERT( _pool->curve_type == 2, "Only an AB pool can pay a withdrawal in a single asset" );
+         FC_ASSERT( *op.single_asset == _pool->asset_a || *op.single_asset == _pool->asset_b,
+                    "single_asset must be one of the pool assets" );
+
+         uint64_t w_num = _pool->ab_weight_num;
+         uint64_t w_den = _pool->ab_weight_den;
+         uint64_t xv = _pool->ab_xv;
+         uint64_t yv = _pool->ab_yv;
+
+         fc::uint128_t balance_a_after = _pool->balance_a.value - a128;
+         fc::uint128_t balance_b_after = _pool->balance_b.value - b128;
+         FC_ASSERT( balance_a_after > 0 || balance_b_after > 0,
+                    "Single-sided AB withdrawal would empty the pool entirely" );
+
+         if( *op.single_asset == _pool->asset_a )
+         {
+            // User receives only asset A. Pool keeps b128 of B, swaps it for A.
+            uint64_t dy = compute_abpool_dy(
+               (uint64_t)balance_b_after, (uint64_t)balance_a_after,
+               yv, xv, w_den - w_num, w_den, (uint64_t)b128 );
+            // dy is payout in A from swapping b128 of B
+            uint64_t total_a_paid = (uint64_t)a128 + dy;
+
+            // half swap fee (n/(4(n-1)) = 1/2), rounded up so the pool never under-collects
+            fc::uint128_t swap_fee = (fc::uint128_t)dy * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2;
+            FC_ASSERT( imbalance_fee <= total_a_paid, "AB pool: imbalance fee exceeds amount paid" );
+            uint64_t net_a_paid = (uint64_t)( total_a_paid - imbalance_fee );
+
+            _pool_pays_a = asset( static_cast<int64_t>( net_a_paid ), _pool->asset_a );
+            _pool_pays_b = asset( 0, _pool->asset_b );
+            _fee_a = asset( static_cast<int64_t>( imbalance_fee ), _pool->asset_a );
+            _fee_b = asset( 0, _pool->asset_b );
+            _converted_reserve = asset( static_cast<int64_t>( b128 ), _pool->asset_b ); // AB-04
+         }
+         else
+         {
+            uint64_t dy = compute_abpool_dy(
+               (uint64_t)balance_a_after, (uint64_t)balance_b_after,
+               xv, yv, w_num, w_den, (uint64_t)a128 );
+            uint64_t total_b_paid = (uint64_t)b128 + dy;
+
+            fc::uint128_t swap_fee = (fc::uint128_t)dy * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2;
+            FC_ASSERT( imbalance_fee <= total_b_paid, "AB pool: imbalance fee exceeds amount paid" );
+            uint64_t net_b_paid = (uint64_t)( total_b_paid - imbalance_fee );
+
+            _pool_pays_a = asset( 0, _pool->asset_a );
+            _pool_pays_b = asset( static_cast<int64_t>( net_b_paid ), _pool->asset_b );
+            _fee_a = asset( 0, _pool->asset_a );
+            _fee_b = asset( static_cast<int64_t>( imbalance_fee ), _pool->asset_b );
+            _converted_reserve = asset( static_cast<int64_t>( a128 ), _pool->asset_a ); // AB-04
+         }
+      }
+      else
+      {
+         fc::uint128_t fee_a = a128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
+         FC_ASSERT( fee_a <= a128, "Withdrawal fee percent of the pool is too high" );
+         a128 -= fee_a;
+         fc::uint128_t fee_b = b128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
+         FC_ASSERT( fee_b <= b128, "Withdrawal fee percent of the pool is too high" );
+         b128 -= fee_b;
+         FC_ASSERT( a128 > 0 || b128 > 0, "Aborting due to zero outcome" );
+         _pool_pays_a = asset( static_cast<int64_t>( a128 ), _pool->asset_a );
+         _pool_pays_b = asset( static_cast<int64_t>( b128 ), _pool->asset_b );
+         _fee_a = asset( static_cast<int64_t>( fee_a ), _pool->asset_a );
+         _fee_b = asset( static_cast<int64_t>( fee_b ), _pool->asset_b );
+      }
    }
 
    return void_result();
@@ -325,6 +438,10 @@ generic_exchange_operation_result liquidity_pool_withdraw_evaluator::do_apply(
    d.modify( *_pool, [this]( liquidity_pool_object& lpo ){
       lpo.balance_a -= _pool_pays_a.amount;
       lpo.balance_b -= _pool_pays_b.amount;
+      if( _converted_reserve.asset_id == lpo.asset_a )
+         lpo.balance_a -= _converted_reserve.amount;
+      else if( _converted_reserve.asset_id == lpo.asset_b )
+         lpo.balance_b -= _converted_reserve.amount;
       lpo.update_virtual_value();
    });
 
@@ -401,23 +518,79 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
    _pool_receives = op.amount_to_sell - _maker_market_fee;
 
    fc::uint128_t delta;
-   if( op.amount_to_sell.asset_id == _pool->asset_a )
+   if( _pool->curve_type == 2 )
    {
-      share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
-      FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
-      _pool_pays_asset = &asset_obj_b;
+      FC_ASSERT( HARDFORK_AB_POOL_PASSED( d.head_block_time() ), "BSIP-7 hardfork has not passed" );
+      // AB pool pricing (BSIP-7): Balancer weighted product with virtual offsets
+      uint64_t A = _pool->ab_weight_num;
+      uint64_t B = _pool->ab_weight_den;
+      uint64_t xv = _pool->ab_xv;
+      uint64_t yv = _pool->ab_yv;
+      if( op.amount_to_sell.asset_id == _pool->asset_a )
+      {
+         uint64_t x = (uint64_t)_pool->balance_a.value + xv;
+         uint64_t y = (uint64_t)_pool->balance_b.value + yv;
+         uint64_t dx = (uint64_t)_pool_receives.amount.value;
+         uint64_t dy = compute_abpool_dy( x - xv, y - yv, xv, yv, A, B, dx );
+         FC_ASSERT( dy > 0, "AB pool: insufficient liquidity" );
+         FC_ASSERT( dy <= _pool->balance_b.value, "AB pool: payout exceeds balance" );
+         // AB-06a: post-swap price must remain within [ab_p_low, ab_p_high]
+         // p = (w_num / (w_den - w_num)) * Y_new / X_new, X_new = x + dx, Y_new = y - dy
+         __uint128_t X_new = (__uint128_t)x + dx;
+         __uint128_t Y_new = (__uint128_t)y - dy;
+         __uint128_t w_num_128 = A;
+         __uint128_t w_den_minus_w_num = (__uint128_t)B - A;
+         __uint128_t low_bound  = (__uint128_t)_pool->ab_p_low  * w_den_minus_w_num * X_new;
+         __uint128_t high_bound = (__uint128_t)_pool->ab_p_high * w_den_minus_w_num * X_new;
+         __uint128_t price_num  = w_num_128 * Y_new;
+         FC_ASSERT( low_bound <= price_num,  "AB pool: post-swap price below ab_p_low"  );
+         FC_ASSERT( price_num <= high_bound, "AB pool: post-swap price above ab_p_high" );
+         delta = dy;
+         _pool_pays_asset = &asset_obj_b;
+      }
+      else
+      {
+         uint64_t x = (uint64_t)_pool->balance_b.value + yv;
+         uint64_t y = (uint64_t)_pool->balance_a.value + xv;
+         uint64_t dx = (uint64_t)_pool_receives.amount.value;
+         uint64_t dy = compute_abpool_dy( x - yv, y - xv, yv, xv, B - A, B, dx );
+         FC_ASSERT( dy > 0, "AB pool: insufficient liquidity" );
+         FC_ASSERT( dy <= _pool->balance_a.value, "AB pool: payout exceeds balance" );
+         // AB-06a: post-swap price must remain within [ab_p_low, ab_p_high]
+         // p = (w_num / (w_den - w_num)) * Y_new / X_new, X_new = x + dx, Y_new = y - dy
+         __uint128_t X_new = (__uint128_t)x + dx;
+         __uint128_t Y_new = (__uint128_t)y - dy;
+         __uint128_t w_num_128 = B - A;
+         __uint128_t w_den_minus_w_num = (__uint128_t)A;
+         __uint128_t low_bound  = (__uint128_t)_pool->ab_p_low  * w_den_minus_w_num * X_new;
+         __uint128_t high_bound = (__uint128_t)_pool->ab_p_high * w_den_minus_w_num * X_new;
+         __uint128_t price_num  = w_num_128 * Y_new;
+         FC_ASSERT( low_bound <= price_num,  "AB pool: post-swap price below ab_p_low"  );
+         FC_ASSERT( price_num <= high_bound, "AB pool: post-swap price above ab_p_high" );
+         delta = dy;
+         _pool_pays_asset = &asset_obj_a;
+      }
    }
    else
    {
-      share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
-      FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
-      _pool_pays_asset = &asset_obj_a;
+      if( op.amount_to_sell.asset_id == _pool->asset_a )
+      {
+         share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
+         // round up
+         fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
+         FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
+         delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
+         _pool_pays_asset = &asset_obj_b;
+      }
+      else
+      {
+         share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
+         // round up
+         fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
+         FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
+         delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
+         _pool_pays_asset = &asset_obj_a;
+      }
    }
 
    fc::uint128_t pool_taker_fee = delta * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
@@ -474,7 +647,8 @@ generic_exchange_operation_result liquidity_pool_exchange_evaluator::do_apply(
    }
 
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "Internal error" );
-   FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
+   if( _pool->curve_type == 0 )
+      FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
 
    result.paid.emplace_back( op.amount_to_sell );
    result.received.emplace_back( _account_receives );

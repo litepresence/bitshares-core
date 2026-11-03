@@ -33,6 +33,17 @@ namespace graphene { namespace protocol {
     */
    struct liquidity_pool_create_operation : public base_operation
    {
+      struct ext
+      {
+         /// BSIP-7 AB pool parameters, carried as a typed extension so that
+         /// pre-change (constant-product) operations remain deserializable.
+         fc::optional<uint8_t>  curve_type;       ///< 0 = constant product, 2 = AB
+         fc::optional<uint64_t> ab_weight_num;    ///< AB: weight numerator
+         fc::optional<uint64_t> ab_weight_den;    ///< AB: weight denominator
+         fc::optional<uint64_t> ab_p_low;         ///< AB: lower price bound
+         fc::optional<uint64_t> ab_p_high;        ///< AB: upper price bound
+      };
+
       struct fee_params_t { uint64_t fee = 50 * GRAPHENE_BLOCKCHAIN_PRECISION; };
 
       asset           fee;                         ///< Operation fee
@@ -43,7 +54,7 @@ namespace graphene { namespace protocol {
       uint16_t        taker_fee_percent = 0;       ///< Taker fee percent
       uint16_t        withdrawal_fee_percent = 0;  ///< Withdrawal fee percent
 
-      extensions_type extensions;  ///< Unused. Reserved for future use.
+      extension<ext> extensions;  ///< Extensions (BSIP-7 AB params, optional).
 
       account_id_type fee_payer()const { return account; }
       void            validate()const;
@@ -119,6 +130,7 @@ namespace graphene { namespace protocol {
       account_id_type          account;            ///< The account who withdraws from the liquidity pool
       liquidity_pool_id_type   pool;               ///< ID of the liquidity pool
       asset                    share_amount;       ///< The amount of the share asset to use
+      fc::optional<asset_id_type> single_asset;     ///< If set, withdraw in this single asset (AB pools only, BSIP-7)
 
       extensions_type extensions;  ///< Unused. Reserved for future use.
 
@@ -154,6 +166,9 @@ namespace graphene { namespace protocol {
 } } // graphene::protocol
 
 FC_REFLECT( graphene::protocol::liquidity_pool_create_operation::fee_params_t, (fee) )
+FC_REFLECT( graphene::protocol::liquidity_pool_create_operation::ext,
+            (curve_type)(ab_weight_num)(ab_weight_den)(ab_p_low)(ab_p_high) )
+FC_REFLECT_TYPENAME( graphene::protocol::extension<graphene::protocol::liquidity_pool_create_operation::ext> )
 FC_REFLECT( graphene::protocol::liquidity_pool_delete_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::liquidity_pool_update_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::liquidity_pool_deposit_operation::fee_params_t, (fee) )
@@ -170,7 +185,7 @@ FC_REFLECT( graphene::protocol::liquidity_pool_update_operation,
 FC_REFLECT( graphene::protocol::liquidity_pool_deposit_operation,
             (fee)(account)(pool)(amount_a)(amount_b)(extensions) )
 FC_REFLECT( graphene::protocol::liquidity_pool_withdraw_operation,
-            (fee)(account)(pool)(share_amount)(extensions) )
+            (fee)(account)(pool)(share_amount)(single_asset)(extensions) )
 FC_REFLECT( graphene::protocol::liquidity_pool_exchange_operation,
             (fee)(account)(pool)(amount_to_sell)(min_to_receive)(extensions) )
 

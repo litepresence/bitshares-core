@@ -1,0 +1,5 @@
+// BSIP-7 (AB Pool) activation gate.
+#ifndef HARDFORK_AB_POOL_TIME
+#define HARDFORK_AB_POOL_TIME (fc::time_point_sec( 1893456000 )) // 2030-01-01T00:00:00Z
+#define HARDFORK_AB_POOL_PASSED(now) (now >= HARDFORK_AB_POOL_TIME)
+#endif

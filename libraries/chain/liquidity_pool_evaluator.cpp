@@ -33,6 +33,8 @@
 
 #include <graphene/protocol/liquidity_pool.hpp>
 
+#include <graphene/chain/stableswap.hpp>
+
 namespace graphene { namespace chain {
 
 void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_create_operation& op)
@@ -58,6 +60,42 @@ void_result liquidity_pool_create_evaluator::do_evaluate(const liquidity_pool_cr
    FC_ASSERT( _share_asset->dynamic_data(d).current_supply == 0,
               "Current supply of the share asset needs to be zero" );
 
+   // BSIP-6: curve_type/amplification are carried in extensions (liquidity_pool_curve_extension).
+   // Absent extension => legacy constant-product pool (curve_type=0, amplification=0).
+   // future_extensions = static_variant<void_t, liquidity_pool_curve_extension>, so
+   // which()==1 selects liquidity_pool_curve_extension.
+   uint8_t curve_type = 0;
+   uint64_t amplification = 0;
+   for( const auto& e : op.extensions )
+   {
+      if( e.which() == 1 )
+      {
+         const auto& ce = e.get< graphene::protocol::liquidity_pool_curve_extension >();
+         curve_type = ce.curve_type;
+         amplification = ce.amplification;
+      }
+   }
+
+   if( curve_type == 1 )
+   {
+      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
+      FC_ASSERT( amplification > 0, "Stable pool requires positive amplification" );
+      // ECONOMIC NOTE: amplification A is unbounded by protocol. Extreme A makes
+      // the StableSwap curve approach a constant-sum (flat) invariant, so a
+      // pool priced far from its peg can be drained at near-peg rates: the
+      // amplification term suppresses price movement until the pool is almost
+      // empty, at which point the curve reverts to constant-product and the
+      // last units are withdrawn at a catastrophic discount. There is no cap
+      // here by design (A is a per-pool governance parameter); operators must
+      // choose A consistent with the assets' expected depeg magnitude, and
+      // auditors/clients should treat very large A as a red flag. Do not add a
+      // hard cap without a governance decision (BSIP-6).
+   }
+   else
+   {
+      FC_ASSERT( curve_type == 0, "Unknown curve type" );
+   }
+
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
 
@@ -72,6 +110,22 @@ generic_operation_result liquidity_pool_create_evaluator::do_apply(const liquidi
       obj.share_asset = op.share_asset;
       obj.taker_fee_percent = op.taker_fee_percent;
       obj.withdrawal_fee_percent = op.withdrawal_fee_percent;
+      // BSIP-6: read curve_type/amplification from extensions
+      // future_extensions = static_variant<void_t, liquidity_pool_curve_extension>, so
+      // which()==1 selects liquidity_pool_curve_extension.
+      uint8_t obj_curve_type = 0;
+      uint64_t obj_amplification = 0;
+      for( const auto& e : op.extensions )
+      {
+         if( e.which() == 1 )
+         {
+            const auto& ce = e.get< graphene::protocol::liquidity_pool_curve_extension >();
+            obj_curve_type = ce.curve_type;
+            obj_amplification = ce.amplification;
+         }
+      }
+      obj.curve_type = obj_curve_type;
+      obj.amplification = obj_amplification;
    });
    result.new_objects.insert( new_liquidity_pool_object.id );
 
@@ -216,6 +270,51 @@ void_result liquidity_pool_deposit_evaluator::do_evaluate(const liquidity_pool_d
       _pool_receives_b = asset( static_cast<int64_t>( b128 ), _pool->asset_b );
 
       _account_receives = asset( static_cast<int64_t>( new_supply ), _pool->share_asset );
+
+      // BSIP-6: Imbalanced-deposit fee on stable pools.
+      // Charged on the excess side of an imbalanced deposit: fee = swap_fee * n/(4(n-1))
+      // For n=2 this is exactly half the swap fee. The fee reduces shares minted to the depositor.
+      if( _pool->curve_type == 1 && _pool->balance_a > 0 && _pool->balance_b > 0 )
+      {
+         FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
+         fc::uint128_t ratio_a = (fc::uint128_t)op.amount_a.amount.value * _pool->balance_b.value;
+         fc::uint128_t ratio_b = (fc::uint128_t)op.amount_b.amount.value * _pool->balance_a.value;
+
+         if( ratio_a != ratio_b )
+         {
+            bool excess_a = ratio_a > ratio_b;
+            fc::uint128_t excess_amount;
+            fc::uint128_t excess_asset_balance;
+
+            if( excess_a )
+            {
+               fc::uint128_t amount_a_prop = (fc::uint128_t)op.amount_b.amount.value * _pool->balance_a.value / _pool->balance_b.value;
+               excess_amount = op.amount_a.amount.value - amount_a_prop;
+               excess_asset_balance = _pool->balance_a.value;
+            }
+            else
+            {
+               fc::uint128_t amount_b_prop = (fc::uint128_t)op.amount_a.amount.value * _pool->balance_b.value / _pool->balance_a.value;
+               excess_amount = op.amount_b.amount.value - amount_b_prop;
+               excess_asset_balance = _pool->balance_b.value;
+            }
+
+            if( excess_amount > 0 )
+            {
+               fc::uint128_t swap_fee = excess_amount * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
+               _imbalance_fee = static_cast<share_type>((swap_fee + 1) / 2); // round up, favor pool
+
+               if( _imbalance_fee > 0 && excess_asset_balance > 0 )
+               {
+                  fc::uint128_t fee_shares = fc::uint128_t(_imbalance_fee.value) * _share_asset_dyn_data->current_supply.value / excess_asset_balance;
+                  if( fee_shares > 0 && fc::uint128_t(_account_receives.amount.value) > fee_shares )
+                  {
+                     _account_receives = asset( static_cast<int64_t>( fc::uint128_t(_account_receives.amount.value) - fee_shares ), _pool->share_asset );
+                  }
+               }
+            }
+         }
+      }
    }
 
    return void_result();
@@ -247,6 +346,8 @@ generic_exchange_operation_result liquidity_pool_deposit_evaluator::do_apply(
    result.paid.emplace_back( _pool_receives_a );
    result.paid.emplace_back( _pool_receives_b );
    result.received.emplace_back( _account_receives );
+   if( _imbalance_fee > 0 )
+      result.fees.emplace_back( asset( _imbalance_fee, _pool->asset_a ) );
 
    return result;
 } FC_CAPTURE_AND_RETHROW( (op) ) } // GCOVR_EXCL_LINE
@@ -260,6 +361,14 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    FC_ASSERT( op.share_amount.asset_id == _pool->share_asset, "Share asset type mismatch" );
 
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );
+
+   if( op.single_asset.valid() )
+   {
+      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
+      FC_ASSERT( _pool->curve_type == 1, "Only a stable pool can pay a withdrawal in a single asset" );
+      FC_ASSERT( *op.single_asset == _pool->asset_a || *op.single_asset == _pool->asset_b,
+                 "single_asset must be one of the pool assets" );
+   }
 
    const asset_object& share_asset_obj = _pool->share_asset(d);
 
@@ -277,6 +386,12 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
 
    if( _share_asset_dyn_data->current_supply == op.share_amount.amount )
    {
+      // A full withdrawal drains both pool sides proportionally; paying it out
+      // in a single asset would require swapping the entire opposite side at
+      // the (possibly extreme) terminal price, which is unsafe and not a
+      // supported mode. Reject the combination explicitly.
+      FC_ASSERT( !op.single_asset.valid(),
+                 "single_asset is not supported on a full pool withdrawal" );
       _pool_pays_a = asset( _pool->balance_a, _pool->asset_a );
       _pool_pays_b = asset( _pool->balance_b, _pool->asset_b );
       _fee_a = asset( 0, _pool->asset_a );
@@ -286,20 +401,104 @@ void_result liquidity_pool_withdraw_evaluator::do_evaluate(const liquidity_pool_
    {
       fc::uint128_t share128( op.share_amount.amount.value );
       fc::uint128_t a128 = share128 * _pool->balance_a.value / _share_asset_dyn_data->current_supply.value;
-      FC_ASSERT( a128 < fc::uint128_t( _pool->balance_a.value ), "Internal error" );
-      fc::uint128_t fee_a = a128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
-      FC_ASSERT( fee_a <= a128, "Withdrawal fee percent of the pool is too high" );
-      a128 -= fee_a;
       fc::uint128_t b128 = share128 * _pool->balance_b.value / _share_asset_dyn_data->current_supply.value;
-      FC_ASSERT( b128 < fc::uint128_t( _pool->balance_b.value ), "Internal error" );
-      fc::uint128_t fee_b = b128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
-      FC_ASSERT( fee_b <= b128, "Withdrawal fee percent of the pool is too high" );
-      b128 -= fee_b;
-      FC_ASSERT( a128 > 0 || b128 > 0, "Aborting due to zero outcome" );
-      _pool_pays_a = asset( static_cast<int64_t>( a128 ), _pool->asset_a );
-      _pool_pays_b = asset( static_cast<int64_t>( b128 ), _pool->asset_b );
-      _fee_a = asset( static_cast<int64_t>( fee_a ), _pool->asset_a );
-      _fee_b = asset( static_cast<int64_t>( fee_b ), _pool->asset_b );
+
+      if( op.single_asset.valid() )
+      {
+         FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
+         FC_ASSERT( _pool->curve_type == 1, "Only a stable pool can pay a withdrawal in a single asset" );
+         FC_ASSERT( *op.single_asset == _pool->asset_a || *op.single_asset == _pool->asset_b,
+                    "single_asset must be one of the pool assets" );
+
+         // BSIP-6: Single-sided withdrawal on stable pools.
+         // The user burns shares and receives only one asset. The other side of
+         // their proportional withdrawal is kept in the pool and swapped via the
+         // StableSwap invariant, with half the swap fee charged as an imbalance fee.
+         fc::uint128_t balance_a_after = _pool->balance_a.value - a128;
+         fc::uint128_t balance_b_after = _pool->balance_b.value - b128;
+         FC_ASSERT( balance_a_after > 0 && balance_b_after > 0,
+                    "Single-sided withdrawal would empty a pool side" );
+
+         fc::uint128_t D_prop = compute_stableswap_d(
+            static_cast<uint64_t>(balance_a_after),
+            static_cast<uint64_t>(balance_b_after),
+            _pool->amplification );
+         FC_ASSERT( D_prop > 0, "Cannot compute pool invariant" );
+
+         if( *op.single_asset == _pool->asset_a )
+         {
+            // User receives only asset A. Pool keeps b128 of B, swaps it for A.
+            // Post-swap B balance returns to original balance_b; solve for new A.
+            uint64_t new_balance_a = compute_stableswap_y(
+               static_cast<uint64_t>(_pool->balance_b.value),
+               static_cast<uint64_t>(D_prop),
+               _pool->amplification );
+            FC_ASSERT( new_balance_a > 0 && new_balance_a < (uint64_t)_pool->balance_a.value,
+                       "Invalid single-sided withdrawal result" );
+
+            uint64_t total_a_paid = _pool->balance_a.value - new_balance_a;
+            FC_ASSERT( total_a_paid >= static_cast<uint64_t>(a128),
+                       "Single-sided withdrawal: total A paid is less than proportional share" );
+            uint64_t swap_portion = total_a_paid - static_cast<uint64_t>(a128);
+
+            fc::uint128_t swap_fee = (fc::uint128_t)swap_portion * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2; // round up, favor pool
+
+            FC_ASSERT( imbalance_fee <= fc::uint128_t(total_a_paid),
+                       "Single-sided withdrawal: imbalance fee exceeds total A paid" );
+            uint64_t net_a_paid = total_a_paid - static_cast<uint64_t>(imbalance_fee);
+
+            _pool_pays_a = asset( static_cast<int64_t>( net_a_paid ), _pool->asset_a );
+            _pool_pays_b = asset( 0, _pool->asset_b );
+            _fee_a = asset( static_cast<int64_t>( imbalance_fee ), _pool->asset_a );
+            _fee_b = asset( 0, _pool->asset_b );
+         }
+         else // *op.single_asset == _pool->asset_b
+         {
+            // User receives only asset B. Pool keeps a128 of A, swaps it for B.
+            uint64_t new_balance_b = compute_stableswap_y(
+               static_cast<uint64_t>(_pool->balance_a.value),
+               static_cast<uint64_t>(D_prop),
+               _pool->amplification );
+            FC_ASSERT( new_balance_b > 0 && new_balance_b < (uint64_t)_pool->balance_b.value,
+                       "Invalid single-sided withdrawal result" );
+
+            uint64_t total_b_paid = _pool->balance_b.value - new_balance_b;
+            FC_ASSERT( total_b_paid >= static_cast<uint64_t>(b128),
+                       "Single-sided withdrawal: total B paid is less than proportional share" );
+            uint64_t swap_portion = total_b_paid - static_cast<uint64_t>(b128);
+
+            fc::uint128_t swap_fee = (fc::uint128_t)swap_portion * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
+            fc::uint128_t imbalance_fee = (swap_fee + 1) / 2; // round up, favor pool
+
+            FC_ASSERT( imbalance_fee <= fc::uint128_t(total_b_paid),
+                       "Single-sided withdrawal: imbalance fee exceeds total B paid" );
+            uint64_t net_b_paid = total_b_paid - static_cast<uint64_t>(imbalance_fee);
+
+            _pool_pays_a = asset( 0, _pool->asset_a );
+            _pool_pays_b = asset( static_cast<int64_t>( net_b_paid ), _pool->asset_b );
+            _fee_a = asset( 0, _pool->asset_a );
+            _fee_b = asset( static_cast<int64_t>( imbalance_fee ), _pool->asset_b );
+         }
+      }
+      else
+      {
+         // Normal proportional withdrawal (existing code)
+         FC_ASSERT( a128 < fc::uint128_t( _pool->balance_a.value ), "Internal error" );
+         fc::uint128_t fee_a = a128 * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
+         FC_ASSERT( fee_a <= a128, "Withdrawal fee percent of the pool is too high" );
+         a128 -= fee_a;
+         fc::uint128_t b128_check = share128 * _pool->balance_b.value / _share_asset_dyn_data->current_supply.value;
+         FC_ASSERT( b128_check < fc::uint128_t( _pool->balance_b.value ), "Internal error" );
+         fc::uint128_t fee_b = b128_check * _pool->withdrawal_fee_percent / GRAPHENE_100_PERCENT;
+         FC_ASSERT( fee_b <= b128_check, "Withdrawal fee percent of the pool is too high" );
+         b128_check -= fee_b;
+         FC_ASSERT( a128 > 0 || b128_check > 0, "Aborting due to zero outcome" );
+         _pool_pays_a = asset( static_cast<int64_t>( a128 ), _pool->asset_a );
+         _pool_pays_b = asset( static_cast<int64_t>( b128_check ), _pool->asset_b );
+         _fee_a = asset( static_cast<int64_t>( fee_a ), _pool->asset_a );
+         _fee_b = asset( static_cast<int64_t>( fee_b ), _pool->asset_b );
+      }
    }
 
    return void_result();
@@ -401,23 +600,54 @@ void_result liquidity_pool_exchange_evaluator::do_evaluate(const liquidity_pool_
    _pool_receives = op.amount_to_sell - _maker_market_fee;
 
    fc::uint128_t delta;
-   if( op.amount_to_sell.asset_id == _pool->asset_a )
+   if( _pool->curve_type == 1 && _pool->amplification > 0 )
    {
-      share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
-      FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
-      _pool_pays_asset = &asset_obj_b;
+      FC_ASSERT( HARDFORK_STABLESWAP_PASSED( d.head_block_time() ), "BSIP-6 hardfork has not passed" );
+      // StableSwap pricing (BSIP-6)
+      uint64_t A = _pool->amplification;
+      if( op.amount_to_sell.asset_id == _pool->asset_a )
+      {
+         uint64_t x = (uint64_t)_pool->balance_a.value;
+         uint64_t y = (uint64_t)_pool->balance_b.value;
+         fc::uint128_t D = compute_stableswap_d( x, y, A );
+         uint64_t new_x = x + (uint64_t)_pool_receives.amount.value;
+         uint64_t new_y = compute_stableswap_y( new_x, (uint64_t)D, A );
+         FC_ASSERT( new_y <= y, "Internal error" );
+         delta = fc::uint128_t( y ) - fc::uint128_t( new_y );
+         _pool_pays_asset = &asset_obj_b;
+      }
+      else
+      {
+         uint64_t x = (uint64_t)_pool->balance_b.value;
+         uint64_t y = (uint64_t)_pool->balance_a.value;
+         fc::uint128_t D = compute_stableswap_d( x, y, A );
+         uint64_t new_x = x + (uint64_t)_pool_receives.amount.value;
+         uint64_t new_y = compute_stableswap_y( new_x, (uint64_t)D, A );
+         FC_ASSERT( new_y <= y, "Internal error" );
+         delta = fc::uint128_t( y ) - fc::uint128_t( new_y );
+         _pool_pays_asset = &asset_obj_a;
+      }
    }
    else
    {
-      share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
-      // round up
-      fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
-      FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
-      delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
-      _pool_pays_asset = &asset_obj_a;
+      if( op.amount_to_sell.asset_id == _pool->asset_a )
+      {
+         share_type new_balance_a = _pool->balance_a + _pool_receives.amount;
+         // round up
+         fc::uint128_t new_balance_b = ( _pool->virtual_value + new_balance_a.value - 1 ) / new_balance_a.value;
+         FC_ASSERT( new_balance_b <= _pool->balance_b, "Internal error" );
+         delta = fc::uint128_t( _pool->balance_b.value ) - new_balance_b;
+         _pool_pays_asset = &asset_obj_b;
+      }
+      else
+      {
+         share_type new_balance_b = _pool->balance_b + _pool_receives.amount;
+         // round up
+         fc::uint128_t new_balance_a = ( _pool->virtual_value + new_balance_b.value - 1 ) / new_balance_b.value;
+         FC_ASSERT( new_balance_a <= _pool->balance_a, "Internal error" );
+         delta = fc::uint128_t( _pool->balance_a.value ) - new_balance_a;
+         _pool_pays_asset = &asset_obj_a;
+      }
    }
 
    fc::uint128_t pool_taker_fee = delta * _pool->taker_fee_percent / GRAPHENE_100_PERCENT;
@@ -474,7 +704,11 @@ generic_exchange_operation_result liquidity_pool_exchange_evaluator::do_apply(
    }
 
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "Internal error" );
-   FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
+   // The product x*y is non-decreasing only for constant-product pools; StableSwap
+   // (curve_type == 1) swaps can reduce the product even with fees, so the
+   // monotonicity assert applies only to constant-product pools.
+   if( _pool->curve_type == 0 )
+      FC_ASSERT( _pool->virtual_value >= old_virtual_value, "Internal error" );
 
    result.paid.emplace_back( op.amount_to_sell );
    result.received.emplace_back( _account_receives );

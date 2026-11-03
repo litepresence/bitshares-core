@@ -43,7 +43,7 @@ namespace graphene { namespace protocol {
       uint16_t        taker_fee_percent = 0;       ///< Taker fee percent
       uint16_t        withdrawal_fee_percent = 0;  ///< Withdrawal fee percent
 
-      extensions_type extensions;  ///< Unused. Reserved for future use.
+      extensions_type extensions;  ///< BSIP-6: carries curve_type/amplification via liquidity_pool_curve_extension. Omitted => legacy constant-product pool.
 
       account_id_type fee_payer()const { return account; }
       void            validate()const;
@@ -119,6 +119,7 @@ namespace graphene { namespace protocol {
       account_id_type          account;            ///< The account who withdraws from the liquidity pool
       liquidity_pool_id_type   pool;               ///< ID of the liquidity pool
       asset                    share_amount;       ///< The amount of the share asset to use
+      fc::optional<asset_id_type> single_asset;     ///< If set, withdraw in this single asset (stable pools only, BSIP-6)
 
       extensions_type extensions;  ///< Unused. Reserved for future use.
 
@@ -170,7 +171,7 @@ FC_REFLECT( graphene::protocol::liquidity_pool_update_operation,
 FC_REFLECT( graphene::protocol::liquidity_pool_deposit_operation,
             (fee)(account)(pool)(amount_a)(amount_b)(extensions) )
 FC_REFLECT( graphene::protocol::liquidity_pool_withdraw_operation,
-            (fee)(account)(pool)(share_amount)(extensions) )
+            (fee)(account)(pool)(share_amount)(single_asset)(extensions) )
 FC_REFLECT( graphene::protocol::liquidity_pool_exchange_operation,
             (fee)(account)(pool)(amount_to_sell)(min_to_receive)(extensions) )
 

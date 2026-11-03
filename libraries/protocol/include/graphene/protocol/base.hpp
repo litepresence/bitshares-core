@@ -144,7 +144,21 @@ namespace graphene { namespace protocol {
     *  always add new types to a static_variant without breaking backward
     *  compatibility.
     */
-   using future_extensions = static_variant<void_t>;
+   /**
+    *  BSIP-6 StableSwap curve parameters carried inside
+    *  liquidity_pool_create_operation.extensions. When the extension is
+    *  absent the pool defaults to legacy constant-product (curve_type=0,
+    *  amplification=0).
+    */
+   struct liquidity_pool_curve_extension { uint8_t curve_type; uint64_t amplification; };
+
+   /**
+    *  For future expansion many structus include a single member of type
+    *  extensions_type that can be changed when updating a protocol.  You can
+    *  always add new types to a static_variant without breaking backward
+    *  compatibility.
+    */
+   using future_extensions = static_variant<void_t, liquidity_pool_curve_extension>;
 
    /**
     *  A flat_set is used to make sure that only one extension of
@@ -162,6 +176,7 @@ namespace graphene { namespace protocol {
 FC_REFLECT_TYPENAME( graphene::protocol::extendable_operation_result )
 FC_REFLECT_TYPENAME( graphene::protocol::operation_result )
 FC_REFLECT_TYPENAME( graphene::protocol::future_extensions )
+FC_REFLECT( graphene::protocol::liquidity_pool_curve_extension, (curve_type)(amplification) )
 FC_REFLECT_TYPENAME( graphene::protocol::extensions_type )
 FC_REFLECT( graphene::protocol::void_result, )
 FC_REFLECT( graphene::protocol::generic_operation_result, (new_objects)(updated_objects)(removed_objects) )

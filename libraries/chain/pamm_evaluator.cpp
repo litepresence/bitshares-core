@@ -13,12 +13,10 @@ namespace graphene { namespace chain {
 static std::pair<uint64_t, uint64_t> read_pool_price( const database& d, asset_id_type asset_a, asset_id_type asset_b )
 {
    const auto& pool_idx = d.get_index_type<liquidity_pool_index>();
-   const auto& by_ab = pool_idx.indices().get<by_asset_ab>();
 
    // Try (asset_a, asset_b) first
-   auto itr = pool_idx.indices().get<by_asset_a>().find( boost::make_tuple( asset_a, object_id_type() ) );
+   auto itr = pool_idx.indices().get<by_asset_a>().lower_bound( boost::make_tuple( asset_a, object_id_type() ) );
    if (itr != pool_idx.indices().get<by_asset_a>().end()) {
-      // Find the one with asset_b as asset_b
       for (auto it = itr; it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_a; ++it) {
          if (it->asset_b == asset_b) {
             // Price of asset_a in terms of asset_b = balance_b / balance_a
@@ -27,12 +25,10 @@ static std::pair<uint64_t, uint64_t> read_pool_price( const database& d, asset_i
       }
    }
 
-   // Try (asset_b, asset_a)
+   // Try (asset_b, asset_a) - price of asset_a in terms of asset_b = balance_a / balance_b
    for (auto it = pool_idx.indices().get<by_asset_a>().lower_bound( boost::make_tuple( asset_b, object_id_type() ) );
         it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_b; ++it) {
       if (it->asset_b == asset_a) {
-         // Price of asset_b in terms of asset_a = balance_a / balance_b
-         // Price of asset_a in terms of asset_b = balance_b / balance_a
          return std::make_pair( it->balance_a.value, it->balance_b.value );
       }
    }
@@ -68,9 +64,6 @@ static bool pool_has_recent_swap( const database& d, asset_id_type asset_a, asse
 // Helper: check if pool has >= 1,000,000 BTS total value
 static bool pool_has_min_tvl( const database& d, asset_id_type asset_a, asset_id_type asset_b )
 {
-   const auto& core_idx = d.get_index_type<asset_index>();
-   const auto& core_asset = core_idx( asset_id_type() ); // BTS is asset_id_type()
-
    const auto& pool_idx = d.get_index_type<liquidity_pool_index>();
 
    // Check (asset_a, BTS)
@@ -168,11 +161,11 @@ generic_operation_result pamm_deposit_evaluator::do_apply(const pamm_deposit_ope
    database& d = db();
    generic_operation_result result;
 
-   // Re-fetch pool object to avoid stale pointer
-   const auto& pool = op.pool(d);
+   // Re-fetch pool object by ID to avoid stale pointer
+   const pamm_pool_object& pool_obj = op.pool(d);
 
    // Deduct deposit fee from fee pool balance
-   d.modify( pool, [&](pamm_pool_object& p){
+   d.modify( pool_obj, [&](pamm_pool_object& p){
       p.fee_pool_balance -= op.fee.amount;
    });
 
@@ -182,7 +175,7 @@ generic_operation_result pamm_deposit_evaluator::do_apply(const pamm_deposit_ope
    // Determine shares to mint at current NAV
    share_type shares_to_mint;
    {
-      const pamm_pool_object& o = pool(d);
+      const pamm_pool_object& o = pool_obj;
       if (o.share_supply == 1) {
          // Virtual 1-share offset: first real deposit mints 1:1
          shares_to_mint = (share_type)op.amount.amount.value;
@@ -195,14 +188,14 @@ generic_operation_result pamm_deposit_evaluator::do_apply(const pamm_deposit_ope
    }
 
    // Issue shares via asset issue machinery
-   const asset_object& share_asset_obj = pool(d).share_asset(d);
+   const asset_object& share_asset_obj = pool_obj.share_asset(d);
    d.modify( share_asset_obj.dynamic_data(d), [&shares_to_mint](asset_dynamic_data_object& dd){
       dd.current_supply += shares_to_mint;
    });
-   d.adjust_balance( op.investor, asset(shares_to_mint, pool(d).share_asset) );
+   d.adjust_balance( op.investor, asset(shares_to_mint, pool_obj.share_asset(d)) );
 
    // Update pool
-   d.modify( pool(d), [&](pamm_pool_object& o){
+   d.modify( pool_obj, [&](pamm_pool_object& o){
       o.share_supply += shares_to_mint;
       o.tank_balance += op.amount.amount;
    });
@@ -228,17 +221,17 @@ generic_operation_result pamm_withdraw_evaluator::do_apply(const pamm_withdraw_o
    database& d = db();
    generic_operation_result result;
 
-   // Re-fetch pool object to avoid stale pointer
-   const auto& pool = op.pool(d);
+   // Re-fetch pool object by ID to avoid stale pointer
+   const pamm_pool_object& pool_obj = op.pool(d);
 
    // Deduct withdrawal fee from fee pool balance
-   d.modify( pool, [&](pamm_pool_object& p){
+   d.modify( pool_obj, [&](pamm_pool_object& p){
       p.fee_pool_balance -= op.fee.amount;
    });
 
    share_type amt_to_pay;
    {
-      const pamm_pool_object& o = pool(d);
+      const pamm_pool_object& o = pool_obj;
       FC_ASSERT( o.share_supply.value > 0, "no shares outstanding" );
       FC_ASSERT( op.share_amount.amount <= o.share_supply, "insufficient shares" );
       fc::uint128_t amt = fc::uint128_t(op.share_amount.amount.value) * o.tank_balance.value / o.share_supply.value;
@@ -250,16 +243,16 @@ generic_operation_result pamm_withdraw_evaluator::do_apply(const pamm_withdraw_o
    // Burn shares from investor
    d.adjust_balance( op.investor, -op.share_amount );
 
-   const asset_object& share_asset_obj = pool(d).share_asset(d);
+   const asset_object& share_asset_obj = pool_obj.share_asset(d);
    d.modify( share_asset_obj.dynamic_data(d), [&op](asset_dynamic_data_object& dd){
       dd.current_supply -= op.share_amount.amount;
    });
 
    // Pay investor
-   d.adjust_balance( op.investor, asset(amt_to_pay, pool(d).pool_asset) );
+   d.adjust_balance( op.investor, asset(amt_to_pay, pool_obj.pool_asset) );
 
    // Update pool
-   d.modify( pool(d), [&](pamm_pool_object& o){
+   d.modify( pool_obj, [&](pamm_pool_object& o){
       o.share_supply -= op.share_amount.amount;
       o.tank_balance -= amt_to_pay;
    });
@@ -283,20 +276,15 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
    database& d = db();
    generic_operation_result result;
 
-   // Re-fetch pool object to avoid stale pointer
-   const auto& pool = op.pool(d);
+   // Re-fetch pool object by ID to avoid stale pointer
+   const pamm_pool_object& pool_obj = op.pool(d);
 
    // Deduct snapshot fee from fee pool balance
-   d.modify( pool, [&](pamm_pool_object& p){
+   d.modify( pool_obj, [&](pamm_pool_object& p){
       p.fee_pool_balance -= op.fee.amount;
    });
 
-   // Compute NAV from pool prices
-   // NAV = sum(token_balance_i * pool_price_i_in_BTS) / share_supply
-   // The nav_num/nav_den from the op represent the NAV as computed externally
-   // and verified against pool prices
-
-   d.modify( pool(d), [&](pamm_pool_object& o){
+   d.modify( pool_obj, [&](pamm_pool_object& o){
       pamm_pool_object::nav_entry e;
       e.day = (uint32_t)(d.head_block_time().sec_since_epoch() / 86400);
       e.nav_num = op.nav_num;
@@ -322,8 +310,7 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
          if (equity > hwm) {
             fc::uint128_t profit = equity - hwm;
             fc::uint128_t fee = profit * o.fee_rate_bps / 10000;
-            // Route fee via performance-fee tap (deduct from tank)
-            // For now, just record in fee_pool_balance
+            // Route fee via performance-fee tap (add to fee pool)
             o.fee_pool_balance += (share_type)fee;
          }
       }

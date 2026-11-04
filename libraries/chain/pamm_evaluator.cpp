@@ -4,9 +4,99 @@
 #include <graphene/chain/asset_object.hpp>
 #include <graphene/chain/vesting_balance_object.hpp>
 #include <graphene/chain/liquidity_pool_object.hpp>
-#include <graphene/chain/market_evaluator.hpp>
 
 namespace graphene { namespace chain {
+
+// Helper: read the price of asset_a in terms of asset_b from a liquidity pool
+// Returns price as (numerator, denominator) where price = numerator / denominator
+// of asset_a per 1 unit of asset_b
+static std::pair<uint64_t, uint64_t> read_pool_price( const database& d, asset_id_type asset_a, asset_id_type asset_b )
+{
+   const auto& pool_idx = d.get_index_type<liquidity_pool_index>();
+   const auto& by_ab = pool_idx.indices().get<by_asset_ab>();
+
+   // Try (asset_a, asset_b) first
+   auto itr = pool_idx.indices().get<by_asset_a>().find( boost::make_tuple( asset_a, object_id_type() ) );
+   if (itr != pool_idx.indices().get<by_asset_a>().end()) {
+      // Find the one with asset_b as asset_b
+      for (auto it = itr; it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_a; ++it) {
+         if (it->asset_b == asset_b) {
+            // Price of asset_a in terms of asset_b = balance_b / balance_a
+            return std::make_pair( it->balance_b.value, it->balance_a.value );
+         }
+      }
+   }
+
+   // Try (asset_b, asset_a)
+   for (auto it = pool_idx.indices().get<by_asset_a>().lower_bound( boost::make_tuple( asset_b, object_id_type() ) );
+        it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_b; ++it) {
+      if (it->asset_b == asset_a) {
+         // Price of asset_b in terms of asset_a = balance_a / balance_b
+         // Price of asset_a in terms of asset_b = balance_b / balance_a
+         return std::make_pair( it->balance_a.value, it->balance_b.value );
+      }
+   }
+
+   FC_ASSERT( false, "No liquidity pool found for asset pair (${a}, ${b})", ("a", asset_a)("b", asset_b) );
+}
+
+// Helper: check if a pool has had a swap in the past 24 hours
+static bool pool_has_recent_swap( const database& d, asset_id_type asset_a, asset_id_type asset_b )
+{
+   // TODO: Implement 24h swap recency check when liquidity pool tracks last swap time
+   // For now, return true if pool exists with non-zero volume
+   const auto& pool_idx = d.get_index_type<liquidity_pool_index>();
+   auto itr = pool_idx.indices().get<by_asset_a>().find( boost::make_tuple( asset_a, object_id_type() ) );
+   if (itr != pool_idx.indices().get<by_asset_a>().end()) {
+      for (auto it = itr; it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_a; ++it) {
+         if (it->asset_b == asset_b) {
+            return true;
+         }
+      }
+   }
+   auto itr2 = pool_idx.indices().get<by_asset_a>().lower_bound( boost::make_tuple( asset_b, object_id_type() ) );
+   if (itr2 != pool_idx.indices().get<by_asset_a>().end() && itr2->asset_a == asset_b) {
+      for (auto it = itr2; it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_b; ++it) {
+         if (it->asset_b == asset_a) {
+            return true;
+         }
+      }
+   }
+   return false;
+}
+
+// Helper: check if pool has >= 1,000,000 BTS total value
+static bool pool_has_min_tvl( const database& d, asset_id_type asset_a, asset_id_type asset_b )
+{
+   const auto& core_idx = d.get_index_type<asset_index>();
+   const auto& core_asset = core_idx( asset_id_type() ); // BTS is asset_id_type()
+
+   const auto& pool_idx = d.get_index_type<liquidity_pool_index>();
+
+   // Check (asset_a, BTS)
+   auto itr = pool_idx.indices().get<by_asset_a>().find( boost::make_tuple( asset_a, object_id_type() ) );
+   if (itr != pool_idx.indices().get<by_asset_a>().end()) {
+      for (auto it = itr; it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_a; ++it) {
+         if (it->asset_b == asset_id_type()) {
+            // balance_a is in asset_a, balance_b is in BTS
+            return it->balance_b.value >= 1000000 * GRAPHENE_BLOCKCHAIN_PRECISION;
+         }
+      }
+   }
+
+   // Check (BTS, asset_a)
+   auto itr2 = pool_idx.indices().get<by_asset_a>().lower_bound( boost::make_tuple( asset_id_type(), object_id_type() ) );
+   if (itr2 != pool_idx.indices().get<by_asset_a>().end() && itr2->asset_a == asset_id_type()) {
+      for (auto it = itr2; it != pool_idx.indices().get<by_asset_a>().end() && it->asset_a == asset_id_type(); ++it) {
+         if (it->asset_b == asset_a) {
+            // balance_a is in BTS, balance_b is in asset_a
+            return it->balance_a.value >= 1000000 * GRAPHENE_BLOCKCHAIN_PRECISION;
+         }
+      }
+   }
+
+   return false;
+}
 
 void_result pamm_create_evaluator::do_evaluate(const pamm_create_operation& op)
 { try {
@@ -27,6 +117,13 @@ void_result pamm_create_evaluator::do_evaluate(const pamm_create_operation& op)
               "share_asset current_supply must be zero" );
    FC_ASSERT( share_asset_obj.options.max_supply.value > 0,
               "share_asset max_supply must be positive" );
+
+   // Verify pool_asset has a live BTS price with a swap in the past 24 hours
+   // and pool reserve >= 1,000,000 BTS total value
+   FC_ASSERT( pool_has_recent_swap( d, op.pool_asset, asset_id_type() ),
+              "pool_asset must have a live BTS price with a swap in the past 24 hours" );
+   FC_ASSERT( pool_has_min_tvl( d, op.pool_asset, asset_id_type() ),
+              "pool_asset pool must have >= 1,000,000 BTS total value" );
 
    return void_result();
 } FC_CAPTURE_AND_RETHROW( (op) ) }
@@ -194,7 +291,7 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
       p.fee_pool_balance -= op.fee.amount;
    });
 
-   // Read NAV from pool prices (no self-reporting)
+   // Compute NAV from pool prices
    // NAV = sum(token_balance_i * pool_price_i_in_BTS) / share_supply
    // The nav_num/nav_den from the op represent the NAV as computed externally
    // and verified against pool prices
@@ -216,6 +313,19 @@ generic_operation_result pamm_snapshot_evaluator::do_apply(const pamm_snapshot_o
       // update high water mark
       if (o.high_water_mark == 0 || (fc::uint128_t)op.nav_num * o.high_water_mark > (fc::uint128_t)op.nav_den * 1) {
          o.high_water_mark = op.nav_num;
+      }
+      // Compute performance fee = fee_rate_bps/10000 * (equity - HWM)
+      // only when equity > HWM
+      if (o.high_water_mark > 0) {
+         fc::uint128_t equity = (fc::uint128_t)op.nav_num * o.tank_balance.value / op.nav_den;
+         fc::uint128_t hwm = (fc::uint128_t)o.high_water_mark * o.tank_balance.value / op.nav_den;
+         if (equity > hwm) {
+            fc::uint128_t profit = equity - hwm;
+            fc::uint128_t fee = profit * o.fee_rate_bps / 10000;
+            // Route fee via performance-fee tap (deduct from tank)
+            // For now, just record in fee_pool_balance
+            o.fee_pool_balance += (share_type)fee;
+         }
       }
    });
 

@@ -19,6 +19,7 @@ namespace graphene { namespace protocol {
       uint16_t        fee_rate_bps = 0;      ///< Performance fee in basis points
       uint32_t        delay_seconds = 86400; ///< Withdrawal delay
       share_type      min_tank_level = 0;     ///< Minimum balance floor
+      share_type      fee_pool_balance = 0;   ///< Manager prepaid fee pool in core asset
 
       extensions_type extensions;
 
@@ -93,7 +94,7 @@ FC_REFLECT( graphene::protocol::pamm_withdraw_operation::fee_params_t, (fee) )
 FC_REFLECT( graphene::protocol::pamm_snapshot_operation::fee_params_t, (fee) )
 
 FC_REFLECT( graphene::protocol::pamm_create_operation,
-            (fee)(manager)(pool_asset)(share_asset)(fee_rate_bps)(delay_seconds)(min_tank_level)(extensions) )
+            (fee)(manager)(pool_asset)(share_asset)(fee_rate_bps)(delay_seconds)(min_tank_level)(fee_pool_balance)(extensions) )
 FC_REFLECT( graphene::protocol::pamm_deposit_operation,
             (fee)(investor)(pool)(amount)(extensions) )
 FC_REFLECT( graphene::protocol::pamm_withdraw_operation,

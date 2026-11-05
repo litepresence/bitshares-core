@@ -266,9 +266,9 @@ void_result vault_bond_lock_evaluator::do_evaluate( const vault_bond_lock_operat
 { try {
    const database& d = db();
 
-   // Gateway leg (H2e): vault funding seasons with custody, ahead of price
-   // judgment. Ordering asserted inside.
-   h2_require_gateway_leg( d.head_block_time() );
+   // Price leg (H2e): substrate bonding values through bonded prices, so it
+   // admits at the price height. Ordering asserted inside.
+   h2_require_price_leg( d.head_block_time() );
 
    const vault_object* vault = d.find( op.vault );
    FC_ASSERT( nullptr != vault, "Vault ${v} does not exist", ("v", op.vault) );

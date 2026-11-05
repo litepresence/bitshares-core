@@ -80,11 +80,11 @@ struct hardfork_visitor {
                                                      protocol::oracle_dispute_escalate_operation,
                                                      protocol::challenge_vote_operation >;
    using h2_gateway_ops = fc::typelist::list< protocol::vault_register_operation,
-                                              protocol::vault_bond_lock_operation,
                                               protocol::vault_bond_release_operation,
                                               protocol::vault_rotate_operation >;
    using h2_price_ops = fc::typelist::list< protocol::oracle_bond_lock_operation,
                                             protocol::oracle_bond_release_operation,
+                                            protocol::vault_bond_lock_operation,
                                             protocol::vault_resolve_operation,
                                             protocol::pair_freeze_operation,
                                             protocol::winddown_claim_operation,

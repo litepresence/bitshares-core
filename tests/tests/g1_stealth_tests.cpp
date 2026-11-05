@@ -1801,6 +1801,114 @@ BOOST_AUTO_TEST_CASE( stealth_transfer_happy_path )
      BN_free( bs ); BN_free( bprime );
 } FC_CAPTURE_AND_RETHROW() }
 
+// ---------------------------------------------------------------------------
+// Wallet-side spend_auth producers (WPC-R25-01): op106 stealth_transfer.
+// ---------------------------------------------------------------------------
+
+// Watch-only wallet (tally-only receipt, no spend key) CANNOT build a valid
+// op106 with spend_auth: the receipt is skipped at input selection (tally-only)
+// so no real input is selected and the build fails closed before any
+// spend_auth is produced.
+BOOST_AUTO_TEST_CASE( watch_only_stealth_transfer_refused )
+{ try {
+   generate_block();
+   set_expiration( db, trx );
+   ACTORS( (dan) );
+   const asset_object& core = asset_id_type()( db );
+   transfer( account_id_type()( db ), dan, core.amount( 10000000000 ) );
+   generate_block();
+
+   auto lapi = std::make_shared<graphene::app::login_api>( app );
+   lapi->login( "", "" );
+   fc::api<graphene::app::login_api> rapi( lapi );
+
+   // Hot sender funds a dual-key address; the watch-only recipient holds the
+   // view key only.
+   graphene::wallet::wallet_data wdata;
+   wdata.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api W( wdata, rapi );
+   W.set_password( "wor-hot" ); W.unlock( "wor-hot" );
+   W.set_wallet_filename( "wor-hot.json" );
+   BOOST_CHECK( W.import_key( "dan", graphene::utilities::key_to_wif( dan_private_key ) ) );
+   const std::string bki = "wor alice brainkey";
+   W.create_stealth_address( "alice-st", bki, 0 );
+   auto keys = graphene::wallet::derive_stealth_address_keys( bki, 0 );
+
+   auto confirm = W.transfer_to_blind( "dan", "1.3.0", {{"alice-st","200"},{"alice-st","100"}}, false );
+   BOOST_REQUIRE_EQUAL( confirm.trx.operations.size(), 1u );
+   PUSH_TX( db, confirm.trx );
+   generate_block();
+
+   // Watch-only wallet: view key only, no spend key -> tally-only receipts.
+   graphene::wallet::wallet_data wdata2;
+   wdata2.chain_id = db.get_chain_id();
+   graphene::wallet::wallet_api WO( wdata2, rapi );
+   WO.set_password( "wor-watch" ); WO.unlock( "wor-watch" );
+   WO.set_wallet_filename( "wor-watch.json" );
+   WO.import_stealth_view_key( "alice-wo", graphene::utilities::key_to_wif( keys.view_priv ),
+                               public_key_type( keys.spend_pub ) );
+
+   auto head = db.head_block_num();
+   const uint32_t scan_from = head >= 5 ? head - 5 : 1;
+   auto fresh = WO.scan_stealth_recognitions( scan_from, head );
+   BOOST_REQUIRE_EQUAL( fresh.size(), 2u );
+   BOOST_CHECK( fresh[0].tally_only ); // watch-only recognition: no spend authority
+
+   // "alice-wo" resolves as a dual-key record (both from and to sides classify),
+   // but every receipt is tally-only so no spendable input is selected.
+   std::string err;
+   try { WO.stealth_transfer( "alice-wo", "alice-wo", "50", "1.3.0", false ); }
+   catch( const fc::exception& e ) { err = e.to_detail_string(); }
+   BOOST_REQUIRE( !err.empty() );
+   BOOST_CHECK_MESSAGE( err.find( "No spendable blinded balance" ) != std::string::npos, err );
+} FC_CAPTURE_AND_RETHROW() }
+
+// A hot wallet (spend key present) CAN build a valid op106: spend_auth is
+// produced over the ring members' owner keys and verifies. This exercises the
+// wallet-side producer stealth_prove_spend_auth that the op106 builder calls.
+BOOST_AUTO_TEST_CASE( hot_spend_auth_produces_valid_op106 )
+{ try {
+   const size_t n = GRAPHENE_STEALTH_RING_TARGET; // 16
+   const size_t real_index = 3;
+
+   // Ring members' owner keys; the real member's private key is the spend key.
+   std::vector<fc::ecc::private_key> owner_privs( n );
+   std::vector<public_key_type> owner_keys( n );
+   for( size_t i = 0; i < n; ++i )
+   {
+      owner_privs[i] = fc::ecc::private_key::generate();
+      owner_keys[i] = public_key_type( owner_privs[i].get_public_key() );
+   }
+   const fc::sha256 spend_scalar = owner_privs[real_index].get_secret();
+
+   // Arbitrary fixed message (the builder binds outputs/fee into it; here we
+   // only exercise the spend_auth sign/verify pair).
+   std::string msg32( 32, '\xab' );
+
+   std::vector<char> spend_auth;
+   std::string err;
+   BOOST_CHECK( stealth_prove_spend_auth( GRAPHENE_STEALTH_PROOF_V3,
+                                          owner_keys, real_index, spend_scalar,
+                                          msg32, spend_auth, err ) );
+   BOOST_CHECK( !spend_auth.empty() );
+   // Layout: I(33) || c0(32) || r_0..r_{n-1}(32 each) = 33 + 32 + 32*n.
+   BOOST_CHECK_EQUAL( spend_auth.size(), 33u + 32u + 32u * n );
+
+   BOOST_CHECK( stealth_verify_spend_auth( GRAPHENE_STEALTH_PROOF_V3,
+                                           owner_keys, spend_auth, msg32, err ) );
+
+   // A wrong spend key produces a proof that does not verify: the watch-only
+   // / wrong-key holder cannot forge a spend_auth the verifier accepts.
+   std::vector<char> bad_auth;
+   std::string bad_err;
+   BOOST_CHECK( stealth_prove_spend_auth( GRAPHENE_STEALTH_PROOF_V3,
+                                          owner_keys, real_index,
+                                          fc::sha256::hash( "wrong spend key" ),
+                                          msg32, bad_auth, bad_err ) );
+   BOOST_CHECK( !stealth_verify_spend_auth( GRAPHENE_STEALTH_PROOF_V3,
+                                            owner_keys, bad_auth, msg32, bad_err ) );
+} FC_CAPTURE_AND_RETHROW() }
+
 BOOST_AUTO_TEST_CASE( deposit_histogram_tracks_depositor )
 {
    // TDD RED first: helper + getters do not exist yet; this case must fail

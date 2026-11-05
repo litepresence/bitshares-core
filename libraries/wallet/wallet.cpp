@@ -60,6 +60,7 @@
 #include <fc/thread/scoped_lock.hpp>
 #include <fc/crypto/base58.hpp>
 #include <fc/crypto/aes.hpp>
+#include <openssl/ec.h>
 
 #include <graphene/app/api.hpp>
 #include <graphene/app/util.hpp>
@@ -73,6 +74,10 @@
 #include <graphene/wallet/wallet.hpp>
 #include <graphene/wallet/stealth_receive.hpp>
 #include <graphene/wallet/api_documentation.hpp>
+#include <graphene/chain/stealth_prover.hpp>
+#include <graphene/chain/stealth_proof.hpp>
+#include <graphene/chain/stealth_object.hpp>
+#include <graphene/protocol/stealth.hpp>
 #include "wallet_api_impl.hpp"
 #include <graphene/debug_witness/debug_api.hpp>
 
@@ -2046,6 +2051,382 @@ blind_confirmation wallet_api::blind_transfer_help( const string& from_key_or_la
    // confirm.outputs[].decrypted_memo.blinding_factor holds freshly generated
    // blinds at this point, and fc::exception serializes captured args deep
    // into to_detail_string()/stderr on any later throw (validate/broadcast/sign).
+} FC_CAPTURE_AND_RETHROW( (from_key_or_label)(to_key_or_label)(amount_in)(symbol)(broadcast) ) }
+
+namespace {
+// Negate a 32-byte scalar mod n (the secp256k1 group order).
+fc::sha256 negate_scalar_mod_n( const fc::sha256& s )
+{
+   BIGNUM* bn = BN_new();
+   BN_bin2bn( (const unsigned char*)s.data(), 32, bn );
+   EC_GROUP* g = EC_GROUP_new_by_curve_name( NID_secp256k1 );
+   BIGNUM* order = BN_new();
+   EC_GROUP_get_order( g, order, nullptr );
+   BN_mod( bn, bn, order, nullptr );
+   BN_sub( bn, order, bn );
+   BN_mod( bn, bn, order, nullptr );
+   EC_GROUP_free( g );
+   BN_free( order );
+   fc::sha256 out;
+   BN_bn2binpad( bn, (unsigned char*)out.data(), 32 );
+   BN_free( bn );
+   return out;
+}
+} // anonymous namespace
+
+blind_confirmation wallet_api::stealth_transfer( const string& from_key_or_label,
+                                                 const string& to_key_or_label,
+                                                 const string& amount_in,
+                                                 const string& symbol,
+                                                 bool broadcast )const
+{ try {
+   FC_ASSERT( !is_locked() );
+
+   // Shared counterparty classification (same rule set as blind_transfer_help):
+   // a dual-key recipient is never degraded to the single-key path; the source
+   // must be spendable by this wallet.
+   // Spec: docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 1
+   const auto to_rcpt   = my->resolve_blind_counterparty( to_key_or_label, false );
+   const auto from_rcpt = my->resolve_blind_counterparty( from_key_or_label, true );
+   FC_ASSERT( to_rcpt.dual || to_rcpt.from_address_book,
+              "Cannot classify the recipient: a bare key may be a dual-key view pub, "
+              "and the single-key path would publish a view-derived opening." );
+   FC_ASSERT( from_rcpt.dual || from_rcpt.from_address_book || from_rcpt.wallet_owned,
+              "Cannot classify the source address: the wallet does not hold that key "
+              "and it is not in its address book." );
+
+   public_key_type from_key = from_rcpt.key;
+   public_key_type to_key   = to_rcpt.key;
+
+   fc::optional<asset_object> asset_obj = get_asset(symbol);
+   FC_ASSERT( asset_obj.valid(), "Could not find asset matching ${asset}", ("asset", symbol) );
+   auto amount = asset_obj->amount_from_string( amount_in );
+
+   stealth_transfer_operation op;
+   op.asset_id = asset_obj->get_id();
+   op.proof_version = GRAPHENE_STEALTH_PROOF_V3;
+   op.fee = asset_obj->amount( 5 * GRAPHENE_BLOCKCHAIN_PRECISION ); // placeholder; finalized below
+
+   auto fees  = my->_remote_db->get_global_properties().parameters.get_current_fees();
+
+   // ---- Select the real input from this wallet's spendable receipts ----
+   const uint32_t min_mix = my->_blind_defaults.min_mix_blocks;
+   uint32_t head_block = 0;
+   if( min_mix > 0 )
+      head_block = get_dynamic_global_properties().head_block_number;
+
+   const blind_receipt* real = nullptr;
+   for( const auto& r : my->_wallet.blind_receipts )
+   {
+      if( r.used || r.tally_only || r.pending ) continue;
+      if( r.amount.asset_id != op.asset_id ) continue;
+      if( r.address_key != from_key && r.to_key != from_key ) continue;
+      if( !blind_receipt_mix_eligible( r.received_block, head_block, min_mix ) ) continue;
+      if( r.amount < amount + op.fee ) continue;
+      real = &r;
+      break;
+   }
+   FC_ASSERT( real != nullptr,
+              "No spendable blinded balance for ${from} covering ${amt} + fee",
+              ("from", from_key_or_label)( "amt", amount ) );
+
+   // Real input's opening, on-chain owner key, and spend scalar.
+   // control_authority.key_auths[0] == blinded_balance_object.owner for this
+   // output (single-key owner authority), and my->_keys holds the matching
+   // spend-derived private key (persisted at receipt time).
+   const fc::sha256  real_blind = real->data.blinding_factor;
+   const int64_t     real_value = real->amount.amount.value;
+   const public_key_type owner_key = real->control_authority.key_auths.begin()->first;
+   const string owner_wif = get_private_key( owner_key );
+   FC_ASSERT( !owner_wif.empty(),
+              "No spend key for the source output (watch-only receipt cannot spend)" );
+   auto spend_priv = wif_to_key( owner_wif );
+   FC_ASSERT( spend_priv.valid(),
+              "No spend key for the source output (watch-only receipt cannot spend)" );
+   const fc::sha256 spend_scalar = spend_priv->get_secret();
+
+   // ---- Build the ring: real input + decoys from live chain state ----
+   const uint32_t ring_size = GRAPHENE_STEALTH_RING_TARGET; // 16
+   vector<commitment_type> ring;
+   ring.reserve( ring_size );
+   ring.push_back( real->data.commitment );
+
+   auto all_outputs = my->_remote_db->get_stealth_outputs( op.asset_id, true );
+   for( const auto& o : all_outputs )
+   {
+      if( o.commitment == real->data.commitment || o.spent ) continue;
+      bool dup = false;
+      for( const auto& c : ring ) if( c == o.commitment ) { dup = true; break; }
+      if( !dup ) ring.push_back( o.commitment );
+      if( ring.size() >= ring_size ) break;
+   }
+   FC_ASSERT( ring.size() == ring_size,
+              "Not enough live decoys to form a ring of size ${n}", ("n", ring_size) );
+
+   // ---- Look up each ring member's on-chain owner key (REPAIR-10 cross-check) ----
+   flat_set<commitment_type> ring_set( ring.begin(), ring.end() );
+   auto bal_objs = my->_remote_db->get_blinded_balances( ring_set );
+   map<commitment_type, public_key_type> owner_key_of;
+   for( const auto& b : bal_objs )
+   {
+      FC_ASSERT( b.owner.num_auths() == 1 && b.owner.weight_threshold == 1 &&
+                 b.owner.key_auths.size() == 1,
+                 "Ring member owner is not single-key" );
+      owner_key_of[b.commitment] = b.owner.key_auths.begin()->first;
+   }
+   vector<public_key_type> member_owner_keys;
+   member_owner_keys.reserve( ring.size() );
+   for( const auto& c : ring )
+   {
+      auto itr = owner_key_of.find( c );
+      FC_ASSERT( itr != owner_key_of.end(),
+                 "Ring member commitment is not a known blinded balance" );
+      member_owner_keys.push_back( itr->second );
+   }
+
+   // Real member's position in the ring.
+   size_t real_index = 0;
+   for( size_t i = 0; i < ring.size(); ++i )
+      if( ring[i] == real->data.commitment ) { real_index = i; break; }
+
+   // ---- Value-leg ring proof (dry run to learn key_image + pseudo, then prove for real) ----
+   // Sample the pseudo-output blind (wallet secret state, retained for the kernel).
+   fc::sha256 blind_P = stealth_sample_blind();
+   const fc::ecc::commitment_type P = fc::ecc::blind( blind_P, (uint64_t)real_value );
+
+   const uint8_t alt_version =
+      ( op.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
+      ? GRAPHENE_STEALTH_PROOF_V2
+      : GRAPHENE_STEALTH_PROOF_V1;
+
+   stealth_ring_input ring_input;
+
+   std::vector<fc::ecc::commitment_type> ring_cs( ring.begin(), ring.end() );
+   std::vector<fc::ecc::commitment_type> out_cs; // filled after outputs are built
+
+   stealth_pool_ring_proof rproof;
+   {
+      const std::string dummy( 32, '\0' );
+      stealth_pool_ring_proof dry;
+      std::string perr;
+      FC_ASSERT( stealth_prove_pool_ring( op.proof_version, alt_version,
+         ring, real_index, real_blind, (uint64_t)real_value, blind_P,
+         dummy, dummy, dry, perr ),
+         "Ring dry-run failed: ${e}", ("e", perr) );
+      // Real messages bind the (yet-to-be-finalized) outputs/fee; build them
+      // after outputs are constructed, then re-prove with real messages.
+      ring_input.key_image = dry.key_image;
+      ring_input.pseudo_output = dry.pseudo_output;
+      ring_input.alt_key_image = dry.alt_key_image;
+      ring_input.alt_ring_sig = dry.alt_ring_sig;
+   }
+
+   // ---- Build outputs (to + optional change) ----
+   auto one_time_key = fc::ecc::private_key::generate();
+   auto secret       = one_time_key.get_shared_secret( to_key );
+   auto child        = fc::sha256::hash( secret );
+   auto nonce        = fc::sha256::hash( one_time_key.get_secret() );
+
+   // Dual-key recipient: AuthKey = spend_pub.child(child); single-key: same key.
+   fc::ecc::public_key to_auth_base = to_key;
+   if( to_rcpt.dual && to_rcpt.spend_pub.valid() )
+      to_auth_base = *to_rcpt.spend_pub;
+
+   const bool to_spend_derived = to_rcpt.dual;
+   fc::sha256 to_blind_factor = to_spend_derived
+      ? derive_opening( one_time_key, to_auth_base )
+      : fc::sha256::hash( child );
+
+   fc::ecc::commitment_type to_commitment = fc::ecc::blind( to_blind_factor, amount.amount.value );
+   fc::ecc::commitment_type change_commitment;
+   int64_t change_amount = 0;
+   fc::sha256 change_blind_factor;
+   bool has_change = false;
+
+   int64_t total_in = real_value;
+   int64_t fee_amount = op.fee.amount.value;
+   int64_t needed = amount.amount.value + fee_amount;
+
+   if( total_in > needed )
+   {
+      change_amount = total_in - needed;
+      has_change = true;
+      // Conservation: sum(input openings) = sum(output openings) (mod n)
+      //   real_blind = to_blind_factor + change_blind_factor
+      //   => change_blind_factor = real_blind - to_blind_factor
+      change_blind_factor = fc::ecc::blind_sum( { real_blind,
+                                                   negate_scalar_mod_n( to_blind_factor ) }, 2 );
+      change_commitment = fc::ecc::blind( change_blind_factor, (uint64_t)change_amount );
+   }
+
+   out_cs.push_back( to_commitment );
+   if( has_change ) out_cs.push_back( change_commitment );
+
+   // ---- Real value-leg ring proof with real messages ----
+   {
+      fc::sha256 m = stealth_ring_message( op.proof_version, op.asset_id,
+                                           ring_input.key_image, ring,
+                                           ring_input.pseudo_output, out_cs, op.fee.amount );
+      fc::sha256 ma = stealth_ring_message( alt_version, op.asset_id,
+                                            ring_input.alt_key_image, ring,
+                                            ring_input.pseudo_output, out_cs, op.fee.amount );
+      std::string msg( (const char*)m.data(), 32 );
+      std::string msga( (const char*)ma.data(), 32 );
+      std::string perr;
+      FC_ASSERT( stealth_prove_pool_ring( op.proof_version, alt_version,
+         ring, real_index, real_blind, (uint64_t)real_value, blind_P,
+         msg, msga, rproof, perr ),
+         "Ring prove failed: ${e} (abort — do not retry with tired blinds)", ("e", perr) );
+      FC_ASSERT( rproof.pseudo_output == ring_input.pseudo_output,
+                 "Internal: pseudo unstable across prove calls" );
+      ring_input.ring_sig = rproof.ring_sig;
+      ring_input.alt_key_image = rproof.alt_key_image;
+      ring_input.alt_ring_sig = rproof.alt_ring_sig;
+   }
+
+   // ---- (11a) spend_auth: V3 two-key ring-auth over owner keys ----
+   {
+      fc::sha256 m = stealth_ring_message( op.proof_version, op.asset_id,
+                                           ring_input.key_image, ring,
+                                           ring_input.pseudo_output, out_cs, op.fee.amount );
+      std::string msg32( (const char*)m.data(), 32 );
+      std::vector<char> spend_auth;
+      std::string err;
+      FC_ASSERT( stealth_prove_spend_auth( op.proof_version,
+                                           member_owner_keys,
+                                           real_index,
+                                           spend_scalar,
+                                           msg32,
+                                           spend_auth,
+                                           err ),
+                 "Spend auth proof failed: ${e}", ("e", err) );
+      ring_input.member_owner_keys = std::move( member_owner_keys );
+      ring_input.spend_auth = std::move( spend_auth );
+   }
+
+   ring_input.ring = std::move( ring );
+   ring_input.ring_scheme = GRAPHENE_STEALTH_RING_SCHEME_V1;
+
+   // ---- Output objects ----
+   auto make_output = [&]( const fc::ecc::commitment_type& com, int64_t val,
+                            const fc::sha256& bf, const fc::ecc::public_key& owner_pub,
+                            const fc::sha256& nonce ) -> stealth_blind_output {
+      stealth_blind_output out;
+      out.commitment = com;
+      out.owner = authority( 1, public_key_type( owner_pub.child( fc::sha256::hash( nonce ) ) ), 1 );
+      if( op.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
+      {
+         out.range_proof = fc::ecc::range_proof_sign( 0, com, bf, nonce, 0, RANGE_PROOF_MANTISSA, (uint64_t)val );
+      }
+      else
+      {
+         std::string perr;
+         FC_ASSERT( stealth_prove_bp_plus_m1( com, bf, (uint64_t)val, out.range_proof, perr ),
+                    "BP+ range proof failed: ${e}", ("e", perr) );
+      }
+      return out;
+   };
+
+   stealth_blind_output to_out = make_output( to_commitment, amount.amount.value,
+                                              to_blind_factor, to_auth_base, nonce );
+   op.outputs.push_back( std::move( to_out ) );
+
+   if( has_change )
+   {
+      auto from_child = fc::sha256::hash( one_time_key.get_shared_secret( from_key ) );
+      fc::ecc::public_key from_auth_base = from_key;
+      if( from_rcpt.dual && from_rcpt.spend_pub.valid() )
+         from_auth_base = *from_rcpt.spend_pub;
+      stealth_blind_output change_out = make_output( change_commitment, change_amount,
+                                                     change_blind_factor, from_auth_base, from_child );
+      op.outputs.push_back( std::move( change_out ) );
+   }
+
+   // ---- excess: sum(input blinds) - sum(output blinds) mod n ----
+   {
+                                                                                                                      vector<fc::sha256> out_blinds;
+      out_blinds.push_back( to_blind_factor );
+      if( has_change ) out_blinds.push_back( change_blind_factor );
+      fc::sha256 out_sum = fc::ecc::blind_sum( out_blinds, (uint32_t)out_blinds.size() );
+      op.excess = fc::ecc::blind_sum( { real_blind, negate_scalar_mod_n( out_sum ) }, 2 );
+   }
+
+   // ---- Finalize fee (depends on output count) ----
+   op.fee = fees.calculate_fee( op, asset_obj->options.core_exchange_rate );
+
+   // Re-bind messages with the final fee (the message binds fee).
+   {
+      const uint8_t av =
+         ( op.proof_version == GRAPHENE_STEALTH_PROOF_V1 )
+         ? GRAPHENE_STEALTH_PROOF_V2
+         : GRAPHENE_STEALTH_PROOF_V1;
+      fc::sha256 m = stealth_ring_message( op.proof_version, op.asset_id,
+                                           ring_input.key_image, ring_cs,
+                                           ring_input.pseudo_output, out_cs, op.fee.amount );
+      std::string msg32( (const char*)m.data(), 32 );
+      // Re-prove spend_auth with the final fee bound in the message.
+      std::vector<char> spend_auth;
+      std::string err;
+      FC_ASSERT( stealth_prove_spend_auth( op.proof_version,
+                                           ring_input.member_owner_keys,
+                                           real_index,
+                                           spend_scalar,
+                                           msg32,
+                                           spend_auth,
+                                           err ),
+                 "Spend auth proof failed (final fee): ${e}", ("e", err) );
+      ring_input.spend_auth = std::move( spend_auth );
+
+      // Re-prove value-leg ring too (fee is in the message).
+      stealth_pool_ring_proof rproof2;
+      std::string perr;
+      fc::sha256 ma = stealth_ring_message( av, op.asset_id,
+                                            ring_input.alt_key_image, ring_cs,
+                                            ring_input.pseudo_output, out_cs, op.fee.amount );
+      std::string msga( (const char*)ma.data(), 32 );
+      FC_ASSERT( stealth_prove_pool_ring( op.proof_version, av,
+         ring_cs, real_index, real_blind, (uint64_t)real_value, blind_P,
+         (const char*)m.data(), msga, rproof2, perr ),
+         "Ring prove failed (final fee): ${e}", ("e", perr) );
+      ring_input.ring_sig = rproof2.ring_sig;
+      ring_input.alt_ring_sig = rproof2.alt_ring_sig;
+   }
+
+   // Sort commitments (consensus requires sorted outputs).
+   std::sort( op.outputs.begin(), op.outputs.end(),
+              []( const stealth_blind_output& a, const stealth_blind_output& b )
+              { return a.commitment < b.commitment; } );
+
+   op.inputs.push_back( std::move( ring_input ) );
+
+   op.validate();
+
+   // ---- Build + sign transaction ----
+   signed_transaction tx;
+   tx.operations = { op };
+   maybe_delay_blind_broadcast( broadcast );
+   tx = sign_transaction( tx, broadcast );
+
+   // ---- Confirmation ----
+   blind_confirmation confirm;
+   confirm.trx = tx;
+   {
+      blind_confirmation::output o;
+      o.label = to_key_or_label;
+      o.pub_key = to_key;
+      o.decrypted_memo.amount = amount;
+      o.decrypted_memo.commitment = to_commitment;
+      o.decrypted_memo.check = secret._hash[0].value();
+      o.decrypted_memo.blinding_factor = to_spend_derived ? fc::sha256() : to_blind_factor;
+      o.confirmation.one_time_key = one_time_key.get_public_key();
+      o.confirmation.to = public_key_type( to_auth_base.child( child ) );
+      o.confirmation.encrypted_memo = fc::aes_encrypt( secret, fc::raw::pack( o.decrypted_memo ) );
+      o.auth = to_out.owner;
+      o.confirmation_receipt = o.confirmation;
+      confirm.outputs.push_back( std::move( o ) );
+   }
+
+   return confirm;
 } FC_CAPTURE_AND_RETHROW( (from_key_or_label)(to_key_or_label)(amount_in)(symbol)(broadcast) ) }
 
 

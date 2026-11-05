@@ -1095,6 +1095,32 @@ class wallet_api
                                          bool broadcast = false )const;
 
       /**
+       * Ring-signature stealth transfer (op106, BSIP-2): spend one or more of
+       * this wallet's blinded balances to a blinded recipient, hiding the
+       * spent input in a linkable ring.
+       *
+       * For proof_version >= V3 the operation carries spend_auth: a CLSAG ring
+       * signature over the ring members' owner keys proving the wallet holds
+       * the spend scalar of the real member without naming it. The spend
+       * scalar is derived from the wallet's own spend key, so a watch-only
+       * wallet (view key only, tally-only receipts) cannot build one and this
+       * call fails closed.
+       *
+       * @param from_key_or_label a public key in Base58 format or a label to transfer from
+       * @param to_key_or_label a public key in Base58 format or a label to transfer to
+       * @param amount the amount to be transferred
+       * @param symbol_or_id symbol or ID of the asset to be transferred
+       * @param broadcast true to broadcast the transaction on the network
+       * @return a blind confirmation
+       * @see docs/superpowers/specs/2026-10-19-viewkey-ring-auth-construction.md section 3 step 5
+       */
+      blind_confirmation stealth_transfer( const string& from_key_or_label,
+                                           const string& to_key_or_label,
+                                           const string& amount,
+                                           const string& symbol_or_id,
+                                           bool broadcast = false )const;
+
+      /**
        * Query the blind-by-default settings (BSIP-2 §2). Conformance
        * hook: tests and the browser-wallet contract assert these values.
        */
@@ -2275,6 +2301,7 @@ FC_API( graphene::wallet::wallet_api,
         (transfer_to_blind)
         (transfer_from_blind)
         (blind_transfer)
+        (stealth_transfer)
         (get_blind_defaults)
         (set_blind_by_default)
         (set_blind_defaults)

@@ -466,29 +466,41 @@ void_result asset_update_evaluator::do_evaluate(const asset_update_operation& o)
    a_copy.options = o.new_options;
    a_copy.validate();
 
-   // OOR-02: Validate open_order_fee range (0..500 bps) and enforce the empty-book
-   // rule on the asset_update path. Reject out-of-range fees and fee changes while
-   // open orders rest on markets involving this asset, to prevent an issuer from
-   // stranding orders with stale fee terms or silently raising the fee on resting
-   // liquidity.
+   // OOR-02 / REPAIR-32: Validate open_order_fee range (0..500 bps) and enforce
+   // the empty-book rule on the asset_update path. Reject out-of-range fees,
+   // fee changes while open orders rest, AND fee removal (silently dropping the
+   // extension bypasses the bsip5 reward program without proper opt-out).
    // Spec: docs/bsips/bsip-5-open-order-rewards.md §1
-   if( o.new_options.extensions.value.open_order_fee.valid() )
+   bool current_fee_valid = a.options.extensions.value.open_order_fee.valid();
+   uint16_t current_fee = current_fee_valid ? *a.options.extensions.value.open_order_fee : 0;
+   bool new_fee_valid = o.new_options.extensions.value.open_order_fee.valid();
+   uint16_t new_fee = new_fee_valid ? *o.new_options.extensions.value.open_order_fee : 0;
+
+   if( new_fee_valid )
    {
-      uint16_t new_fee = *o.new_options.extensions.value.open_order_fee;
       if( new_fee > 500 )
          FC_ASSERT( false, "open_order_fee must be <= 500 bps" );
-      uint16_t current_fee = a.options.extensions.value.open_order_fee.valid() ? *a.options.extensions.value.open_order_fee : 0;
-      if( new_fee != current_fee )
+   }
+
+   if( new_fee != current_fee )
+   {
+      // Fee change or removal: enforce empty-book rule
+      const auto& lo_idx = d.get_index_type<limit_order_index>().indices();
+      for( const auto& lo : lo_idx )
       {
-         const auto& lo_idx = d.get_index_type<limit_order_index>().indices();
-         for( const auto& lo : lo_idx )
-         {
-            if( lo.bsip5_placement_block == 0 ) continue;
-            auto mkt = lo.get_market();
-            if( mkt.first == a.id || mkt.second == a.id )
-               FC_ASSERT( false, "Cannot change open_order_fee: open orders rest on a market involving this asset" );
-         }
+         if( lo.bsip5_placement_block == 0 ) continue;
+         auto mkt = lo.get_market();
+         if( mkt.first == a.id || mkt.second == a.id )
+            FC_ASSERT( false, "Cannot change or remove open_order_fee: open orders rest on a market involving this asset" );
       }
+   }
+
+   // Fee removal without going through bsip5 opt-out is not allowed:
+   // an asset enrolled in the reward program cannot have its fee silently
+   // removed via asset_update. Use the bsip5 opt-out path instead.
+   if( current_fee_valid && !new_fee_valid )
+   {
+      FC_ASSERT( false, "Cannot remove open_order_fee via asset_update; use bsip5 opt-out to exit the reward program" );
    }
 
    if( o.new_issuer )

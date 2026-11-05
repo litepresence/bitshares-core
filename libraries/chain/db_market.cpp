@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 
+#include <limits>
 #include <graphene/chain/database.hpp>
 
 #include <graphene/chain/account_object.hpp>
@@ -1852,7 +1853,11 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                      // OOR-04: initialize rolling 1-hour TWAP window on first fill.
                      // Spec: docs/bsips/bsip-5-open-order-rewards.md §4
                      uint64_t now_block = this->head_block_num();
-                     uint64_t fill_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
+                     __uint128_t fpw = (__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value;
+                     // REPAIR-34 (Important): guard __uint128→uint64 narrowing on fill_price_wad
+                     FC_ASSERT( fpw <= __uint128_t( std::numeric_limits<uint64_t>::max() ),
+                                "fill_price_wad exceeds uint64_t range; narrowing would truncate" );
+                     uint64_t fill_price_wad = (uint64_t)fpw;
                      o.window_start_block = now_block;
                      o.reference_price_wad = fill_price_wad;
                      o.reference_volume = receives.amount;
@@ -1870,7 +1875,11 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                      // otherwise compute a time-weighted average with the new fill.
                      // Spec: docs/bsips/bsip-5-open-order-rewards.md §4
                      uint64_t now_block = this->head_block_num();
-                     uint64_t fill_price_wad = (uint64_t)((__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value);
+                     __uint128_t fpw = (__uint128_t)receives.amount.value * BSIP5_WAD / pays.amount.value;
+                     // REPAIR-34 (Important): guard __uint128→uint64 narrowing on fill_price_wad
+                     FC_ASSERT( fpw <= __uint128_t( std::numeric_limits<uint64_t>::max() ),
+                                "fill_price_wad exceeds uint64_t range; narrowing would truncate" );
+                     uint64_t fill_price_wad = (uint64_t)fpw;
                      if( o.window_start_block == 0 || now_block - o.window_start_block > BSIP5_MAX_T_BLOCKS )
                      {
                         o.window_start_block = now_block;
@@ -1882,6 +1891,9 @@ bool database::fill_limit_order( const limit_order_object& order, const asset& p
                         __uint128_t new_wad = ((__uint128_t)o.reference_price_wad * (uint64_t)o.reference_volume.value +
                                                (__uint128_t)fill_price_wad * (uint64_t)receives.amount.value) /
                                               ((uint64_t)o.reference_volume.value + (uint64_t)receives.amount.value);
+                        // REPAIR-34 (Important): guard __uint128→uint64 narrowing on new_wad
+                        FC_ASSERT( new_wad <= __uint128_t( std::numeric_limits<uint64_t>::max() ),
+                                   "new_wad exceeds uint64_t range; narrowing would truncate" );
                         o.reference_price_wad = (uint64_t)new_wad;
                         o.reference_volume += receives.amount;
                      }

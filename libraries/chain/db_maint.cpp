@@ -1,5 +1,6 @@
 #include <vector>
 #include <algorithm>
+#include <limits>
 /*
  * Copyright (c) 2015 Cryptonomex, Inc., and contributors.
  *
@@ -1658,12 +1659,23 @@ void distribute_bsip5_rewards( database& db )
          if( lo.sell_price.base.asset_id == mr.base_asset && lo.sell_price.quote.asset_id == mr.quote_asset )
          {
             if( lo.sell_price.base.amount > 0 )
-               price_wad = (uint64_t)((__uint128_t)lo.sell_price.quote.amount.value * BSIP5_WAD / lo.sell_price.base.amount.value);
+            {
+               __uint128_t pw = (__uint128_t)lo.sell_price.quote.amount.value * BSIP5_WAD / lo.sell_price.base.amount.value;
+               // REPAIR-34 (Important, BSIP5-18-V?): guard __uint128→uint64 narrowing on price_wad
+               FC_ASSERT( pw <= __uint128_t( std::numeric_limits<uint64_t>::max() ),
+                          "price_wad exceeds uint64_t range; narrowing would truncate" );
+               price_wad = (uint64_t)pw;
+            }
          }
          else if( lo.sell_price.base.asset_id == mr.quote_asset && lo.sell_price.quote.asset_id == mr.base_asset )
          {
             if( lo.sell_price.quote.amount > 0 )
-               price_wad = (uint64_t)((__uint128_t)lo.sell_price.base.amount.value * BSIP5_WAD / lo.sell_price.quote.amount.value);
+            {
+               __uint128_t pw = (__uint128_t)lo.sell_price.base.amount.value * BSIP5_WAD / lo.sell_price.quote.amount.value;
+               FC_ASSERT( pw <= __uint128_t( std::numeric_limits<uint64_t>::max() ),
+                          "price_wad exceeds uint64_t range; narrowing would truncate" );
+               price_wad = (uint64_t)pw;
+            }
          }
          uint64_t pk = bsip5_proximity_weight( price_wad, mr.reference_price_wad );
          if( pk == 0 ) continue;

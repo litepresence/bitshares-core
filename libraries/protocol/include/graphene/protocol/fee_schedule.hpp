@@ -195,7 +195,7 @@ namespace graphene { namespace protocol {
       /**
        *  Validates all of the parameters are present and accounted for.
        */
-      void validate()const {}
+      void validate()const { FC_ASSERT( scale > 0, "fee schedule scale must be positive" ); }
 
       template<typename Operation>
       const typename Operation::fee_params_t& get()const

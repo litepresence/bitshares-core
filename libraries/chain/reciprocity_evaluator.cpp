@@ -278,6 +278,10 @@ static void r_royalty_split( uint128_t raw_fee, uint64_t founder_royalty, uint64
                               uint128_t& founder_share, uint128_t& promoter_share, uint128_t& lp_share )
 {
    constexpr uint128_t BASIS = RECIPROCITY_BASIS;
+   // REPAIR-44 (Important, BSIP4-06-V): Cap total royalty to prevent excessive
+   // extraction. Defaults are 250+250=500 bps (5%); cap total at 500 bps.
+   FC_ASSERT( founder_royalty + promoter_royalty <= 500,
+              "Founder + promoter royalty exceeds 500 bps cap" );
    uint128_t fg = 0, pg = 0, lg = 0;
    if( raw_fee >= 3 ) { fg = 1; pg = 1; lg = 1; }
    else if( raw_fee >= 2 ) { fg = 1; pg = 1; }

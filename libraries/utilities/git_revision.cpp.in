@@ -1,9 +1,9 @@
 #include <stdint.h>
 #include <graphene/utilities/git_revision.hpp>
 
-#define GRAPHENE_GIT_REVISION_SHA "47fb94197438dda7cec641591752192c0b309a71"
-#define GRAPHENE_GIT_REVISION_UNIX_TIMESTAMP 1793748937
-#define GRAPHENE_GIT_REVISION_DESCRIPTION "g1-stealth ViewKey/ring-auth fix"
+#define GRAPHENE_GIT_REVISION_SHA "d9731061"
+#define GRAPHENE_GIT_REVISION_UNIX_TIMESTAMP 1793856000
+#define GRAPHENE_GIT_REVISION_DESCRIPTION "g1-stealth WPC-R25-01 prover-side ring-auth fix"
 
 namespace graphene { namespace utilities {
 

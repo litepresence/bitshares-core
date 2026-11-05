@@ -537,17 +537,20 @@ bool stealth_prove_pool_ring( uint8_t version, uint8_t alt_version,
 {
    using protocol::GRAPHENE_STEALTH_PROOF_V1;
    using protocol::GRAPHENE_STEALTH_PROOF_V2;
+   using protocol::GRAPHENE_STEALTH_PROOF_V3;
    using protocol::GRAPHENE_STEALTH_RING_TARGET;
    using protocol::GRAPHENE_STEALTH_RING_MAX;
 
    const size_t n = ring.size();
    if( ( version != GRAPHENE_STEALTH_PROOF_V1 &&
-         version != GRAPHENE_STEALTH_PROOF_V2 ) ||
+         version != GRAPHENE_STEALTH_PROOF_V2 &&
+         version != GRAPHENE_STEALTH_PROOF_V3 ) ||
        ( alt_version != GRAPHENE_STEALTH_PROOF_V1 &&
-         alt_version != GRAPHENE_STEALTH_PROOF_V2 ) ||
+         alt_version != GRAPHENE_STEALTH_PROOF_V2 &&
+         alt_version != GRAPHENE_STEALTH_PROOF_V3 ) ||
        alt_version == version )
    {
-      err = "versions must be distinct V1/V2";
+      err = "versions must be distinct V1/V2/V3";
       return false;
    }
    // G2 consensus floors rings at TARGET (no thin-pool emergency leg);

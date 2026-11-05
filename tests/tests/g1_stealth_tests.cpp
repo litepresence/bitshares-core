@@ -10256,6 +10256,7 @@ struct g2_pool
    liquidity_pool_id_type   pool;
    std::vector<fc::ecc::commitment_type> commits;
    std::vector<fc::sha256>               blinds;
+   std::vector<fc::sha256>               spend_keys; // V3 ring-auth spend scalars
    int64_t                               each = 1000;
 };
 
@@ -10339,6 +10340,7 @@ static g2_pool g2_fund_pool( database_fixture& f, const account_object& funder,
       PUSH_TX( db, trx ); trx.clear_signatures(); trx.operations.clear();
       p.commits.push_back( o.commitment );
       p.blinds.push_back( B );
+      p.spend_keys.push_back( k.get_secret() );
    };
    // R11R4 + R17B: 5 windows x 4 blinds. The sampler identities make every
    // blind spendable: post-R17B the real's window is one bucket among the
@@ -12274,7 +12276,7 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_roundtrip )
    // PRODUCTION builder (undefined pre-Step-4: link RED).
    stealth_pool_exchange_operation op =
       graphene::chain::stealth_prove_pool_exchange(
-         db, p.pool( db ), sell, minv, opening );
+         db, p.pool( db ), sell, minv, opening, p.spend_keys[5] );
    BOOST_CHECK_NO_THROW( op.validate() );
    // Exact-cover fee (link-4 binding): fee == a − f_maker − pool_pays.
    pool_exchange_amounts ex = calculate_pool_exchange_amounts(
@@ -12337,7 +12339,7 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_floor_abort )
    // sits below the anchor-priced floor → abort, never a refused op.
    BOOST_CHECK_THROW(
       graphene::chain::stealth_prove_pool_exchange(
-         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening ),
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening, p.spend_keys[5] ),
       fc::exception );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
@@ -12386,10 +12388,10 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_min_abort )
    // abort to the min leg, not the floor leg (cf. floor_abort's geometry).
    BOOST_CHECK_NO_THROW(
       graphene::chain::stealth_prove_pool_exchange(
-         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening ) );
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening, p.spend_keys[5] ) );
    BOOST_CHECK_THROW(
       graphene::chain::stealth_prove_pool_exchange(
-         db, p.pool( db ), sell, asset( v + 1000, p.asset_b ), opening ),
+         db, p.pool( db ), sell, asset( v + 1000, p.asset_b ), opening, p.spend_keys[5] ),
       fc::exception );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_a.value, 1000000 );
    BOOST_CHECK_EQUAL( p.pool( db ).balance_b.value, 1000000 );
@@ -12436,7 +12438,7 @@ BOOST_AUTO_TEST_CASE( wallet_poolswap_builder_tamper_fails )
    opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
    stealth_pool_exchange_operation honest =
       graphene::chain::stealth_prove_pool_exchange(
-         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening );
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening, p.spend_keys[5] );
    stealth_pool_exchange_operation tampered = honest;
    tampered.input.pseudo_output.data()[0] ^= 0x01;
    trx.operations = { tampered };
@@ -12548,7 +12550,7 @@ BOOST_AUTO_TEST_CASE( wallet_stealth_pool_swap_delay )
    opening.output_owner = authority( 1, public_key_type( rk.get_public_key() ), 1 );
    stealth_pool_exchange_operation honest =
       graphene::chain::stealth_prove_pool_exchange(
-         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening );
+         db, p.pool( db ), sell, asset( v - 50, p.asset_b ), opening, p.spend_keys[5] );
 
    graphene::wallet::wallet_data wdata;
    graphene::wallet::wallet_api w( wdata, fc::api<graphene::app::login_api>() );
@@ -12634,7 +12636,7 @@ static stealth_pool_exchange_operation T_wallet_honest_swap(
       db, c.pool.pool( db ),
       asset( c.pool.each, c.pool.asset_a ),
       asset( c.v_out - min_discount, c.pool.asset_b ),
-      opening );
+      opening, c.pool.spend_keys[input_idx] );
 }
 
 BOOST_AUTO_TEST_CASE( wallet_poolswap_retarget_pool )

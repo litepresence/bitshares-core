@@ -43,6 +43,7 @@ using protocol::GRAPHENE_STEALTH_RING_TARGET;
 using protocol::GRAPHENE_STEALTH_THIN_POOL_DEPTH;
 using protocol::GRAPHENE_STEALTH_PROOF_V1;
 using protocol::GRAPHENE_STEALTH_PROOF_V2;
+using protocol::GRAPHENE_STEALTH_PROOF_V3;
 using protocol::GRAPHENE_STEALTH_DECOY_MIN_AGE_SEC;
 using protocol::GRAPHENE_STEALTH_DECOY_SKEW_WINDOW_BLOCKS;
 
@@ -565,7 +566,9 @@ bool stealth_verify_ring( uint8_t version,
                           std::string& err )
 {
    const size_t n = in.ring.size();
-   if( version != GRAPHENE_STEALTH_PROOF_V1 && version != GRAPHENE_STEALTH_PROOF_V2 )
+   if( version != GRAPHENE_STEALTH_PROOF_V1 &&
+       version != GRAPHENE_STEALTH_PROOF_V2 &&
+       version != GRAPHENE_STEALTH_PROOF_V3 )
       { err = "bad version"; return false; }
    if( n < GRAPHENE_STEALTH_RING_MIN || n > GRAPHENE_STEALTH_RING_MAX )
       { err = "ring size out of bounds"; return false; }

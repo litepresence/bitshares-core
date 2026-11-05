@@ -235,7 +235,8 @@ void stealth_pool_exchange_operation::validate()const
    FC_ASSERT( amount_to_sell.amount > 0, "pool swap sell amount must be positive" );
    FC_ASSERT( min_to_receive.amount > 0, "pool swap slippage floor must be positive" );
    FC_ASSERT( proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
-              proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+              proof_version == GRAPHENE_STEALTH_PROOF_V3,
               "unknown proof version" );
    // 1-in/1-out is structural (single input/output fields, no vectors), so
    // no count bounds are needed here — unlike op104's 1..8 vectors.

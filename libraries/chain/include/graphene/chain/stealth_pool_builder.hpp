@@ -137,6 +137,7 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
    const protocol::asset& amount_to_sell,
    const protocol::asset& min_to_receive,
    const stealth_pool_swap_opening& input_opening,
-   uint8_t proof_version = protocol::GRAPHENE_STEALTH_PROOF_V2 );
+   const fc::sha256& spend_priv,   // real input's spend-key scalar (V3 ring-auth)
+   uint8_t proof_version = protocol::GRAPHENE_STEALTH_PROOF_V3 );
 
 } } // graphene::chain

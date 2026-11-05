@@ -22,6 +22,7 @@
 
 #include <openssl/rand.h>
 
+#include <iostream>
 #include <map>
 #include <set>
 
@@ -334,12 +335,15 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
    const protocol::asset& amount_to_sell,
    const protocol::asset& min_to_receive,
    const stealth_pool_swap_opening& input_opening,
+   const fc::sha256& spend_priv,
    uint8_t proof_version )
 {
    using protocol::GRAPHENE_STEALTH_PROOF_V1;
    using protocol::GRAPHENE_STEALTH_PROOF_V2;
+   using protocol::GRAPHENE_STEALTH_PROOF_V3;
    FC_ASSERT( proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
-              proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+              proof_version == GRAPHENE_STEALTH_PROOF_V3,
               "Unknown proof version" );
    const uint8_t alt_version = ( proof_version == GRAPHENE_STEALTH_PROOF_V1 )
       ? GRAPHENE_STEALTH_PROOF_V2 : GRAPHENE_STEALTH_PROOF_V1;
@@ -457,7 +461,7 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
       std::string perr;
       FC_ASSERT( stealth_prove_value_pin( P, a,
          pool.get_id().instance.value, bP, T33, s32, perr ),
-         "Value-pin prove failed: ${e} (abort — do not retry with tired blinds)",
+         "Value-pin prove failed: ${e} (abort – do not retry with tired blinds)",
          ("e", perr) );
    }
 
@@ -514,7 +518,7 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
    op.pool = pool.get_id();
    op.amount_to_sell = amount_to_sell;
    op.min_to_receive = min_to_receive;
-   op.proof_version = proof_version;
+   op.proof_version = protocol::GRAPHENE_STEALTH_PROOF_V3;
    op.excess = excess;
    op.input.ring = smp.ring;
    op.input.key_image = rproof.key_image;
@@ -526,7 +530,81 @@ protocol::stealth_pool_exchange_operation stealth_prove_pool_exchange(
    op.output = sout;
    op.value_pin.assign( T33.begin(), T33.end() );
    op.value_pin.insert( op.value_pin.end(), s32.begin(), s32.end() );
-   op.validate();
+
+   // (11a) ViewKey ring-auth (WPC-R25-01): bind the ring spend to spend
+   // authority via spend_auth. Look up each ring member's owner key from
+   // its blinded balance object, then prove knowledge of the real member's
+   // spend scalar without naming it. This closes the ViewKey spend gap:
+   // a view-key holder cannot forge spend_auth because it is cross-checked
+   // against on-chain owner keys (REPAIR-10).
+   {
+      const auto& bbi_idx = db.get_index_type<blinded_balance_index>()
+                                 .indices().get<by_commitment>();
+      std::vector<protocol::public_key_type> member_owner_keys;
+      member_owner_keys.reserve( smp.ring.size() );
+      for( const auto& commitment : smp.ring )
+      {
+         const auto b_itr = bbi_idx.find( commitment );
+         FC_ASSERT( b_itr != bbi_idx.end(),
+                    "Ring member commitment is not a known blinded balance" );
+         const authority& owner_auth = b_itr->owner;
+         FC_ASSERT( owner_auth.num_auths() == 1 &&
+                    owner_auth.weight_threshold == 1 &&
+                    owner_auth.key_auths.size() == 1,
+                    "Ring member owner is not single-key" );
+         member_owner_keys.push_back( owner_auth.key_auths.begin()->first );
+      }
+      // Compute the ring message for spend_auth (same domain as the value
+      // leg — single-sourced with the evaluator via stealth_ring_message).
+      std::vector<fc::ecc::commitment_type> ring_cs( smp.ring.begin(),
+                                                     smp.ring.end() );
+      std::vector<fc::ecc::commitment_type> out_cs = { Cout };
+      fc::sha256 m = stealth_ring_message( protocol::GRAPHENE_STEALTH_PROOF_V3,
+                                           amount_to_sell.asset_id,
+                                           rproof.key_image,
+                                           ring_cs,
+                                           rproof.pseudo_output,
+                                           out_cs,
+                                           cover );
+      std::string msg32( (const char*)m.data(), 32 );
+      // Generate spend_auth: proves knowledge of the real member's spend
+      // scalar without naming it. Fail-closed on any RNG/EC failure.
+      std::vector<char> spend_auth;
+      std::string err;
+      if( !stealth_prove_spend_auth( protocol::GRAPHENE_STEALTH_PROOF_V3,
+                                     member_owner_keys,
+                                     smp.real_index,
+                                     spend_priv,
+                                     msg32,
+                                     spend_auth,
+                                     err ) )
+      {
+         std::cerr << "SPEND_AUTH FAIL: real_index=" << smp.real_index
+                   << " ring_size=" << member_owner_keys.size()
+                   << " err=" << err << std::endl;
+         FC_ASSERT( false, "Spend auth proof failed: ${e}", ("e", err) );
+      }
+      op.input.member_owner_keys = std::move( member_owner_keys );
+      op.input.spend_auth = std::move( spend_auth );
+   }
+
+   try {
+      op.validate();
+   } catch( const fc::exception& e ) {
+      std::cerr << "VALIDATE ERROR: " << e.to_detail_string() << std::endl;
+      std::cerr << "  proof_version=" << (int)op.proof_version
+                << " ring_size=" << op.input.ring.size()
+                << " key_image_size=" << op.input.key_image.size()
+                << " ring_sig_size=" << op.input.ring_sig.size()
+                << " alt_key_image_size=" << op.input.alt_key_image.size()
+                << " alt_ring_sig_size=" << op.input.alt_ring_sig.size()
+                << " range_proof_size=" << op.output.range_proof.size()
+                << " value_pin_size=" << op.value_pin.size()
+                << " member_owner_keys_size=" << op.input.member_owner_keys.size()
+                << " spend_auth_size=" << op.input.spend_auth.size()
+                << std::endl;
+      throw;
+   }
    return op;
 }
 

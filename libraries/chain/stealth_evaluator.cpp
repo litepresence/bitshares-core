@@ -2351,7 +2351,8 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
    FC_ASSERT( o.amount_to_sell.amount > 0, "Stealth pool swap sell amount must be positive" );
    FC_ASSERT( o.min_to_receive.amount > 0, "Stealth pool swap slippage floor must be positive" );
    FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V1 ||
-              o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+              o.proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+              o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
               "Unknown proof version" );
    FC_ASSERT( o.value_pin.size() == 65, "Stealth pool swap value_pin must be 65 bytes" );
    FC_ASSERT( o.output.range_proof.size() == 592,
@@ -2359,7 +2360,8 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
    // V1 sunset, mirroring the ring at :529-532. Without this a V1 op109 past
    // sunset would mint fresh V1-domain-nullified outputs, defeating the sunset.
    if( d.head_block_time() >= stealth_v1_sunset_time( d ) )
-      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
+                 o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
                  "V1 stealth pool swaps are frozen past sunset (use turnstile re-proof)" );
 
    _pool = &o.pool(d);
@@ -2520,6 +2522,42 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
               "Key image already spent" );
    FC_ASSERT( nul.find( nullifier_key( in.alt_key_image ) ) == nul.end(),
               "Alternate key image already spent" );
+
+   // (11a) ViewKey ring-auth (WPC-R25-01): for V3, spend_auth binds the ring
+   // spend to spend authority — proves knowledge of the real member's spend
+   // scalar without naming it. Cross-checked against on-chain owner keys at
+   // build time (REPAIR-10); verified here so a view-key holder cannot forge
+   // a V3 spend. Empty for V1/V2 (grandfathered).
+   if( o.proof_version >= protocol::GRAPHENE_STEALTH_PROOF_V3 )
+   {
+      FC_ASSERT( !in.member_owner_keys.empty() &&
+                 in.member_owner_keys.size() == in.ring.size(),
+                 "member_owner_keys must have one entry per ring member" );
+      FC_ASSERT( !in.spend_auth.empty(), "spend_auth required for V3" );
+      // Recompute the same msg32 the builder used (G1RM domain over the same
+      // fields, single-sourced with the prover via stealth_ring_message).
+      std::vector<fc::ecc::commitment_type> sa_ring_cs( in.ring.begin(),
+                                                        in.ring.end() );
+      std::vector<fc::ecc::commitment_type> sa_out_cs = { o.output.commitment };
+      fc::sha256 sa_m = stealth_ring_message( protocol::GRAPHENE_STEALTH_PROOF_V3,
+                                              o.amount_to_sell.asset_id,
+                                              in.key_image,
+                                              sa_ring_cs,
+                                              in.pseudo_output,
+                                              sa_out_cs,
+                                              o.fee.amount );
+      std::string sa_msg( (const char*)sa_m.data(), 32 );
+      std::string sa_err;
+      FC_ASSERT( stealth_verify_spend_auth( o.proof_version, in.member_owner_keys,
+                                            in.spend_auth, sa_msg, sa_err ),
+                 "Spend auth does not verify: ${e}", ("e", sa_err) );
+   }
+   else
+   {
+      FC_ASSERT( in.spend_auth.empty(), "spend_auth must be empty for V1/V2" );
+      FC_ASSERT( in.member_owner_keys.empty(),
+                 "member_owner_keys must be empty for V1/V2" );
+   }
 
    // (12) BP+ range (m=1 enforced): v_out ∈ [0,2^64); transitively enforces
    // F ≤ amount_to_sell alongside (9).

@@ -253,10 +253,14 @@ static uint128_t r_compute_scale( const vector<share_type>& balances )
    for( const auto& b : balances )
       if( b.value > max_bal ) max_bal = b.value;
    if( max_bal == 0 ) return 0;
-   int digits = static_cast<int>( std::log10( std::max<int64_t>( 1, max_bal ) ) ) + 1;
+   // Replace std::log10 with integer digit-count (no libm; deterministic across platforms).
+   // Count decimal digits by repeated division by 10.
+   int d = 0;
+   int64_t v = std::max<int64_t>( 1, max_bal );
+   while( v > 0 ) { v /= 10; d++; }
    uint128_t s = 1;
     constexpr int SCALE_BUFFER = 4;
-   for( int i = 0; i < digits + SCALE_BUFFER; i++ )
+   for( int i = 0; i < d + SCALE_BUFFER; i++ )
       s = r_safe_mul( s, 10 );
    return s;
 }

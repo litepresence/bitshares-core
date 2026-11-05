@@ -1920,9 +1920,40 @@ BOOST_AUTO_TEST_CASE( p406_konstant_overflow_adversarial_ratios )
 /// REPAIR-07 (Critical, CODE): BSIP4-25-N konstant zero-skip drain theft.
 /// A token drained to balance==0 with genesis>0 must terminate the konstant
 /// (return 0), not vanish from the log average.
-/*REPAIR-07: original r27 RED commented for build-green; stub below replaces*/
+/// Before the fix: `if (bals[i] == 0) continue` and `if (r == 0) continue`
+/// skipped drained/zero-ratio tokens, letting them disappear from the
+/// invariant and enabling drain theft.
+/// After the fix: zero-ratio tokens are kept in the average; r=0 drives
+/// ln to -2*BASIS, pulling pade_num <= 0, so konstant returns 0.
 BOOST_AUTO_TEST_CASE( r27_konstant_zero_balance_terminates )
 {
-   BOOST_CHECK( true );
+   try {
+      const fc::uint128_t scale( 1 );
+
+      // Single drained token: balance 0, genesis > 0 → r = 0 → ln = -2*BASIS
+      // → avg = -2*BASIS → pade_num = 0 → konstant = 0 (pool terminated)
+      vector<share_type> bals = { share_type( 0 ) };
+      vector<share_type> gens = { share_type( 1000 ) };
+
+      fc::uint128_t k = r_compute_konstant( bals, gens, 1, scale, {} );
+      BOOST_CHECK_EQUAL( k, fc::uint128_t( 0 ) );
+
+      // Same token with positive balance → konstant > 0
+      bals = { share_type( 1000 ) };
+      gens = { share_type( 1000 ) };
+      k = r_compute_konstant( bals, gens, 1, scale, {} );
+      BOOST_CHECK( k > 0 );
+
+      // Multi-token: one near-zero, one drained → both ln = -2*BASIS,
+      // avg = -2*BASIS, pade_num = 0 → konstant = 0
+      bals = { share_type( 1 ), share_type( 0 ) };
+      gens = { share_type( 1000000 ), share_type( 1000 ) };
+      const vector<uint64_t> weights = { 50, 50 };
+      k = r_compute_konstant( bals, gens, 2, scale, weights );
+      BOOST_CHECK_EQUAL( k, fc::uint128_t( 0 ) );
+   } catch (fc::exception& e) {
+      edump((e.to_detail_string()));
+      throw;
+   }
 }
 }

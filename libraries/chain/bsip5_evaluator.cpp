@@ -54,7 +54,13 @@ void_result bsip5_payout_evaluator::do_evaluate(const bsip5_payout_operation& o)
 {
    FC_ASSERT( HARDFORK_BSIP5_PASSED( db().head_block_time() ),
               "BSIP-5 hardfork has not passed" );
-   // Gas guard: a non-zero gas_price_wad must be sufficient; 0 bypasses (permissionless sweep).
+   // REPAIR-31 (Important, BSIP5-16-V): Gas guard enforcement. A non-zero
+   // gas_price_wad is required to pay for the compute-intensive reward
+   // sweep. Zero gas_price_wad previously allowed a permissionless sweep
+   // with no compute cost (comment-only guard). The caller must pay for
+   // the distribute_bsip5_rewards() sweep in do_apply.
+   FC_ASSERT( o.gas_price_wad > 0,
+              "Payout sweep requires non-zero gas_price_wad; zero bypasses the gas guard" );
    return void_result();
 }
 

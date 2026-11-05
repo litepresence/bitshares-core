@@ -135,6 +135,20 @@ void_result oracle_create_evaluator::do_evaluate( const oracle_create_operation&
    FC_ASSERT( HARDFORK_ORACLE_PASSED( d.head_block_time() ),
               "Not allowed until the oracle hardfork" );
 
+   // REPAIR-37 (Important, H1-18-N): Committee gate back-port from H2 pair_freeze.
+   // Oracle creation establishes a price feed source; only elected committee members
+   // may create oracles, preventing unbonded parties from inserting false price feeds.
+   const auto& member_idx = d.get_index_type<committee_member_index>().indices().get<by_account>();
+   const auto member_itr = member_idx.find( op.owner );
+   FC_ASSERT( member_itr != member_idx.end(),
+              "Oracle creator ${a} is not a seated committee member", ("a", op.owner) );
+   {
+      const auto& elected = d.get_global_properties().active_committee_members;
+      FC_ASSERT( std::find( elected.begin(), elected.end(), member_itr->get_id() ) != elected.end(),
+                 "Oracle creator ${a} is registered but not on the elected committee",
+                 ("a", op.owner) );
+   }
+
    op.base(d);    // throws if the reference asset does not exist
    op.quote(d);
    check_producers_exist( d, op.options );

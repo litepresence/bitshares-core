@@ -757,8 +757,13 @@ generic_exchange_operation_result reciprocity_pool_swap_evaluator::do_apply(
       FC_ASSERT( cached_promoter_shares[i] <= std::numeric_limits<int64_t>::max(), "Promoter share overflow int64" );
         int64_t tithed_i = post_bals[i].value + static_cast<int64_t>( cached_lp_shares[i] )
                          - static_cast<int64_t>( cached_founder_shares[i] ) - static_cast<int64_t>( cached_promoter_shares[i] );
-        // ponytail: clamp to 0 — edge case when fee floor (3) makes fs+ps > lp_share for a single-output token
-        if( tithed_i < 0 ) tithed_i = 0;
+        // REPAIR-45 (Important, BSIP4-23-N-V): Tithed clamp-to-zero conservation hole.
+        // Clamping negative tithed balances to zero silently discards value,
+        // breaking the conservation invariant. Fail-closed: refuse swaps where
+        // founder + promoter fees exceed the available balance + LP share.
+        FC_ASSERT( tithed_i >= 0,
+                   "Tithed balance negative for token ${i}: founder+promoter fees exceed balance+LP share",
+                   ("i", i) );
         tithed_bals[i] = share_type( tithed_i );
        final_tokens_out[i] = share_type(
              std::max<int64_t>( 0, tokens_out[i].value - static_cast<int64_t>( cached_lp_shares[i] ) ) );

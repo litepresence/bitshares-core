@@ -179,6 +179,7 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       fc::time_point_sec    stealth_activated_time;
       fc::time_point_sec    v1_sunset_time;
       fc::time_point_sec    turnstile_g2_time;
+      fc::time_point_sec    v2_sunset_time; ///< V2 sunset: forces migration to V3 (ViewKey channel)
       /// Live freeze votes, one per member, bounded by committee size.
       /// flat_map is ORDERED (consensus law: no unordered_* anywhere).
       flat_map<account_id_type, stealth_freeze_vote> freeze_votes;

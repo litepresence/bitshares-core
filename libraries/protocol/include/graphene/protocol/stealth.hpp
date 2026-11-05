@@ -209,6 +209,11 @@ constexpr uint8_t GRAPHENE_STEALTH_RING_SCHEME_V1 = 1;
 /// = [activation, sunset]: both nullifier sets enforced throughout.
 constexpr uint32_t GRAPHENE_STEALTH_V1_LIFETIME_SEC = 31536000;
 
+/// V2 lifetime after activation (proposal: 2 years). At sunset V2 spends
+/// become spend-only-via-turnstile; only V3 rings survive. This forces
+/// migration to the ViewKey two-key composite binding channel (REPAIR-12/20).
+constexpr uint32_t GRAPHENE_STEALTH_V2_LIFETIME_SEC = 63072000;
+
 /// Committee freeze-backup quorum (proposal): THREE distinct
 /// committee-member votes required to (un)halt blind ops (was 2 — a 2-quorum
 /// lets any two colluding members halt alone; 3 forces a wider conspiracy).

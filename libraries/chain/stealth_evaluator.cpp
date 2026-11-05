@@ -207,6 +207,17 @@ fc::time_point_sec stealth_v1_sunset_time( const database& db )
                               + GRAPHENE_STEALTH_V1_LIFETIME_SEC );
 }
 
+fc::time_point_sec stealth_v2_sunset_time( const database& db )
+{
+   if( !stealth_passed( db ) )
+      return fc::time_point_sec();
+   const auto* s = find_stealth_status( db );
+   if( s && s->v2_sunset_time != fc::time_point_sec() )
+      return s->v2_sunset_time;
+   return fc::time_point_sec( HARDFORK_STEALTH_TIME.sec_since_epoch()
+                              + GRAPHENE_STEALTH_V2_LIFETIME_SEC );
+}
+
 fc::time_point_sec stealth_turnstile_g2_time( const database& db )
 {
    // disposition (audit "recorded but no gate"): turnstile_g2_time IS
@@ -258,6 +269,7 @@ void stealth_maybe_record_activation( database& db )
       o.stealth_activated_time = activated;
       o.v1_sunset_time = sunset;
       o.turnstile_g2_time = sunset;
+      o.v2_sunset_time = activated.sec_since_epoch() + GRAPHENE_STEALTH_V2_LIFETIME_SEC;
       o.blinded_supply_shadow = seed;
       o.activation_k39_fee = k39.fee;
       o.activation_k39_ppo = k39.price_per_output;
@@ -675,6 +687,12 @@ void_result stealth_transfer_evaluator::do_evaluate( const stealth_transfer_oper
       FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
                  o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
                  "V1 stealth spends are frozen past sunset (use turnstile re-proof)" );
+   // REPAIR-51 (Important, G1-36-N): V2 sunset — after V2 sunset, only V3
+   // rings survive (ViewKey two-key composite binding channel). Forces
+   // migration from V2 to V3 so all spends carry the ViewKey defense.
+   if( d.head_block_time() >= stealth_v2_sunset_time( d ) )
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
+                 "V2 stealth spends are frozen past sunset (use turnstile re-proof to V3)" );
 
    // Pool floor: ring spends need decoys; thin-pool rings mark the spender.
    FC_ASSERT( stealth_pool_depth( d, o.asset_id ) >= GRAPHENE_STEALTH_BLIND_POOL_FLOOR,
@@ -2074,6 +2092,11 @@ void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explici
    if( d.head_block_time() >= stealth_v1_sunset_time( d ) )
       FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2,
                  "V1 explicit spends are frozen past sunset (use turnstile re-proof)" );
+   // REPAIR-51 (Important, G1-36-N): V2 sunset — after V2 sunset, only V3
+   // explicit spends survive (ViewKey two-key composite binding channel).
+   if( d.head_block_time() >= stealth_v2_sunset_time( d ) )
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
+                 "V2 explicit spends are frozen past sunset (use turnstile re-proof to V3)" );
 
    const auto& bbi = d.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
    const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();
@@ -2385,6 +2408,11 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
       FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V2 ||
                  o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
                  "V1 stealth pool swaps are frozen past sunset (use turnstile re-proof)" );
+   // REPAIR-51 (Important, G1-36-N): V2 sunset — after V2 sunset, only V3
+   // pool swaps survive (ViewKey two-key composite binding channel).
+   if( d.head_block_time() >= stealth_v2_sunset_time( d ) )
+      FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
+                 "V2 stealth pool swaps are frozen past sunset (use turnstile re-proof to V3)" );
 
    _pool = &o.pool(d);
    FC_ASSERT( _pool->balance_a > 0 && _pool->balance_b > 0, "The pool has not been initialized" );

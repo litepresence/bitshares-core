@@ -399,7 +399,9 @@ share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
  * under 70%. Recorded, not thrown, at runtime (see alarms.joint_cap_breach):
  * routing must never brick market fees on H2's numbers.
  */
-bool stealth_joint_fee_within_cap( uint32_t parity_share_bps, uint32_t h2_diversion_bps );
+bool stealth_joint_fee_within_cap( uint32_t parity_share_bps,
+                                   uint32_t h2_diversion_bps,
+                                   uint32_t g2_routed_bps );
 
 /**
  * Per-interval maintenance (called from perform_chain_maintenance,

@@ -5698,11 +5698,11 @@ BOOST_AUTO_TEST_CASE( parity_joint_cap_with_h2 )
    transfer( account_id_type()(db), dan, core.amount( 1000000 ) );
    // Pure accounting (BSIP-1 §7b: <=70% shared denominator, proposals).
    BOOST_REQUIRE_EQUAL( GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS, 7000u );
-   BOOST_CHECK( stealth_joint_fee_within_cap( GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, 0 ) );
-   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 2000 ) ); // H2 diverts 20%
-   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 6500 ) ); // boundary holds
-   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 6501 ) ); // breach
-   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 7000 ) );
+   BOOST_CHECK( stealth_joint_fee_within_cap( GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, 0, 0 ) );
+   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 2000, 0 ) ); // H2 diverts 20%
+   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 6500, 0 ) ); // boundary holds
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 6501, 0 ) ); // breach
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 7000, 0 ) );
    // Recorded H2 diversion surfaces as an alarm, never as a market-fee throw.
    auto set_h2 = [&]( uint32_t bps ) {
       db.modify( *db.get_index_type<stealth_status_index>().indices().begin(),
@@ -5745,14 +5745,14 @@ BOOST_AUTO_TEST_CASE( parity_joint_cap_with_h2 )
 BOOST_AUTO_TEST_CASE( parity_joint_cap_both_legs_over_cap )
 { try {
    // Pure joint semantics: the sum binds, not the legs.
-   BOOST_CHECK( stealth_joint_fee_within_cap( 0, 0 ) );
-   BOOST_CHECK( stealth_joint_fee_within_cap( 7000, 0 ) ); // boundary holds
-   BOOST_CHECK( stealth_joint_fee_within_cap( 0, 7000 ) ); // boundary holds
-   BOOST_CHECK( !stealth_joint_fee_within_cap( 7001, 0 ) );
-   BOOST_CHECK( !stealth_joint_fee_within_cap( 0, 7001 ) );
-   BOOST_CHECK( !stealth_joint_fee_within_cap( 3500, 3501 ) ); // both under, joint over
-   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 6800 ) ); // production shape
-   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 6500 ) ); // production holds
+   BOOST_CHECK( stealth_joint_fee_within_cap( 0, 0, 0 ) );
+   BOOST_CHECK( stealth_joint_fee_within_cap( 7000, 0, 0 ) ); // boundary holds
+   BOOST_CHECK( stealth_joint_fee_within_cap( 0, 7000, 0 ) ); // boundary holds
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 7001, 0, 0 ) );
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 0, 7001, 0 ) );
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 3500, 3501, 0 ) ); // both under, joint over
+   BOOST_CHECK( !stealth_joint_fee_within_cap( 500, 6800, 0 ) ); // production shape
+   BOOST_CHECK( stealth_joint_fee_within_cap( 500, 6500, 0 ) ); // production holds
 
    generate_blocks( HARDFORK_STEALTH_TIME );
    generate_block();

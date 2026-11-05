@@ -1749,9 +1749,12 @@ share_type stealth_parity_route_fee( database& db, asset_id_type recv_asset,
    return routed;
 }
 
-bool stealth_joint_fee_within_cap( uint32_t parity_share_bps, uint32_t h2_diversion_bps )
+bool stealth_joint_fee_within_cap( uint32_t parity_share_bps,
+                                   uint32_t h2_diversion_bps,
+                                   uint32_t g2_routed_bps )
 {
-   uint64_t joint = (uint64_t)parity_share_bps + (uint64_t)h2_diversion_bps;
+   uint64_t joint = (uint64_t)parity_share_bps + (uint64_t)h2_diversion_bps +
+                    (uint64_t)g2_routed_bps;
    return joint <= (uint64_t)GRAPHENE_STEALTH_JOINT_FEE_CAP_BPS;
 }
 
@@ -1837,6 +1840,23 @@ void stealth_parity_maintenance( database& db )
          else
             citr->second += kv.second;
       }
+      // MG-04: G2's routed fee volume as bps on the shared joint-cap
+      // denominator, computed against the interval's routed volume before it
+      // is cleared below. Diverted volume is <= total fees, so this upper-
+      // bounds G2's true share (conservative for an alarm; never a halt).
+      uint64_t total_routed = 0;
+      for( const auto& kv : o.interval_routed )
+         total_routed += kv.second.value;
+      uint32_t g2_routed_bps = 0;
+      if( total_routed > 0 && o.g2_routed_interval.value > 0 )
+      {
+         fc::uint128_t bps( (uint64_t)o.g2_routed_interval.value );
+         bps *= 10000;
+         bps /= total_routed;
+         g2_routed_bps = ( bps > 0xFFFFFFFFu ) ? 0xFFFFFFFFu : (uint32_t)bps;
+      }
+      o.g2_routed_interval = share_type( 0 ); // per-interval counter: reset
+
       o.interval_routed.clear();
       o.interval_granted.clear();
       o.alarms.burn_rate_pct = worst;
@@ -1885,7 +1905,8 @@ void stealth_parity_maintenance( database& db )
       // Joint ceiling: parity share + recorded H2 diversion on the shared
       // denominator. Signal only (routing must never brick on H2's numbers).
       o.alarms.joint_cap_breach = !stealth_joint_fee_within_cap(
-            GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, o.h2_diversion_bps );
+            GRAPHENE_STEALTH_PARITY_FEE_SHARE_BPS, o.h2_diversion_bps,
+            g2_routed_bps );
    } );
 }
 
@@ -2317,6 +2338,7 @@ void g2_route_market_fee_to_parity( database& db, asset_id_type recv_asset,
          o.interval_routed[ recv_asset ] = issuer_fee;
       else
          ritr->second += issuer_fee;
+      o.g2_routed_interval += issuer_fee;
    } );
 }
 

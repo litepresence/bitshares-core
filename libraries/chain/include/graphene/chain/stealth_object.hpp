@@ -200,9 +200,10 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// indexed metadata-bearing balance counts, including nullified ones
       /// (they stay decoy-eligible, so the set grows with usage). Ring
       /// spends add outputs and remove nothing; explicit spends (op41/op108)
-      /// decrement. Historical field name `unspent_blind_count` retained
-      /// (object reflection + API surface); the misnomer is documented,
-      /// not renamed.
+      /// decrement. Despite the historical field name `unspent_blind_count`,
+      /// this is the LIVE set (all metadata-bearing balances), not a strict
+      /// unspent count. Retained for object reflection / API surface
+      /// compatibility; not renamed to avoid breaking wire reflection.
       /// Grandfathered (pre-fork, metadata absent) balances never count.
       /// Zero entries are removed; flat_map is ORDERED.
       flat_map<asset_id_type, uint32_t> unspent_blind_count;
@@ -245,6 +246,12 @@ class stealth_status_object : public graphene::db::abstract_object<stealth_statu
       /// The joint ceiling is enforced as accounting + alarm, never as a
       /// market-fee throw (routing must not brick on H2's numbers).
       uint32_t              h2_diversion_bps = 0;
+      /// G2 op109 market-fee routed this interval (MG-04): the issuer-fee
+      /// amount accumulated by g2_route_market_fee_to_parity, expressed as
+      /// basis points on the shared joint-cap denominator at maintenance.
+      /// Scalar, one shared denominator with parity + h2. Reset each interval
+      /// after the joint-cap alarm is computed so it never grows unbounded.
+      share_type            g2_routed_interval = share_type( 0 );
       /// Per-interval routed/granted flow per asset (reset every
       /// maintenance after the burn ratio is computed). Flow stats, not
       /// balances: never part of supply accounting. Zero entries removed.

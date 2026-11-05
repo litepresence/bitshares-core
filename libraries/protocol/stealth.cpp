@@ -99,6 +99,11 @@ void stealth_transfer_operation::validate()const
    {
       FC_ASSERT( !out.range_proof.empty(), "range proof required" );
       FC_ASSERT( out.range_proof.size() <= 8192, "range proof too large" );
+      // REPAIR-50 (Important): bound encrypted_memo to prevent block-size
+      // griefing through arbitrarily large recognition memo ciphertexts.
+      if( out.recognition.valid() )
+         FC_ASSERT( out.recognition->encrypted_memo.size() <= 1024,
+                    "encrypted_memo too large (max 1024 bytes)" );
       FC_ASSERT( !out.owner.is_impossible() );
    }
    if( proof_version == GRAPHENE_STEALTH_PROOF_V1 )
@@ -261,6 +266,11 @@ void stealth_pool_exchange_operation::validate()const
    // the relay bound is exact, not the 756-byte loose cap.
    FC_ASSERT( output.range_proof.size() == 592, "pool swap output proof must be 592 bytes (BP+ m=1)" );
    FC_ASSERT( !output.owner.is_impossible(), "pool swap output owner is impossible" );
+   // REPAIR-50 (Important): bound encrypted_memo to prevent block-size
+   // griefing through arbitrarily large recognition memo ciphertexts.
+   if( output.recognition.valid() )
+      FC_ASSERT( output.recognition->encrypted_memo.size() <= 1024,
+                 "encrypted_memo too large (max 1024 bytes)" );
    // Schnorr value-pin (T ‖ s): 33B compressed point + 32B scalar = 65 bytes
    // (design §2/§3; the 64B text was corrected per the G2-2 brief).
    FC_ASSERT( value_pin.size() == 65, "pool swap value_pin must be 65 bytes" );

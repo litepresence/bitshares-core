@@ -2425,6 +2425,18 @@ void_result stealth_pool_exchange_evaluator::do_evaluate( const stealth_pool_exc
    FC_ASSERT( bbi.find( o.output.commitment ) == bbi.end(),
               "Stealth output commitment already exists" );
    for( const auto& a : o.output.owner.account_auths ) a.first( d );
+   // REPAIR-49 (Important, G1-15a-V): op109 asset-policy parity with op104.
+   // For V3, the output owner must be single-key so that spend_auth cross-checks
+   // (REPAIR-12/20) can bind member_owner_keys[i] to a real on-chain owner key.
+   // Without this, a V3 op109 output with a multi-key owner would orphan the
+   // balance because spend_auth cannot bind to it.
+   if( o.proof_version >= protocol::GRAPHENE_STEALTH_PROOF_V3 )
+   {
+      FC_ASSERT( o.output.owner.num_auths() == 1 &&
+                 o.output.owner.weight_threshold == 1 &&
+                 o.output.owner.key_auths.size() == 1,
+                  "V3 stealth pool swap output owner must be single-key" );
+   }
 
    // Every member must be a live blinded balance of the INPUT asset carrying
    // post-fork creation metadata (grandfathered outputs are never decoys).

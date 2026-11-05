@@ -2097,6 +2097,12 @@ void_result stealth_explicit_spend_evaluator::do_evaluate( const stealth_explici
    if( d.head_block_time() >= stealth_v2_sunset_time( d ) )
       FC_ASSERT( o.proof_version == GRAPHENE_STEALTH_PROOF_V3,
                  "V2 explicit spends are frozen past sunset (use turnstile re-proof to V3)" );
+   // REPAIR-57 (Important, G1-31-N-V): op108/104 asset-policy parity — pool
+   // floor check. op104 checks pool depth for the transfer asset; op108 must
+   // check it for the spent asset (o.asset_id) so thin-pool rings can't mark
+   // the spender.
+   FC_ASSERT( stealth_pool_depth( d, o.asset_id ) >= GRAPHENE_STEALTH_BLIND_POOL_FLOOR,
+              "Blind pool below floor: stealth spends halted (availability yields to privacy)" );
 
    const auto& bbi = d.get_index_type<blinded_balance_index>().indices().get<by_commitment>();
    const auto& nul = d.get_index_type<stealth_nullifier_index>().indices().get<by_nullifier_image>();

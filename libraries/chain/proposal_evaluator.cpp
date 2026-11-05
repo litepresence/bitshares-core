@@ -197,6 +197,20 @@ struct proposal_operation_hardfork_visitor
          FC_ASSERT(!op.new_parameters.current_fees->exists<liquidity_pool_exchange_operation>(),
                    "Unable to define fees for liquidity pool operations prior to the LP hardfork");
       }
+      if (!HARDFORK_BSIP4_PASSED(block_time)) {
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reciprocity_pool_create_operation>(),
+                   "Unable to define fees for reciprocity pool create prior to the BSIP-4 hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reciprocity_pool_add_liquidity_operation>(),
+                   "Unable to define fees for reciprocity pool add liquidity prior to the BSIP-4 hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reciprocity_pool_remove_liquidity_operation>(),
+                   "Unable to define fees for reciprocity pool remove liquidity prior to the BSIP-4 hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reciprocity_pool_swap_operation>(),
+                   "Unable to define fees for reciprocity pool swap prior to the BSIP-4 hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reciprocity_claim_founder_royalty_operation>(),
+                   "Unable to define fees for reciprocity claim founder royalty prior to the BSIP-4 hardfork");
+         FC_ASSERT(!op.new_parameters.current_fees->exists<reciprocity_claim_promoter_royalty_operation>(),
+                   "Unable to define fees for reciprocity claim promoter royalty prior to the BSIP-4 hardfork");
+      }
       if (!HARDFORK_CORE_2351_PASSED(block_time)) {
          FC_ASSERT(!op.new_parameters.current_fees->exists<samet_fund_create_operation>(),
                    "Unable to define fees for samet fund operations prior to the core-2351 hardfork");
@@ -321,6 +335,26 @@ struct proposal_operation_hardfork_visitor
    // Note: credit_deal_expired_operation is a virtual operation thus no need to add code here
    void operator()(const graphene::chain::credit_deal_update_operation&) const {
       FC_ASSERT( HARDFORK_CORE_2595_PASSED(block_time), "Not allowed until the core-2595 hardfork" );
+   }
+
+   // BSIP-4 reciprocity ops
+   void operator()(const graphene::chain::reciprocity_pool_create_operation&) const {
+      FC_ASSERT( HARDFORK_BSIP4_PASSED(block_time), "Not allowed until the BSIP-4 hardfork" );
+   }
+   void operator()(const graphene::chain::reciprocity_pool_add_liquidity_operation&) const {
+      FC_ASSERT( HARDFORK_BSIP4_PASSED(block_time), "Not allowed until the BSIP-4 hardfork" );
+   }
+   void operator()(const graphene::chain::reciprocity_pool_remove_liquidity_operation&) const {
+      FC_ASSERT( HARDFORK_BSIP4_PASSED(block_time), "Not allowed until the BSIP-4 hardfork" );
+   }
+   void operator()(const graphene::chain::reciprocity_pool_swap_operation&) const {
+      FC_ASSERT( HARDFORK_BSIP4_PASSED(block_time), "Not allowed until the BSIP-4 hardfork" );
+   }
+   void operator()(const graphene::chain::reciprocity_claim_founder_royalty_operation&) const {
+      FC_ASSERT( HARDFORK_BSIP4_PASSED(block_time), "Not allowed until the BSIP-4 hardfork" );
+   }
+   void operator()(const graphene::chain::reciprocity_claim_promoter_royalty_operation&) const {
+      FC_ASSERT( HARDFORK_BSIP4_PASSED(block_time), "Not allowed until the BSIP-4 hardfork" );
    }
 
    // loop and self visit in proposals

@@ -12,7 +12,7 @@
 
 #include <graphene/protocol/reciprocity_operations.hpp>
 
-#include <cmath>
+#include <limits>
 
 namespace graphene { namespace chain {
 
@@ -175,7 +175,14 @@ static uint64_t r_compute_duty_weighted(
     for (uint64_t i = 0; i < n; i++) {
         uint64_t s = use_pre ? pre[i] : post[i];
         uint64_t l = use_pre ? post[i] : pre[i];
-        if (l > 0) ratios[i] = (uint64_t)(r_safe_mul(uint128_t(s), uint128_t(BASIS)) / l);
+        if (l > 0) {
+            uint128_t ratio_val = r_safe_mul(uint128_t(s), uint128_t(BASIS)) / l;
+            // REPAIR-30 (Important, BSIP4-26-N): guard uint128→uint64 narrowing
+            // to prevent truncation when s*BASIS/l exceeds uint64_t range.
+            FC_ASSERT( ratio_val <= uint128_t( std::numeric_limits<uint64_t>::max() ),
+                       "Ratio exceeds uint64_t range; narrowing would truncate" );
+            ratios[i] = static_cast<uint64_t>( ratio_val );
+        }
     }
     uint64_t sum_total = 0;
     for (uint64_t i = 0; i < n; i++) {

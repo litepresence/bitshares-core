@@ -693,13 +693,17 @@ void_result challenge_vote_evaluator::do_evaluate( const challenge_vote_operatio
 void_result challenge_vote_evaluator::do_apply( const challenge_vote_operation& op ) const
 { try {
    database& d = db();
-   // GOV-R17-02: the deciding set is the ELECTED set, not the
-   // unpruned registry. Registration is permissionless (op-29, LTM only) and
-   // registry rows are never pruned; GOV-R9-01 already refuses votes from
-   // non-elected rows, but with the registry still in the denominator K sybil
-   // registrations inflate supermajority_of(N) and the quorum bar so the
-   // seated members cannot resolve anything -- the reverse side of the same
-   // attacker-deniable vote path. Fail-closed preserved: the elected set is
+   // GOV-R17-02 / GOV18-03: the deciding set is the ELECTED set
+   // (active_committee_members), not the unpruned permissionless registry.
+   // Registration is permissionless (op-29, LTM only) and registry rows are
+   // never pruned, so retired/unseated members' rows are deliberately EXCLUDED
+   // from the quorum/supermajority denominator (GOV18-03 accepted semantics:
+   // denominator = current elected members only). Counting them would let K
+   // sybil/retired registrations inflate supermajority_of(N) and the quorum
+   // bar until the seated members cannot resolve anything -- the
+   // attacker-deniable denominator-inflation path that vote-capture pricing
+   // (AGENTS.md settled decisions) prices out. GOV-R9-01 already refuses
+   // votes from non-elected rows. Fail-closed preserved: the elected set is
    // non-empty from genesis (the assert below holds).
    const uint64_t deciding_set =
          d.get_global_properties().active_committee_members.size();

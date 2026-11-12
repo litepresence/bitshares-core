@@ -223,6 +223,9 @@ FC_REFLECT_DERIVED_NO_TYPENAME( graphene::chain::pamm_pool_object, (graphene::db
                     (tank_balance)
                     (share_supply)
                     (high_water_mark)
+                    (fee_pool_balance)
+                    (last_withdrawal_time)
+                    (dissolved)
                     (nav_history)
                   )
 

@@ -21,6 +21,7 @@ class pamm_pool_object : public abstract_object<pamm_pool_object, protocol_ids, 
       uint64_t        high_water_mark = 0; // NAV scaled 1e8
       share_type      fee_pool_balance = 0; // Manager prepaid fee pool in core asset (BTS)
       fc::time_point_sec last_withdrawal_time; // P8-01: enforced via delay_seconds in withdraw
+      bool            dissolved = false; // Pool is wound down; no new deposits or withdrawals
 
       struct nav_entry { uint32_t day; uint64_t nav_num; uint64_t nav_den; };
       std::vector<nav_entry> nav_history; // capped at 365
